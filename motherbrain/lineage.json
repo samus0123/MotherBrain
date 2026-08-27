@@ -1,0 +1,84 @@
+{
+  "releases": [
+    {
+      "version": "0.1.0",
+      "note": "seed",
+      "architecture": {
+        "d_model": 256,
+        "n_layers": 6,
+        "n_heads": 8,
+        "d_ff": 704,
+        "vocab_size": 259,
+        "context_length": 1024,
+        "gated_mlp": true,
+        "tie_embeddings": true,
+        "learned_positions": false
+      },
+      "parameters": 4886528
+    },
+    {
+      "version": "0.2.0",
+      "note": "wider residual stream, one more layer",
+      "architecture": {
+        "d_model": 320,
+        "n_layers": 7,
+        "n_heads": 10,
+        "d_ff": 896,
+        "vocab_size": 259,
+        "context_length": 1024,
+        "gated_mlp": true,
+        "tie_embeddings": true,
+        "learned_positions": false
+      },
+      "parameters": 8976000
+    },
+    {
+      "version": "0.2.1",
+      "note": "roomier MLP",
+      "architecture": {
+        "d_model": 320,
+        "n_layers": 7,
+        "n_heads": 10,
+        "d_ff": 960,
+        "vocab_size": 259,
+        "context_length": 1024,
+        "gated_mlp": true,
+        "tie_embeddings": true,
+        "learned_positions": false
+      },
+      "parameters": 9406080
+    },
+    {
+      "version": "0.3.0",
+      "note": "wider again",
+      "architecture": {
+        "d_model": 384,
+        "n_layers": 8,
+        "n_heads": 12,
+        "d_ff": 1152,
+        "vocab_size": 259,
+        "context_length": 1024,
+        "gated_mlp": true,
+        "tie_embeddings": true,
+        "learned_positions": false
+      },
+      "parameters": 15441408
+    },
+    {
+      "version": "1.0.0",
+      "note": "first real scale-up: double depth and context",
+      "architecture": {
+        "d_model": 576,
+        "n_layers": 16,
+        "n_heads": 18,
+        "d_ff": 1728,
+        "vocab_size": 259,
+        "context_length": 2048,
+        "gated_mlp": true,
+        "tie_embeddings": true,
+        "learned_positions": false
+      },
+      "parameters": 69177600
+    }
+  ]
+}

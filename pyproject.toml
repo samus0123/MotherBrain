@@ -1,0 +1,29 @@
+[project]
+name = "motherbrain"
+version = "0.1.0"
+description = "A language model that grows with every version."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "tensorflow-cpu>=2.16",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+motherbrain = "motherbrain.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["motherbrain*"]
+
+[tool.setuptools.package-data]
+motherbrain = ["lineage.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
