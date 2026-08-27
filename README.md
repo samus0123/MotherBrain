@@ -14,6 +14,7 @@ mb patch      learn new information           -> v1, v2, v3 ...
 mb versions   the lineage
 mb checkout   go back to any earlier version
 mb chat       talk to it locally
+mb cert       make a TLS certificate
 mb serve      expose it to every IDE you own
 ```
 
@@ -30,7 +31,7 @@ python -m motherbrain.cli feed ./my-notes ./src        # anything textual
 python -m motherbrain.cli prepare --vocab-size 4096
 python -m motherbrain.cli train --preset micro --steps 400 --batch-size 16 --seq-len 256
 python -m motherbrain.cli chat --prompt "hello"
-python -m motherbrain.cli serve --host 0.0.0.0
+python -m motherbrain.cli serve            # 127.0.0.1 by default
 ```
 
 ## How do I feed it new information?
@@ -166,6 +167,71 @@ Editors cancel in-flight completions on nearly every keystroke, so the server
 never holds a lock across a response; abandoned streams cannot wedge it, and
 concurrent requests are served in parallel.
 
+## Serving over HTTPS
+
+Generate a certificate and serve TLS. Anything fed over a plaintext connection
+crosses the network in the clear — including the API key — so use HTTPS for
+anything that leaves the machine.
+
+```bash
+python -m motherbrain.cli cert --host your-hostname-or-ip
+python -m motherbrain.cli serve --host 0.0.0.0 \
+  --tls-cert certs/server.crt --tls-key certs/server.key \
+  --api-key "$(python -c 'import secrets;print(secrets.token_urlsafe(32))')" \
+  --allow-path ./corpus
+```
+
+`mb cert` writes a self-signed pair (key mode 600) and prints its SHA-256 so
+clients can pin it. A self-signed certificate encrypts the link but does not
+prove identity: clients will warn, and `curl` needs `-k` or `--cacert`. For a
+public hostname use a real certificate (Let's Encrypt) or put MotherBrain
+behind a reverse proxy that terminates TLS.
+
+Point IDEs at `https://host:8443/v1` rather than `http://`.
+
+## Security
+
+There is no such thing as 100% secure, and any component that claims it is
+lying to you. What MotherBrain does is close the holes this design actually
+has, and fail closed rather than open:
+
+| Control | Behaviour |
+|---|---|
+| Path ingestion | `/feed` accepts a filesystem path only inside `--allow-path` roots. **Off entirely by default.** |
+| Credential files | `.ssh`, `.env`, `.netrc`, `*.key`, `*.pem` and friends are refused even inside an allowed root. |
+| Authentication | `--api-key`, compared in constant time, accepted as `X-API-Key` or `Authorization: Bearer`. |
+| Public bind | Binding a non-loopback interface **without** a key is refused outright unless you pass `--insecure`. |
+| Default bind | `127.0.0.1`. Exposing the server is a deliberate act. |
+| Transport | `--tls-cert`/`--tls-key`; a plaintext public bind warns loudly. |
+| Rate limiting | Token bucket per client address, `--rate-limit` (default 120/min). |
+| Body size | Requests over 8MB rejected with 413; `/feed` text capped separately. |
+| Headers | `nosniff`, `DENY` framing, `no-referrer`, `no-store`. |
+| CORS | Credentials never accepted cross-origin; restrict with `--allow-origin`. |
+| Secrets in git | `certs/`, `*.key`, `*.pem` are gitignored. |
+
+The sharpest edge is the first row, and it is worth being explicit about why.
+`/feed` reads files into the corpus; the corpus is training data; training data
+can be recovered through generation. An unrestricted path parameter is
+therefore not merely a file read — it is a file read whose output can be
+extracted later by anyone allowed to prompt the model. That is why path
+ingestion is disabled by default and confined to an allowlist when enabled.
+
+What is still on you:
+
+* **Trust the weights you load.** `torch.load` on a base checkpoint uses
+  Python pickle and can execute code. Patches load with `weights_only=True`;
+  checkpoints do not, because they carry config objects. Only load checkpoints
+  you produced or trust.
+* **Anything you feed can come back out.** Do not feed secrets to a model that
+  other people may prompt.
+* **A self-signed certificate is not identity.** Pin the fingerprint, or use a
+  real CA.
+* **Auto-patch means untrusted input becomes training data.** With `/feed` open
+  to a network, whoever can reach it can steer the model. Keep the API key
+  secret, or run with `--no-auto-patch` and patch deliberately.
+* Rate limiting is per process and in memory; it is not a substitute for a
+  real gateway if you are genuinely exposed to the internet.
+
 ## Running it on Termux (Android)
 
 PyTorch publishes no Termux-native wheels, so install into a proot distro,
@@ -266,8 +332,9 @@ motherbrain/
   patches.py     LoRA patches, replay, sequential versions
   server.py      HTTP API, auto-patcher, web UI
   api_compat.py  OpenAI and Ollama protocol surfaces
+  security.py    path confinement, auth, rate limiting, exposure checks
   cli.py         the mb command line
-tests/           39 tests
+tests/           49 tests
 .github/workflows/apply-information.yml   the automatic learning pipeline
 ```
 

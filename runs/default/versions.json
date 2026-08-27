@@ -1,6 +1,6 @@
 {
-  "current": 1,
-  "head": 1,
+  "current": 3,
+  "head": 3,
   "base_docs": 170,
   "versions": [
     {
@@ -23,6 +23,46 @@
         "corpus/inbox/motherbrain-facts.md"
       ],
       "note": "operating notes"
+    },
+    {
+      "version": 2,
+      "patch_id": "859de298",
+      "parent": 1,
+      "created_at": 1787861657.7931848,
+      "doc_start": 172,
+      "doc_end": 173,
+      "n_documents": 1,
+      "n_chars": 176,
+      "n_tokens": 66,
+      "steps": 100,
+      "rank": 8,
+      "trainable_params": 224256,
+      "loss_before": 6.2841,
+      "loss_after": 1.0311,
+      "sources": [
+        "demo"
+      ],
+      "note": "auto"
+    },
+    {
+      "version": 3,
+      "patch_id": "989d8cdc",
+      "parent": 2,
+      "created_at": 1787861844.6657834,
+      "doc_start": 173,
+      "doc_end": 174,
+      "n_documents": 1,
+      "n_chars": 89,
+      "n_tokens": 34,
+      "steps": 100,
+      "rank": 8,
+      "trainable_params": 224256,
+      "loss_before": 5.3504,
+      "loss_after": 0.7473,
+      "sources": [
+        "tls-demo"
+      ],
+      "note": "auto"
     }
   ]
 }

@@ -17,3 +17,8 @@ runs/**/history.json
 !runs/**/patches/
 !runs/**/patches/*.pt
 !runs/**/versions.json
+
+# TLS material: private keys must never be committed.
+certs/
+*.key
+*.pem

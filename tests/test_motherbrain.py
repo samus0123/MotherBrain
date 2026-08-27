@@ -321,3 +321,129 @@ def test_versions_are_sequential_and_checkout_validates(tmp_path):
     assert store.current == 1 and store.head == 2   # checkout does not lose v2
     with pytest.raises(ValueError):
         store.set_current(99)
+
+
+# ---- security -------------------------------------------------------------
+
+
+def test_feed_path_is_confined_to_the_allowlist(tmp_path):
+    """/feed with an unrestricted path is an arbitrary-file-read primitive.
+
+    Whatever it reads lands in the corpus, and whatever is in the corpus can be
+    extracted again through generation, so this is the sharpest edge in the API.
+    """
+    from fastapi import HTTPException
+
+    from motherbrain.security import safe_resolve
+
+    root = (tmp_path / "allowed").resolve()
+    root.mkdir()
+    (root / "fine.txt").write_text("ok")
+    outside = tmp_path / "secret.txt"
+    outside.write_text("private")
+
+    assert safe_resolve(str(root / "fine.txt"), [root]).name == "fine.txt"
+
+    for bad in [str(outside), "/etc/passwd", str(root / ".." / "secret.txt")]:
+        with pytest.raises(HTTPException) as exc:
+            safe_resolve(bad, [root])
+        assert exc.value.status_code in (403, 404)
+
+
+def test_path_ingestion_is_off_by_default(tmp_path):
+    from fastapi import HTTPException
+
+    from motherbrain.security import safe_resolve
+
+    with pytest.raises(HTTPException) as exc:
+        safe_resolve(str(tmp_path), [])
+    assert exc.value.status_code == 403
+
+
+def test_credential_files_are_refused_inside_an_allowed_root(tmp_path):
+    from fastapi import HTTPException
+
+    from motherbrain.security import safe_resolve
+
+    root = tmp_path.resolve()
+    (root / ".ssh").mkdir()
+    (root / ".ssh" / "id_rsa").write_text("KEY")
+    (root / "server.key").write_text("KEY")
+
+    for bad in [root / ".ssh" / "id_rsa", root / "server.key"]:
+        with pytest.raises(HTTPException) as exc:
+            safe_resolve(str(bad), [root])
+        assert exc.value.status_code == 403
+
+
+def test_api_key_comparison_is_constant_time():
+    from motherbrain.security import constant_time_eq
+
+    assert constant_time_eq("secret", "secret")
+    assert not constant_time_eq("secret", "secrey")
+    assert not constant_time_eq("secret", None)
+    assert not constant_time_eq(None, None)
+
+
+def test_public_bind_without_a_key_is_refused():
+    from motherbrain.security import check_exposure
+
+    with pytest.raises(SystemExit):
+        check_exposure("0.0.0.0", None, tls=False, insecure=False)
+    # explicit override, and loopback, are both allowed
+    check_exposure("0.0.0.0", None, tls=False, insecure=True)
+    check_exposure("127.0.0.1", None, tls=False, insecure=False)
+
+
+def test_plaintext_public_bind_warns():
+    from motherbrain.security import check_exposure
+
+    warnings = check_exposure("0.0.0.0", "a-sufficiently-long-key", tls=False,
+                              insecure=False)
+    assert any("plaintext" in w for w in warnings)
+    assert check_exposure("0.0.0.0", "a-sufficiently-long-key", tls=True,
+                          insecure=False) == []
+
+
+def test_rate_limiter_refills_over_time():
+    from motherbrain.security import RateLimiter
+
+    rl = RateLimiter(per_minute=60, burst=2)
+    assert [rl.allow("ip") for _ in range(4)] == [True, True, False, False]
+    assert rl.allow("other.ip")  # buckets are per client
+
+
+def test_oversized_feed_is_rejected(served):
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False, max_feed_chars=100))
+    assert client.post("/feed", json={"text": "x" * 500}).status_code == 413
+    assert client.post("/feed", json={"text": "short"}).status_code == 200
+
+
+def test_feed_rejects_paths_when_no_root_is_allowed(served):
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+    assert client.post("/feed", json={"path": "/etc/passwd"}).status_code == 403
+
+
+def test_security_headers_are_present(served):
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+    headers = client.get("/health").headers
+    assert headers["x-content-type-options"] == "nosniff"
+    assert headers["x-frame-options"] == "DENY"

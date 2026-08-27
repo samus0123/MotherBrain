@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 from motherbrain.config import PRESETS, ModelConfig, human, scale_to
+from motherbrain.security import check_exposure
 
 DEFAULT_CORPUS = os.environ.get("MB_CORPUS", "data/corpus")
 DEFAULT_RUN = os.environ.get("MB_RUN", "runs/default")
@@ -282,6 +283,79 @@ def cmd_checkout(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# tls
+
+
+def cmd_cert(args) -> int:
+    """Generate a self-signed certificate for serving over HTTPS.
+
+    Shells out to openssl, which is already present nearly everywhere, so TLS
+    costs no extra Python dependency. This is enough to encrypt the link on a
+    network you control; a client will still warn that the certificate is not
+    from a public authority, which is why the SHA-256 is printed for pinning.
+    For a public hostname, use a real certificate instead.
+    """
+    import socket
+    import subprocess
+
+    out = Path(args.dir)
+    out.mkdir(parents=True, exist_ok=True)
+    cert_path, key_path = out / "server.crt", out / "server.key"
+    if cert_path.exists() and not args.force:
+        print(f"{cert_path} already exists; pass --force to replace it")
+        return 1
+
+    names, seen = [], set()
+
+    def add(value: str) -> None:
+        if not value or value in seen:
+            return
+        seen.add(value)
+        is_ip = all(part.isdigit() for part in value.split(".")) and value.count(".") == 3
+        names.append(f"{'IP' if is_ip or ':' in value else 'DNS'}:{value}")
+
+    for h in (args.host or []):
+        add(h)
+    add("localhost")
+    add(socket.gethostname())
+    try:
+        add(socket.gethostbyname(socket.gethostname()))
+    except OSError:
+        pass
+    add("127.0.0.1")
+
+    cmd = [
+        "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+        "-keyout", str(key_path), "-out", str(cert_path),
+        "-days", str(args.days), "-subj", "/CN=motherbrain",
+        "-addext", f"subjectAltName={','.join(names)}",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        print("error: openssl not found; install it or supply your own "
+              "certificate to `mb serve --tls-cert/--tls-key`", file=sys.stderr)
+        return 1
+    if proc.returncode != 0:
+        print(f"error: openssl failed:\n{proc.stderr.strip()}", file=sys.stderr)
+        return 1
+
+    key_path.chmod(0o600)  # a private key readable by others is not private
+    fp = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-noout", "-fingerprint", "-sha256"],
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+    print(f"certificate  {cert_path}")
+    print(f"private key  {key_path}  (mode 600, never commit this)")
+    print(f"valid for    {args.days} days")
+    print(f"names        {', '.join(names)}")
+    print(f"{fp.lower()}")
+    print(f"\nserve with:\n  mb serve --tls-cert {cert_path} --tls-key {key_path}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # serve
 
 
@@ -290,18 +364,46 @@ def cmd_serve(args) -> int:
 
     from motherbrain.server import create_app
 
+    # Validate the exposure before building anything, so a misconfigured
+    # public bind fails immediately rather than after loading a model.
+    if bool(args.tls_cert) != bool(args.tls_key):
+        print("error: --tls-cert and --tls-key must be given together", file=sys.stderr)
+        return 2
+    tls = bool(args.tls_cert and args.tls_key)
+    if tls:
+        for p in (args.tls_cert, args.tls_key):
+            if not Path(p).exists():
+                print(f"error: no such file: {p}", file=sys.stderr)
+                return 2
+
+    for warning in check_exposure(args.host, args.api_key, tls, args.insecure):
+        print(f"warning: {warning}")
+
     app = create_app(run_dir=args.run, corpus_dir=args.corpus, device=args.device,
                      api_key=args.api_key, auto_patch=not args.no_auto_patch,
                      auto_patch_chars=args.auto_patch_chars,
-                     auto_patch_delay=args.auto_patch_delay)
-    print(f"MotherBrain serving on http://{args.host}:{args.port}")
-    print(f"  OpenAI-compatible  http://{args.host}:{args.port}/v1")
-    print(f"  Ollama-compatible  http://{args.host}:{args.port}")
+                     auto_patch_delay=args.auto_patch_delay,
+                     allow_paths=args.allow_path, allow_origins=args.allow_origin,
+                     rate_limit=args.rate_limit)
+
+    scheme = "https" if tls else "http"
+    print(f"MotherBrain serving on {scheme}://{args.host}:{args.port}")
+    print(f"  OpenAI-compatible  {scheme}://{args.host}:{args.port}/v1")
+    print(f"  Ollama-compatible  {scheme}://{args.host}:{args.port}")
+    print(f"  auth               {'API key required' if args.api_key else 'OPEN (no key)'}")
+    print(f"  path ingestion     "
+          f"{', '.join(args.allow_path) if args.allow_path else 'disabled'}")
+    if not tls:
+        print("  plaintext: anything fed or generated crosses the network in the "
+              "clear.\n                     run `mb cert`, then pass --tls-cert/--tls-key.")
     if not args.no_auto_patch:
         print("  auto-patch on: fed information becomes the next version by itself.")
     if args.host in ("0.0.0.0", "::"):
         print("reachable from any machine that can route to this host.")
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+
+    uvicorn.run(app, host=args.host, port=args.port, log_level="info",
+                ssl_certfile=args.tls_cert if tls else None,
+                ssl_keyfile=args.tls_key if tls else None)
     return 0
 
 
@@ -386,8 +488,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("version", help="version number, e.g. 3 or v3")
     s.set_defaults(func=cmd_checkout)
 
-    s = common(sub.add_parser("serve", help="expose the model over HTTP"))
-    s.add_argument("--host", default="0.0.0.0")
+    s = sub.add_parser("cert", help="generate a self-signed TLS certificate")
+    s.add_argument("--dir", default="certs", help="where to write the pair")
+    s.add_argument("--host", action="append",
+                   help="extra hostname or IP to include (repeatable)")
+    s.add_argument("--days", type=int, default=825)
+    s.add_argument("--force", action="store_true")
+    s.set_defaults(func=cmd_cert)
+
+    s = common(sub.add_parser("serve", help="expose the model over HTTP or HTTPS"))
+    s.add_argument("--host", default="127.0.0.1",
+                   help="0.0.0.0 to accept connections from other machines")
     s.add_argument("--port", type=int, default=8000)
     s.add_argument("--device", default="auto")
     s.add_argument("--api-key", default=os.environ.get("MB_API_KEY"),
@@ -398,6 +509,18 @@ def build_parser() -> argparse.ArgumentParser:
                    help="learn once this much new text has arrived")
     s.add_argument("--auto-patch-delay", type=float, default=20.0,
                    help="seconds of quiet before learning what was fed")
+    s.add_argument("--tls-cert", default=os.environ.get("MB_TLS_CERT"),
+                   help="PEM certificate; serves over HTTPS when given with --tls-key")
+    s.add_argument("--tls-key", default=os.environ.get("MB_TLS_KEY"),
+                   help="PEM private key")
+    s.add_argument("--allow-path", action="append",
+                   help="directory /feed may read from (repeatable; default none)")
+    s.add_argument("--allow-origin", action="append",
+                   help="restrict CORS to these origins (default: any)")
+    s.add_argument("--rate-limit", type=int, default=120,
+                   help="requests per minute per client address (0 disables)")
+    s.add_argument("--insecure", action="store_true",
+                   help="allow a public bind with no API key")
     s.set_defaults(func=cmd_serve)
 
     return p

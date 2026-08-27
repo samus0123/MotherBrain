@@ -28,6 +28,8 @@ from pydantic import BaseModel, Field
 
 from motherbrain.api_compat import register_compat_routes
 from motherbrain.config import human
+from motherbrain.security import (RateLimiter, constant_time_eq,
+                                  install_middleware, safe_resolve)
 
 
 # ---- request models -------------------------------------------------------
@@ -152,16 +154,24 @@ class State:
 def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
                device: str = "auto", api_key: str | None = None,
                auto_patch: bool = True, auto_patch_chars: int = 2000,
-               auto_patch_delay: float = 20.0) -> FastAPI:
+               auto_patch_delay: float = 20.0,
+               allow_paths: list[str] | None = None,
+               allow_origins: list[str] | None = None,
+               rate_limit: int = 120, max_feed_chars: int = 2_000_000) -> FastAPI:
     state = State(run_dir, corpus_dir, device, auto_patch=auto_patch,
                   auto_patch_chars=auto_patch_chars, auto_patch_delay=auto_patch_delay)
     app = FastAPI(title="MotherBrain", version="0.1.0",
                   description="A trainable language model, reachable over HTTP.")
-    # Editors and their webviews call from arbitrary origins.
+    # Editors and their webviews call from arbitrary origins. Credentials are
+    # never accepted cross-origin, so the API key cannot ride along implicitly.
     app.add_middleware(
-        CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+        CORSMiddleware, allow_origins=allow_origins or ["*"], allow_credentials=False,
         allow_methods=["*"], allow_headers=["*"],
     )
+    install_middleware(app, RateLimiter(rate_limit) if rate_limit else None)
+
+    # Paths that /feed may read. Empty means path ingestion is refused entirely.
+    feed_roots = [Path(p).expanduser().resolve() for p in (allow_paths or [])]
 
     def auth(x_api_key: str | None = Header(default=None),
              authorization: str | None = Header(default=None)) -> None:
@@ -176,7 +186,8 @@ def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
         bearer = None
         if authorization and authorization.lower().startswith("bearer "):
             bearer = authorization[7:].strip()
-        if api_key not in (x_api_key, bearer):
+        if not (constant_time_eq(api_key, x_api_key)
+                or constant_time_eq(api_key, bearer)):
             raise HTTPException(401, "invalid or missing API key")
 
     # ---- introspection ----------------------------------------------------
@@ -278,13 +289,17 @@ def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
         corpus = Corpus(state.corpus_dir)
         added_files = added_chars = 0
         if req.text:
+            if len(req.text) > max_feed_chars:
+                raise HTTPException(
+                    413, f"text exceeds the {max_feed_chars:,} character limit")
             added_chars += corpus.add_text(req.text, source=req.source)
             added_files += 1
         if req.path:
-            p = Path(req.path)
-            if not p.exists():
-                raise HTTPException(400, f"path not found: {req.path}")
-            f, c = corpus.add_path(p)
+            # Confined to an explicit allowlist: without this, /feed is an
+            # arbitrary-file-read primitive, and whatever it reads can be
+            # extracted again through generation.
+            target = safe_resolve(req.path, feed_roots)
+            f, c = corpus.add_path(target)
             added_files += f
             added_chars += c
         if not added_files:
