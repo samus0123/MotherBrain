@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [claude/massive-parameter-llm-mcs613, main]
+    paths-ignore: ['corpus/**', 'runs/**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Tests
+        run: python -m pytest tests -q
+      - name: Parameter accounting for every preset
+        run: python -m motherbrain.cli scale --preset mother

@@ -1,0 +1,167 @@
+name: Apply information
+
+# The automation loop: information lands in corpus/inbox, this pipeline trains
+# it into a patch and commits the result as the next sequential model version.
+#
+# Triggers, in the order you are likely to use them:
+#   * push       — commit a file to corpus/inbox/ and the model learns it
+#   * dispatch   — paste text straight into the Actions UI
+#   * schedule   — sweep up anything that arrived overnight
+
+on:
+  push:
+    branches: [claude/massive-parameter-llm-mcs613, main]
+    paths:
+      - 'corpus/inbox/**'
+  workflow_dispatch:
+    inputs:
+      text:
+        description: 'Information to teach the model'
+        required: false
+        type: string
+      steps:
+        description: 'Training steps for this patch'
+        required: false
+        default: '100'
+        type: string
+      rank:
+        description: 'Patch rank (higher = more capacity, larger patch)'
+        required: false
+        default: '8'
+        type: string
+  schedule:
+    - cron: '0 3 * * *'
+
+# Versions are sequential, so runs must never overlap. Queue them instead.
+concurrency:
+  group: motherbrain-versions
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # The base checkpoint is large and rarely changes, so it is cached rather
+      # than committed. A cache miss triggers the bootstrap step below.
+      - name: Restore base model
+        id: basecache
+        uses: actions/cache@v4
+        with:
+          path: |
+            runs/default/checkpoint.pt
+            runs/default/config.json
+            runs/default/tokenizer.json
+            data/corpus/tokenizer.json
+            data/corpus/tokens.bin
+          key: motherbrain-base-${{ hashFiles('corpus/base/**') }}-v1
+
+      - name: Bootstrap base model (first run only)
+        if: steps.basecache.outputs.cache-hit != 'true'
+        run: |
+          echo "No cached base model — training v0 from corpus/base."
+          if [ -d corpus/base ] && [ -n "$(ls -A corpus/base 2>/dev/null)" ]; then
+            python -m motherbrain.cli feed corpus/base
+          else
+            python -m motherbrain.cli feed motherbrain README.md
+          fi
+          python -m motherbrain.cli prepare --vocab-size 4096
+          python -m motherbrain.cli train --preset micro --steps 400 \
+            --batch-size 16 --seq-len 256 --lr 6e-4
+
+      - name: Stage dispatched text
+        if: inputs.text != ''
+        run: |
+          mkdir -p corpus/inbox
+          printf '%s\n' "${{ inputs.text }}" \
+            > "corpus/inbox/dispatch-$(date +%Y%m%d-%H%M%S).txt"
+
+      - name: Feed new information
+        id: feed
+        run: |
+          if [ -z "$(ls -A corpus/inbox 2>/dev/null)" ]; then
+            echo "empty=true" >> "$GITHUB_OUTPUT"
+            echo "Nothing in corpus/inbox — nothing to learn."
+          else
+            python -m motherbrain.cli feed corpus/inbox
+            echo "empty=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Train the patch and mint the next version
+        if: steps.feed.outputs.empty == 'false'
+        run: |
+          python -m motherbrain.cli patch \
+            --steps "${{ inputs.steps || '100' }}" \
+            --rank "${{ inputs.rank || '8' }}" \
+            --note "ci: ${{ github.event_name }} ${{ github.sha }}"
+          python -m motherbrain.cli versions
+
+      - name: Write the run summary
+        if: steps.feed.outputs.empty == 'false'
+        run: |
+          {
+            echo "## MotherBrain"
+            echo
+            python -m motherbrain.cli versions | sed 's/^/    /'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Patches are small, so the lineage lives in git: one commit per version.
+      - name: Commit the new version
+        if: steps.feed.outputs.empty == 'false'
+        run: |
+          git config user.name  "motherbrain-ci"
+          git config user.email "motherbrain-ci@users.noreply.github.com"
+          # Learned material moves out of the inbox so it is not learned twice.
+          mkdir -p corpus/learned
+          if [ -n "$(ls -A corpus/inbox 2>/dev/null)" ]; then
+            git mv corpus/inbox/* corpus/learned/ 2>/dev/null \
+              || mv corpus/inbox/* corpus/learned/
+          fi
+          git add -A runs/default/patches runs/default/versions.json corpus/
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            VERSION=$(python -c "from motherbrain.patches import PatchStore; print(PatchStore('runs/default').current)")
+            git commit -m "model: v${VERSION} (patch applied by CI)"
+            git push
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: steps.feed.outputs.empty == 'false'
+        with:
+          name: motherbrain-patches
+          path: |
+            runs/default/patches/
+            runs/default/versions.json
+          if-no-files-found: ignore
+
+      # Patches are deltas against a specific base checkpoint, and that
+      # checkpoint is too large to commit. Publishing it alongside them is what
+      # makes the committed lineage reproducible off this runner.
+      - uses: actions/upload-artifact@v4
+        if: steps.basecache.outputs.cache-hit != 'true'
+        with:
+          name: motherbrain-base-checkpoint
+          path: |
+            runs/default/checkpoint.pt
+            runs/default/config.json
+            runs/default/tokenizer.json
+          if-no-files-found: ignore
+          retention-days: 90
