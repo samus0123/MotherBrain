@@ -24,6 +24,7 @@ Two details make this work rather than merely run:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import time
@@ -58,6 +59,30 @@ class PatchConfig:
     seed: int = 1337
 
 
+def weights_fingerprint(model: nn.Module) -> str:
+    """A stable identity for a set of base weights.
+
+    A patch is a delta against particular weights; applied to different ones it
+    produces confident nonsense rather than an error. Hashing the parameter
+    names, shapes and a bounded sample of their values gives every base
+    checkpoint an identity, cheaply enough that it stays practical for a large
+    model.
+    """
+    h = hashlib.sha256()
+    budget = 1 << 20  # a megabyte of actual values is plenty to disambiguate
+    for name, p in sorted(model.state_dict().items()):
+        h.update(name.encode())
+        h.update(str(tuple(p.shape)).encode())
+        h.update(str(p.dtype).encode())
+        if budget > 0:
+            flat = p.detach().reshape(-1).float()
+            take = min(flat.numel(), budget // 4)
+            if take:
+                h.update(flat[:take].cpu().numpy().tobytes())
+                budget -= take * 4
+    return h.hexdigest()[:32]
+
+
 @dataclass
 class Version:
     """One entry in the model's lineage."""
@@ -78,6 +103,7 @@ class Version:
     loss_after: float
     sources: list[str] = field(default_factory=list)
     note: str = ""
+    base_fingerprint: str = ""
 
     @property
     def filename(self) -> str:
@@ -231,6 +257,33 @@ class PatchStore:
         m["base_docs"] = n
         self.write(m)
 
+    @property
+    def base_fingerprint(self) -> str:
+        return self.manifest().get("base_fingerprint", "")
+
+    def set_base(self, fingerprint: str, n_docs: int) -> list[str]:
+        """Adopt a base checkpoint, discarding a lineage built on a different one.
+
+        Retraining the base produces different weights, which makes every
+        existing patch a delta against something that no longer exists. Keeping
+        them would silently corrupt the model, so they are dropped and named.
+        """
+        m = self.manifest()
+        previous = m.get("base_fingerprint", "")
+        dropped: list[str] = []
+        if previous and previous != fingerprint and m["versions"]:
+            for v in m["versions"]:
+                dropped.append(f"v{v['version']} ({v['patch_id']})")
+                stale = self.dir / f"{v['version']:04d}-{v['patch_id']}.pt"
+                stale.unlink(missing_ok=True)
+            m["versions"] = []
+            m["current"] = 0
+            m["head"] = 0
+        m["base_fingerprint"] = fingerprint
+        m["base_docs"] = n_docs
+        self.write(m)
+        return dropped
+
     def record(self, v: Version, payload: dict) -> None:
         torch.save(payload, self.dir / v.filename)
         m = self.manifest()
@@ -262,6 +315,17 @@ def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
     store = PatchStore(run_dir)
     target = store.current if target is None else target
     model, tok, dev, meta = load_runtime(str(run_dir), device if device != "cpu" else "auto")
+
+    expected = store.base_fingerprint
+    if expected:
+        actual = weights_fingerprint(model)
+        if actual != expected:
+            raise ValueError(
+                f"these patches were trained against a different base checkpoint "
+                f"(manifest {expected}, loaded {actual}). Applying them would "
+                f"corrupt the model. Retrain the base, or restore the checkpoint "
+                f"the lineage was built on."
+            )
 
     for v in store.versions():
         if v.version > target:
@@ -410,6 +474,7 @@ def create_patch(run_dir: str | Path, corpus_dir: str | Path,
         loss_after=round(loss_after, 4),
         sources=sorted({d.get("source", "?") for d in new_docs})[:20],
         note=note,
+        base_fingerprint=store.base_fingerprint,
     )
     store.record(version, payload)
     return version

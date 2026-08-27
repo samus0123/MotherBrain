@@ -22,7 +22,8 @@
         "corpus/inbox/README.md",
         "corpus/inbox/motherbrain-facts.md"
       ],
-      "note": "operating notes"
+      "note": "operating notes",
+      "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
     },
     {
       "version": 2,
@@ -42,7 +43,8 @@
       "sources": [
         "demo"
       ],
-      "note": "auto"
+      "note": "auto",
+      "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
     },
     {
       "version": 3,
@@ -62,7 +64,9 @@
       "sources": [
         "tls-demo"
       ],
-      "note": "auto"
+      "note": "auto",
+      "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
     }
-  ]
+  ],
+  "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
 }

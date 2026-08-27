@@ -447,3 +447,47 @@ def test_security_headers_are_present(served):
     headers = client.get("/health").headers
     assert headers["x-content-type-options"] == "nosniff"
     assert headers["x-frame-options"] == "DENY"
+
+
+def test_fingerprint_identifies_a_base_checkpoint():
+    from motherbrain.patches import weights_fingerprint
+
+    torch.manual_seed(0)
+    a = MotherBrain(tiny())
+    torch.manual_seed(0)
+    same = MotherBrain(tiny())
+    torch.manual_seed(1)
+    different = MotherBrain(tiny())
+
+    assert weights_fingerprint(a) == weights_fingerprint(same)
+    assert weights_fingerprint(a) != weights_fingerprint(different)
+
+
+def test_retraining_the_base_drops_the_stale_lineage(tmp_path):
+    """A patch is a delta against particular weights.
+
+    Retraining the base produces different weights, and keeping the old patches
+    would apply deltas to something that no longer exists — silently, and with
+    confident nonsense as the output.
+    """
+    import time as _time
+
+    from motherbrain.patches import PatchStore, Version
+
+    store = PatchStore(tmp_path)
+    store.set_base("fingerprint-a", 10)
+    store.record(Version(version=1, patch_id="p1", parent=0, created_at=_time.time(),
+                         doc_start=10, doc_end=11, n_documents=1, n_chars=5,
+                         n_tokens=5, steps=1, rank=4, trainable_params=8,
+                         loss_before=2.0, loss_after=1.0,
+                         base_fingerprint="fingerprint-a"),
+                 {"x": torch.zeros(1)})
+    assert store.current == 1
+
+    dropped = store.set_base("fingerprint-a", 12)      # same base, lineage survives
+    assert dropped == [] and store.current == 1
+
+    dropped = store.set_base("fingerprint-b", 12)      # new base, lineage is void
+    assert dropped == ["v1 (p1)"]
+    assert store.versions() == [] and store.current == 0
+    assert not (store.dir / "0001-p1.pt").exists()

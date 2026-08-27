@@ -83,13 +83,26 @@ python -m motherbrain.cli checkout v1     # any earlier version, exactly
 ```
 
 Patches are kilobytes to megabytes, so the lineage is cheap to keep forever and
-small enough to live in git. Two details make this work rather than merely run:
+small enough to live in git.
+
+A patch is a delta against *particular* weights, so the manifest records a
+fingerprint of the base checkpoint it was built on. Loading a lineage whose
+base does not match refuses loudly instead of applying deltas to the wrong
+weights, and retraining the base drops the now-meaningless patches and says so.
+This matters in practice: the base checkpoint is too large to commit, so a CI
+run that rebuilds it from scratch produces different weights than your laptop
+did, and without the fingerprint the committed patches would be applied to it
+silently.
+
+Three details make this work rather than merely run:
 
 * **Replay.** Training only on new text makes a model forget the old text. Each
   patch trains on a mixture of the new information and a sample of everything
   before it.
 * **A frozen, byte-level vocabulary.** New information can use words the base
   corpus never contained, with no vocabulary surgery and no unknown tokens.
+* **Base fingerprinting.** Patches are refused unless the base they were
+  trained against is the one loaded.
 
 Observed on the run in this repository — 2 documents, 252 tokens, rank 8,
 224k trainable parameters, 150 steps, about a minute on 4 CPU cores:

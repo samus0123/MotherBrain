@@ -151,3 +151,17 @@ jobs:
             runs/default/patches/
             runs/default/versions.json
           if-no-files-found: ignore
+
+      # Patches are deltas against a specific base checkpoint, and that
+      # checkpoint is too large to commit. Publishing it alongside them is what
+      # makes the committed lineage reproducible off this runner.
+      - uses: actions/upload-artifact@v4
+        if: steps.basecache.outputs.cache-hit != 'true'
+        with:
+          name: motherbrain-base-checkpoint
+          path: |
+            runs/default/checkpoint.pt
+            runs/default/config.json
+            runs/default/tokenizer.json
+          if-no-files-found: ignore
+          retention-days: 90

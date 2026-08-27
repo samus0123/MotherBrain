@@ -228,9 +228,13 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
 
     # Everything in the corpus right now lives in these weights, so later
     # patches start from here rather than relearning the whole corpus.
-    from motherbrain.patches import PatchStore
+    from motherbrain.patches import PatchStore, weights_fingerprint
 
-    PatchStore(out).set_base_docs(corpus.n_documents)
+    store = PatchStore(out)
+    dropped = store.set_base(weights_fingerprint(base), corpus.n_documents)
+    if dropped:
+        print(f"note: dropped {len(dropped)} patch(es) trained against the previous "
+              f"base checkpoint: {', '.join(dropped)}")
 
     summary = {
         "steps": tc.steps,
