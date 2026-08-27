@@ -1,0 +1,28 @@
+{
+  "current": 1,
+  "head": 1,
+  "base_docs": 170,
+  "versions": [
+    {
+      "version": 1,
+      "patch_id": "500af452",
+      "parent": 0,
+      "created_at": 1787861078.7143211,
+      "doc_start": 170,
+      "doc_end": 172,
+      "n_documents": 2,
+      "n_chars": 769,
+      "n_tokens": 252,
+      "steps": 150,
+      "rank": 8,
+      "trainable_params": 224256,
+      "loss_before": 6.2549,
+      "loss_after": 1.2647,
+      "sources": [
+        "corpus/inbox/README.md",
+        "corpus/inbox/motherbrain-facts.md"
+      ],
+      "note": "operating notes"
+    }
+  ]
+}

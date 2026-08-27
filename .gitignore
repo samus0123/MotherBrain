@@ -1,0 +1,19 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Corpus text and its tokenized form: large, reproducible, and often private.
+data/corpus/documents.jsonl
+data/corpus/tokens.bin
+data/corpus/meta.json
+
+# Base weights are large and cached by CI rather than committed.
+runs/**/checkpoint.pt
+runs/**/history.json
+
+# Patches and the manifest are the model's lineage — those DO belong in git.
+!runs/**/patches/
+!runs/**/patches/*.pt
+!runs/**/versions.json
