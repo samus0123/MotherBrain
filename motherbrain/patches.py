@@ -205,10 +205,11 @@ def apply_patch(model: nn.Module, payload: dict, cfg: PatchConfig) -> int:
 class PatchStore:
     """The lineage on disk: base checkpoint, patch files, version manifest."""
 
-    def __init__(self, run_dir: str | Path) -> None:
+    def __init__(self, run_dir: str | Path, create: bool = True) -> None:
         self.run = Path(run_dir)
         self.dir = self.run / "patches"
-        self.dir.mkdir(parents=True, exist_ok=True)
+        if create:
+            self.dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def manifest_path(self) -> Path:
@@ -221,6 +222,7 @@ class PatchStore:
         return {"current": 0, "head": 0, "base_docs": 0, "versions": []}
 
     def write(self, manifest: dict) -> None:
+        self.run.mkdir(parents=True, exist_ok=True)
         with open(self.manifest_path, "w") as fh:
             json.dump(manifest, fh, indent=2)
 
@@ -285,6 +287,7 @@ class PatchStore:
         return dropped
 
     def record(self, v: Version, payload: dict) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
         torch.save(payload, self.dir / v.filename)
         m = self.manifest()
         m["versions"] = [x for x in m["versions"] if x["version"] != v.version]

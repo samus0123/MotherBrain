@@ -1,3 +1,42 @@
+Metadata-Version: 2.4
+Name: motherbrain
+Version: 0.1.0
+Summary: A trainable, versioned, IDE-accessible language model.
+License: MIT License
+        
+        Copyright (c) 2026 Daniel  Cetta
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+        
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: torch>=2.0
+Requires-Dist: numpy>=1.24
+Requires-Dist: fastapi>=0.110
+Requires-Dist: uvicorn[standard]>=0.27
+Requires-Dist: pydantic>=2.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0; extra == "dev"
+Requires-Dist: httpx>=0.27; extra == "dev"
+Dynamic: license-file
+
 # MotherBrain
 
 A language model you own end to end: a sparse mixture-of-experts transformer,
@@ -23,30 +62,17 @@ mb serve      expose it to every IDE you own
 ## Install
 
 ```bash
-pip install -e .
+pip install -r requirements.txt
 ```
-
-That installs the dependencies **and** the `mb` command, so every example below
-works from any directory. Without it you would get `No module named
-motherbrain` outside the repository root.
-
-```bash
-pip install -e ".[dev]"      # plus pytest and httpx, to run the tests
-```
-
-`mb` finds your corpus and checkpoints by walking up from the current directory
-for a workspace, the way git finds `.git`, so it works from a subdirectory too.
-Override with `--corpus`/`--run`, or the `MB_CORPUS`/`MB_RUN` environment
-variables.
 
 ## Quick start
 
 ```bash
-mb feed ./my-notes ./src        # anything textual
-mb prepare --vocab-size 4096
-mb train --preset micro --steps 400 --batch-size 16 --seq-len 256
-mb chat --prompt "hello"
-mb serve            # 127.0.0.1 by default
+python -m motherbrain.cli feed ./my-notes ./src        # anything textual
+python -m motherbrain.cli prepare --vocab-size 4096
+python -m motherbrain.cli train --preset micro --steps 400 --batch-size 16 --seq-len 256
+python -m motherbrain.cli chat --prompt "hello"
+python -m motherbrain.cli serve            # 127.0.0.1 by default
 ```
 
 ## How do I load it?
@@ -57,8 +83,8 @@ you are in and what to run next.
 **On a machine that has already trained:**
 
 ```bash
-mb chat      # loads the current version, interactively
-mb serve     # loads it and serves it to your IDEs
+python -m motherbrain.cli chat      # loads the current version, interactively
+python -m motherbrain.cli serve     # loads it and serves it to your IDEs
 ```
 
 Both load the *current version*: the base checkpoint with patches 1..N applied.
@@ -70,7 +96,7 @@ tokenizer, the manifest and the patches — but no base model. One command fixes
 that:
 
 ```bash
-mb bootstrap        # feed -> prepare -> train -> ready
+python -m motherbrain.cli bootstrap        # feed -> prepare -> train -> ready
 ```
 
 Or download the `motherbrain-base-checkpoint` artifact from a CI run into
@@ -91,8 +117,8 @@ Four ways, all landing in the same corpus and all producing a new version.
 **1. The command line.** Files, whole directories, or literal text:
 
 ```bash
-mb feed ./docs ./notes.md "The deploy key rotates on Fridays."
-mb patch --steps 150      # -> v1
+python -m motherbrain.cli feed ./docs ./notes.md "The deploy key rotates on Fridays."
+python -m motherbrain.cli patch --steps 150      # -> v1
 ```
 
 **2. Over HTTP, from anywhere:**
@@ -128,8 +154,8 @@ v2  = v1 + patch-0002        the API docs you fed it next
 ```
 
 ```bash
-mb versions
-mb checkout v1     # any earlier version, exactly
+python -m motherbrain.cli versions
+python -m motherbrain.cli checkout v1     # any earlier version, exactly
 ```
 
 Patches are kilobytes to megabytes, so the lineage is cheap to keep forever and
@@ -171,7 +197,7 @@ MotherBrain speaks the two protocols editors already support, so no editor
 needs a MotherBrain-specific plugin — you point it at a base URL.
 
 ```bash
-mb serve --host 0.0.0.0 --port 8000
+python -m motherbrain.cli serve --host 0.0.0.0 --port 8000
 ```
 
 | Protocol | Base URL | Endpoints |
@@ -237,8 +263,8 @@ crosses the network in the clear — including the API key — so use HTTPS for
 anything that leaves the machine.
 
 ```bash
-mb cert --host your-hostname-or-ip
-mb serve --host 0.0.0.0 \
+python -m motherbrain.cli cert --host your-hostname-or-ip
+python -m motherbrain.cli serve --host 0.0.0.0 \
   --tls-cert certs/server.crt --tls-key certs/server.key \
   --api-key "$(python -c 'import secrets;print(secrets.token_urlsafe(32))')" \
   --allow-path ./corpus
@@ -308,7 +334,7 @@ proot-distro login debian
 apt update && apt install -y python3 python3-pip git
 git clone <this-repo> && cd MotherBrain
 pip install -r requirements.txt
-mb serve --host 0.0.0.0 --port 8000
+python -m motherbrain.cli serve --host 0.0.0.0 --port 8000
 ```
 
 Then reach it at `http://localhost:8000` from the phone's browser, or from
@@ -340,7 +366,7 @@ count grow without per-token compute growing with it. Total parameters scale
 with the expert count; only `n_experts_per_token` of them run for any token.
 
 ```
-$ mb scale --preset mother
+$ python -m motherbrain.cli scale --preset mother
   total parameters     1157T  (1,156,907,161,374,720)
   active per token     6.93T  (0.599% of total)
 ```

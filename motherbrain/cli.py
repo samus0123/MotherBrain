@@ -19,8 +19,25 @@ from pathlib import Path
 from motherbrain.config import PRESETS, ModelConfig, human, scale_to
 from motherbrain.security import check_exposure
 
-DEFAULT_CORPUS = os.environ.get("MB_CORPUS", "data/corpus")
-DEFAULT_RUN = os.environ.get("MB_RUN", "runs/default")
+def project_root() -> Path:
+    """Find the MotherBrain workspace, the way git walks up to find .git.
+
+    Once `mb` is installed it can be run from anywhere, but the corpus and the
+    checkpoints live in a particular directory. Resolving them against the cwd
+    alone would make `mb status` report "no weights" while standing two levels
+    inside a workspace that has them.
+    """
+    here = Path.cwd().resolve()
+    for d in (here, *here.parents):
+        if (d / "runs").is_dir() or (d / "data" / "corpus").is_dir():
+            return d
+        if (d / "motherbrain" / "cli.py").is_file():
+            return d
+    return here
+
+
+DEFAULT_CORPUS = os.environ.get("MB_CORPUS") or str(project_root() / "data" / "corpus")
+DEFAULT_RUN = os.environ.get("MB_RUN") or str(project_root() / "runs" / "default")
 
 
 # --------------------------------------------------------------------------
@@ -231,8 +248,8 @@ def cmd_status(args) -> int:
     from motherbrain.data import Corpus
     from motherbrain.patches import PatchStore
 
-    corpus = Corpus(args.corpus)
-    store = PatchStore(args.run)
+    corpus = Corpus(args.corpus, create=False)
+    store = PatchStore(args.run, create=False)
     run = Path(args.run)
     ckpt = run / "checkpoint.pt"
 
@@ -244,6 +261,10 @@ def cmd_status(args) -> int:
     has_tokens = corpus.n_tokens > 0
     has_ckpt = ckpt.exists()
 
+    print(f"workspace  {Path(args.run).resolve().parent.parent}")
+    print(f"  corpus   {Path(args.corpus).resolve()}")
+    print(f"  run      {Path(args.run).resolve()}")
+    print()
     print("corpus")
     print(f"  [{mark(has_docs)}] documents      {corpus.n_documents:,} "
           f"({corpus.n_chars:,} chars)")

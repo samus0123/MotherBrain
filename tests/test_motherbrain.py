@@ -1,5 +1,7 @@
 """Tests for the parts that are easy to get quietly wrong."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -519,3 +521,54 @@ def test_status_reports_a_trained_run_as_ready(served, capsys):
     out = capsys.readouterr().out
     assert "READY" in out
     assert "mb chat" in out
+
+
+def test_project_root_is_found_from_a_subdirectory(tmp_path, monkeypatch):
+    """`mb` is installed globally but the corpus and weights live somewhere.
+
+    Resolving them against the cwd alone made `mb status` report "no weights"
+    while standing inside a workspace that has them.
+    """
+    from motherbrain.cli import project_root
+
+    workspace = tmp_path / "workspace"
+    (workspace / "runs" / "default").mkdir(parents=True)
+    deep = workspace / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+
+    monkeypatch.chdir(deep)
+    assert project_root() == workspace.resolve()
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    assert project_root() == outside.resolve()
+
+
+def test_console_script_entry_point_is_declared():
+    """The README tells people to run `mb`; that has to be a real command."""
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    with open(root / "pyproject.toml", "rb") as fh:
+        pyproject = tomllib.load(fh)
+    assert pyproject["project"]["scripts"]["mb"] == "motherbrain.cli:main"
+
+
+def test_status_does_not_create_a_workspace(tmp_path, capsys):
+    """Looking at a workspace must not bring one into existence.
+
+    `mb status` used to create the corpus directory as a side effect, which
+    made an empty directory look like a MotherBrain workspace to the project
+    root search that runs on the next invocation.
+    """
+    from motherbrain.cli import build_parser
+
+    corpus = tmp_path / "data" / "corpus"
+    run = tmp_path / "runs" / "default"
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(corpus), "--run", str(run)])
+    args.func(args)
+
+    assert not corpus.exists()
+    assert not run.exists()
