@@ -217,6 +217,141 @@ def cmd_chat(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# status and bootstrap
+
+
+def cmd_status(args) -> int:
+    """Report exactly what is on disk and what to run next.
+
+    "How do I load this?" has a different answer depending on what is present,
+    and a fresh clone has no weights in it at all: the base checkpoint is far
+    too large to commit, so it is either trained locally or fetched from the
+    CI artifact. This prints which situation you are in.
+    """
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchStore
+
+    corpus = Corpus(args.corpus)
+    store = PatchStore(args.run)
+    run = Path(args.run)
+    ckpt = run / "checkpoint.pt"
+
+    def mark(ok: bool) -> str:
+        return "yes" if ok else "no "
+
+    has_docs = corpus.n_documents > 0
+    has_tok = corpus.tokenizer_path.exists()
+    has_tokens = corpus.n_tokens > 0
+    has_ckpt = ckpt.exists()
+
+    print("corpus")
+    print(f"  [{mark(has_docs)}] documents      {corpus.n_documents:,} "
+          f"({corpus.n_chars:,} chars)")
+    print(f"  [{mark(has_tok)}] tokenizer      {corpus.tokenizer_path}")
+    print(f"  [{mark(has_tokens)}] tokenized      {corpus.n_tokens:,} tokens")
+
+    print("weights")
+    if has_ckpt:
+        size = ckpt.stat().st_size / 1e6
+        print(f"  [yes] base checkpoint  {ckpt}  ({size:,.0f} MB)")
+        try:
+            cfg = ModelConfig.load(str(run / "config.json"))
+            print(f"        {cfg.name} preset, {human(cfg.n_params)} parameters, "
+                  f"context {cfg.max_seq_len}")
+        except (FileNotFoundError, ValueError):
+            pass
+    else:
+        print(f"  [no ] base checkpoint  missing ({ckpt})")
+        print("        this file holds the weights and is too large to commit,")
+        print("        so a fresh clone never has one.")
+
+    versions = store.versions()
+    print("lineage")
+    print(f"  v0 base" + (f" + {len(versions)} patch(es)" if versions else ""))
+    if versions:
+        print(f"  current: v{store.current} of v{store.head}")
+    if store.base_fingerprint:
+        print(f"  base fingerprint: {store.base_fingerprint}")
+
+    pending = corpus.n_documents - store.consumed_docs()
+    if pending > 0:
+        print(f"  {pending} document(s) fed but not yet learned "
+              f"(run `mb patch`)")
+
+    print()
+    if has_ckpt:
+        loadable = True
+        try:
+            from motherbrain.patches import build_version
+
+            _, _, version = build_version(args.run)
+            print(f"READY — loaded v{version}.")
+        except ValueError as exc:
+            loadable = False
+            print(f"NOT LOADABLE — {exc}")
+        if loadable:
+            print("  load it with:  mb chat        (interactive)")
+            print("                 mb serve       (HTTP, for IDEs)")
+        return 0
+
+    print("NOT LOADABLE — there are no weights yet.")
+    if has_docs:
+        print("  you have a corpus, so train a base model:")
+        print("    mb prepare && mb train --preset micro --steps 400")
+    else:
+        print("  fastest path from here:")
+        print("    mb bootstrap")
+    print("  or download the base checkpoint from the CI run's")
+    print("  'motherbrain-base-checkpoint' artifact into runs/default/.")
+    return 0
+
+
+def cmd_bootstrap(args) -> int:
+    """Go from a fresh clone to a loaded model in one command."""
+    from motherbrain.data import Corpus
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(args.corpus)
+    run = Path(args.run)
+
+    if corpus.n_documents == 0:
+        sources = args.feed or ["motherbrain", "README.md"]
+        print(f"feeding {', '.join(sources)} ...")
+        for s in sources:
+            p = Path(s)
+            if p.exists():
+                files, chars = corpus.add_path(p)
+                print(f"  {s}: {files} files, {chars:,} chars")
+        corpus.write_meta()
+        if corpus.n_documents == 0:
+            print("error: nothing to feed; pass --feed with a path", file=sys.stderr)
+            return 1
+    else:
+        print(f"corpus already holds {corpus.n_documents} documents")
+
+    if not corpus.tokenizer_path.exists() or corpus.n_tokens == 0:
+        corpus.prepare(vocab_size=args.vocab_size)
+    else:
+        print(f"corpus already tokenized: {corpus.n_tokens:,} tokens")
+
+    if (run / "checkpoint.pt").exists() and not args.force:
+        print(f"base checkpoint already present at {run / 'checkpoint.pt'}")
+    else:
+        cfg = ModelConfig.from_dict(PRESETS[args.preset].to_dict())
+        cfg.vocab_size = corpus.load_tokenizer().vocab_size
+        if args.seq_len:
+            cfg.max_seq_len = args.seq_len
+        tc = TrainConfig(steps=args.steps, batch_size=args.batch_size,
+                         seq_len=args.seq_len, lr=args.lr, device=args.device)
+        train(args.corpus, args.run, cfg, tc)
+
+    print("\nbootstrapped. load it with:")
+    print("  mb chat")
+    print("  mb serve")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # patches and versions
 
 
@@ -467,6 +602,23 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--top-p", type=float, default=0.95)
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_chat)
+
+    s = common(sub.add_parser("status", help="what is on disk, and what to run next"))
+    s.set_defaults(func=cmd_status)
+
+    s = common(sub.add_parser(
+        "bootstrap", help="fresh clone -> a loaded model, in one command"))
+    s.add_argument("--feed", action="append",
+                   help="what to train on (default: this repo's own source)")
+    s.add_argument("--preset", default="micro")
+    s.add_argument("--vocab-size", type=int, default=4096)
+    s.add_argument("--steps", type=int, default=400)
+    s.add_argument("--batch-size", type=int, default=16)
+    s.add_argument("--seq-len", type=int, default=256)
+    s.add_argument("--lr", type=float, default=6e-4)
+    s.add_argument("--device", default="auto")
+    s.add_argument("--force", action="store_true", help="retrain even if weights exist")
+    s.set_defaults(func=cmd_bootstrap)
 
     s = common(sub.add_parser("patch", help="learn new information as the next version"))
     s.add_argument("--steps", type=int, default=100)

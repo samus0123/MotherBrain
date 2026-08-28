@@ -491,3 +491,31 @@ def test_retraining_the_base_drops_the_stale_lineage(tmp_path):
     assert dropped == ["v1 (p1)"]
     assert store.versions() == [] and store.current == 0
     assert not (store.dir / "0001-p1.pt").exists()
+
+
+# ---- loading --------------------------------------------------------------
+
+
+def test_status_reports_a_fresh_clone_as_not_loadable(tmp_path, capsys):
+    """A clone has patches and a manifest but no weights, because the base
+    checkpoint is too large to commit. Saying so is the whole point."""
+    from motherbrain.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(tmp_path / "corpus"), "--run", str(tmp_path / "run")])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "NOT LOADABLE" in out
+    assert "mb bootstrap" in out
+
+
+def test_status_reports_a_trained_run_as_ready(served, capsys):
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(corpus), "--run", str(run)])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "READY" in out
+    assert "mb chat" in out

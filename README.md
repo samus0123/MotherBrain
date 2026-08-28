@@ -6,6 +6,8 @@ patching system that versions every new thing it learns, and an HTTP server
 that any IDE can talk to.
 
 ```
+mb status     what is on disk, and what to run next
+mb bootstrap  fresh clone -> a loaded model, in one command
 mb scale      what a configuration costs, before you build it
 mb feed       put information in
 mb prepare    learn a vocabulary from it
@@ -32,6 +34,41 @@ python -m motherbrain.cli prepare --vocab-size 4096
 python -m motherbrain.cli train --preset micro --steps 400 --batch-size 16 --seq-len 256
 python -m motherbrain.cli chat --prompt "hello"
 python -m motherbrain.cli serve            # 127.0.0.1 by default
+```
+
+## How do I load it?
+
+Run `mb status` — it inspects what is on disk and tells you which situation
+you are in and what to run next.
+
+**On a machine that has already trained:**
+
+```bash
+python -m motherbrain.cli chat      # loads the current version, interactively
+python -m motherbrain.cli serve     # loads it and serves it to your IDEs
+```
+
+Both load the *current version*: the base checkpoint with patches 1..N applied.
+`mb checkout v1` changes which version that is.
+
+**On a fresh clone there is nothing to load yet.** `checkpoint.pt` holds the
+weights and is far too large to commit, so a clone carries the code, the
+tokenizer, the manifest and the patches — but no base model. One command fixes
+that:
+
+```bash
+python -m motherbrain.cli bootstrap        # feed -> prepare -> train -> ready
+```
+
+Or download the `motherbrain-base-checkpoint` artifact from a CI run into
+`runs/default/`, which gives you the exact base the committed patches belong to.
+
+Loading a lineage against the wrong base is refused rather than silently
+applied, and training a new base drops the patches that no longer apply:
+
+```
+note: dropped 3 patch(es) trained against the previous base checkpoint:
+      v1 (500af452), v2 (859de298), v3 (989d8cdc)
 ```
 
 ## How do I feed it new information?
