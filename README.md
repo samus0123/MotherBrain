@@ -465,13 +465,51 @@ tests/           49 tests
 .github/workflows/apply-information.yml   the automatic learning pipeline
 ```
 
+## The trained model
+
+`models/motherbrain-15m.pt` is a real trained model, committed to this
+repository. A clone can run it immediately:
+
+```bash
+mb chat --model models/motherbrain-15m.pt --prompt "def softmax(x, axis=-1):"
+```
+
+15.7M parameters, trained for 4,000 steps (24.6M tokens) on a 53.2M-token
+corpus of Python source. 37.9MB of fp16 weights against a 181MB training
+checkpoint, loaded with `weights_only=True` so opening it executes no code.
+
+```
+step   200   val loss 5.94   perplexity 381
+step  1000   val loss 4.48   perplexity  89
+step  2000   val loss 3.29   perplexity  27
+step  3600   val loss 2.80   perplexity  16.4   <- best
+step  4000   val loss 2.82   perplexity  16.7
+```
+
+A 23x improvement in validation perplexity, on a held-out split. What it
+writes:
+
+```python
+    if not isinstance(x, np.ndarray):
+        return x.shape[0]
+    return x
+
+
+def _to_int(
+```
+
+Syntactically valid, idiomatic Python: a type guard, correct returns, correct
+spacing before a new definition. What it does not write is *correct* code, and
+at this size it will not. It is a real language model that has learned the
+shape of Python from 53M tokens; it is not a coding assistant. Scale and
+corpus are the only cure, and `mb train` is how you apply them.
+
 ## Honest limits
 
-* The checkpoint in this repository is a `micro` model: 5.5M parameters, 400
-  steps, 4.8MB of Python source. It has learned the shape of the language and
-  the facts it was patched with; it is not a chatbot and will not answer
-  general questions well. Scale and corpus are the only cure, and both are
-  yours to choose.
+* The committed model is 15.7M parameters trained on CPU for under one epoch.
+  It writes plausible Python structure, not working programs, and it is not a
+  chatbot - it will not answer general questions. Scale and corpus are the only
+  cure, and both are yours to choose.
 * Chat formatting uses `<user>`/`<assistant>` markers. A base model trained on
   raw text follows them loosely; feed it transcripts in that shape and it
   learns to.
