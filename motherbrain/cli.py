@@ -301,14 +301,17 @@ def cmd_chat(args) -> int:
 
     from motherbrain.tokenizer import EOS_ID
 
-    model, tok, device, version = load_current(args.run, args.device)
-    steps = 0
-    try:
-        ckpt = torch.load(Path(args.run) / "checkpoint.pt", map_location="cpu",
-                          weights_only=False)
-        steps = ckpt.get("step", 0)
-    except Exception:
-        pass
+    if args.model:
+        model, tok, device, version, steps = load_exported(args.model, args.device)
+    else:
+        model, tok, device, version = load_current(args.run, args.device)
+        steps = 0
+        try:
+            ckpt = torch.load(Path(args.run) / "checkpoint.pt", map_location="cpu",
+                              weights_only=False)
+            steps = ckpt.get("step", 0)
+        except Exception:
+            pass
 
     print(f"MotherBrain v{version} · {human(model.n_params())} params · "
           f"trained {steps:,} steps · {device}")
@@ -476,6 +479,87 @@ def cmd_bootstrap(args) -> int:
     print("  mb chat")
     print("  mb serve")
     return 0
+
+
+# --------------------------------------------------------------------------
+# export / import
+
+
+def cmd_export(args) -> int:
+    """Write a compact, self-contained, inference-only model file.
+
+    A training checkpoint carries optimizer state and loads through pickle.
+    An exported model carries fp16 weights, the config and the tokenizer as
+    plain JSON strings, so it is roughly a sixth the size and loads with
+    `weights_only=True` - no code execution on load, which matters for a file
+    meant to be shared.
+    """
+    import json as _json
+
+    import torch
+
+    from motherbrain.patches import PatchStore
+
+    model, tok, device, version = load_current(args.run, "cpu")
+    store = PatchStore(args.run, create=False)
+
+    steps = 0
+    try:
+        ckpt = torch.load(Path(args.run) / "checkpoint.pt", map_location="cpu",
+                          weights_only=False)
+        steps = ckpt.get("step", 0)
+    except Exception:
+        pass
+
+    weights = {k: v.detach().to(torch.float16 if args.fp16 else torch.float32)
+               for k, v in model.state_dict().items()}
+    payload = {
+        "format": "motherbrain-model-v1",
+        "config_json": _json.dumps(model.cfg.to_dict()),
+        "tokenizer_json": Path(args.run if (Path(args.run) / "tokenizer.json").exists()
+                               else args.corpus).joinpath("tokenizer.json").read_text(),
+        "weights": weights,
+        "version": int(version),
+        "steps": int(steps),
+        "base_fingerprint": store.base_fingerprint,
+    }
+
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(payload, out)
+    size = out.stat().st_size / 1e6
+    print(f"exported v{version} ({human(model.n_params())} params, {steps:,} steps)")
+    print(f"  {out}  {size:,.1f} MB  "
+          f"{'fp16' if args.fp16 else 'fp32'}, inference only")
+    print(f"  load it with:  mb chat --model {out}")
+    return 0
+
+
+def load_exported(path: str | Path, device: str = "auto"):
+    """Load a model exported by `mb export`, without executing pickled code."""
+    import json as _json
+
+    import torch
+
+    from motherbrain.model import MotherBrain
+    from motherbrain.tokenizer import Tokenizer
+    from motherbrain.train import pick_device
+
+    payload = torch.load(path, map_location="cpu", weights_only=True)
+    if payload.get("format") != "motherbrain-model-v1":
+        raise ValueError(f"{path} is not a MotherBrain model export")
+
+    cfg = ModelConfig.from_dict(_json.loads(payload["config_json"]))
+    dev = pick_device(device)
+    model = MotherBrain(cfg)
+    model.load_state_dict({k: v.float() for k, v in payload["weights"].items()})
+    model.to(dev).eval()
+
+    tok = Tokenizer.__new__(Tokenizer)
+    data = _json.loads(payload["tokenizer_json"])
+    Tokenizer.__init__(tok, merges=[tuple(p) for p in data["merges"]],
+                       vocab_size=data["vocab_size"])
+    return model, tok, dev, payload.get("version", 0), payload.get("steps", 0)
 
 
 # --------------------------------------------------------------------------
@@ -732,6 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--top-k", type=int, default=40)
     s.add_argument("--top-p", type=float, default=0.95)
     s.add_argument("--device", default="auto")
+    s.add_argument("--model", help="run an exported model file instead of a run dir")
     s.set_defaults(func=cmd_chat)
 
     s = common(sub.add_parser("status", help="what is on disk, and what to run next"))
@@ -750,6 +835,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--device", default="auto")
     s.add_argument("--force", action="store_true", help="retrain even if weights exist")
     s.set_defaults(func=cmd_bootstrap)
+
+    s = common(sub.add_parser(
+        "export", help="write a compact, shareable, inference-only model file"))
+    s.add_argument("--out", default="models/motherbrain.pt")
+    s.add_argument("--fp32", dest="fp16", action="store_false",
+                   help="keep full precision (doubles the file size)")
+    s.set_defaults(func=cmd_export, fp16=True)
 
     s = common(sub.add_parser("patch", help="learn new information as the next version"))
     s.add_argument("--steps", type=int, default=100)

@@ -16,6 +16,7 @@ mb patch      learn new information           -> v1, v2, v3 ...
 mb versions   the lineage
 mb checkout   go back to any earlier version
 mb chat       talk to it locally
+mb export     write a shareable model file
 mb cert       make a TLS certificate
 mb serve      expose it to every IDE you own
 ```
@@ -102,6 +103,23 @@ applied, and training a new base drops the patches that no longer apply:
 note: dropped 3 patch(es) trained against the previous base checkpoint:
       v1 (500af452), v2 (859de298), v3 (989d8cdc)
 ```
+
+## Sharing a trained model
+
+A training checkpoint carries optimizer state, weighs several times what the
+weights alone do, and loads through pickle. `mb export` writes the model
+instead: fp16 weights with the config and tokenizer embedded as JSON.
+
+```bash
+mb export --out models/motherbrain-15m.pt
+mb chat --model models/motherbrain-15m.pt      # runs it directly
+```
+
+The result is roughly a sixth the size of the checkpoint, self-contained, and
+loads under `torch.load(weights_only=True)` — no code executes when you open
+one, which is what makes it safe to hand to someone else. This is also how a
+trained model survives a machine: checkpoints are gitignored, exports are
+small enough to keep.
 
 ## How do I feed it new information?
 
@@ -300,10 +318,11 @@ ingestion is disabled by default and confined to an allowlist when enabled.
 
 What is still on you:
 
-* **Trust the weights you load.** `torch.load` on a base checkpoint uses
-  Python pickle and can execute code. Patches load with `weights_only=True`;
-  checkpoints do not, because they carry config objects. Only load checkpoints
-  you produced or trust.
+* **Trust the weights you load.** `torch.load` on a base *checkpoint* uses
+  Python pickle and can execute code, because checkpoints carry config
+  objects. Patches and `mb export` files both load with `weights_only=True`
+  and are safe to accept from elsewhere; raw checkpoints are not, so only
+  load ones you produced or trust.
 * **Anything you feed can come back out.** Do not feed secrets to a model that
   other people may prompt.
 * **A self-signed certificate is not identity.** Pin the fingerprint, or use a
@@ -441,7 +460,7 @@ motherbrain/
   api_compat.py  OpenAI and Ollama protocol surfaces
   security.py    path confinement, auth, rate limiting, exposure checks
   cli.py         the mb command line
-configs/         mother.json, the largest model's definition
+configs/         mother.json, and the model actually being trained
 tests/           49 tests
 .github/workflows/apply-information.yml   the automatic learning pipeline
 ```

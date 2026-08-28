@@ -717,3 +717,58 @@ def test_chat_output_is_visibly_delimited(served, capsys, monkeypatch):
     assert "MotherBrain v" in out
     assert "─" * 10 in out          # the output is framed
     assert "tokens in" in out       # and counted
+
+
+# ---- exported models ------------------------------------------------------
+
+
+def test_export_roundtrips_and_loads_without_pickle(served, tmp_path, capsys):
+    """An exported model is meant to be shared, so it must load safely.
+
+    Training checkpoints carry optimizer state and load through pickle. An
+    export carries fp16 weights plus config and tokenizer as JSON strings, so
+    torch.load(weights_only=True) can read it - no code execution on load.
+    """
+    import torch
+
+    from motherbrain.cli import build_parser, load_exported
+
+    run, corpus = served
+    out = tmp_path / "model.pt"
+    args = build_parser().parse_args(
+        ["export", "--out", str(out), "--corpus", str(corpus), "--run", str(run)])
+    assert args.func(args) == 0
+    assert out.exists()
+
+    # The safety property: readable with weights_only, i.e. no pickled objects.
+    payload = torch.load(out, map_location="cpu", weights_only=True)
+    assert payload["format"] == "motherbrain-model-v1"
+
+    model, tok, device, version, steps = load_exported(str(out), device="cpu")
+    ids = tok.encode("hello world")
+    assert tok.decode(ids) == "hello world"
+    with torch.no_grad():
+        logits, _ = model(torch.tensor([ids[:4] or [1]]), None)
+    assert torch.isfinite(logits).all()
+
+
+def test_export_is_smaller_than_the_checkpoint(served, tmp_path):
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    out = tmp_path / "model.pt"
+    args = build_parser().parse_args(
+        ["export", "--out", str(out), "--corpus", str(corpus), "--run", str(run)])
+    args.func(args)
+    assert out.stat().st_size < (run / "checkpoint.pt").stat().st_size
+
+
+def test_export_rejects_a_foreign_file(tmp_path):
+    import torch
+
+    from motherbrain.cli import load_exported
+
+    bogus = tmp_path / "not-a-model.pt"
+    torch.save({"weights": {}}, bogus)
+    with pytest.raises(ValueError, match="not a MotherBrain model export"):
+        load_exported(str(bogus))
