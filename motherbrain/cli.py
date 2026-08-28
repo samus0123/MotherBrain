@@ -288,25 +288,54 @@ def load_current(run_dir: str, device: str = "auto"):
 
 
 def cmd_chat(args) -> int:
+    """Generate text from the current version.
+
+    Output is delimited and counted. An undertrained model emits mostly
+    whitespace, and a blank screen is indistinguishable from a command that
+    silently failed, so the rules and the token count are what tell you it
+    actually ran.
+    """
+    import time as _time
+
     import torch
+
     from motherbrain.tokenizer import EOS_ID
 
     model, tok, device, version = load_current(args.run, args.device)
-    print(f"MotherBrain v{version}, {human(model.n_params())} params.")
-    print("type a prompt; ctrl-c or empty line to leave.\n")
+    steps = 0
+    try:
+        ckpt = torch.load(Path(args.run) / "checkpoint.pt", map_location="cpu",
+                          weights_only=False)
+        steps = ckpt.get("step", 0)
+    except Exception:
+        pass
 
-    if args.prompt:
-        prompts = [args.prompt]
-    else:
-        prompts = iter(lambda: input("> "), "")
+    print(f"MotherBrain v{version} · {human(model.n_params())} params · "
+          f"trained {steps:,} steps · {device}")
+    if steps < 500:
+        print(f"note: {steps:,} training steps is very little. Expect mostly "
+              f"whitespace and fragments. Train longer with "
+              f"`mb train --steps 2000 --resume`.")
+    if not args.prompt:
+        print("type a prompt; empty line or ctrl-c to leave.")
+    print()
+
+    prompts = [args.prompt] if args.prompt else iter(lambda: input("> "), "")
+    rule = "─" * 60
 
     for prompt in prompts:
         ids = torch.tensor([tok.encode(prompt, bos=True)], device=device)
+        print(rule)
+        t0 = _time.time()
+        n = 0
         for token in model.generate(ids, max_new_tokens=args.max_tokens,
                                     temperature=args.temperature, top_k=args.top_k,
                                     top_p=args.top_p, eos_id=EOS_ID):
             print(tok.decode([token]), end="", flush=True)
-        print("\n")
+            n += 1
+        elapsed = _time.time() - t0
+        print(f"\n{rule}")
+        print(f"{n} tokens in {elapsed:.1f}s ({n / max(elapsed, 1e-9):.1f} tok/s)\n")
     return 0
 
 

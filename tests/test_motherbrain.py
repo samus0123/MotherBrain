@@ -642,3 +642,23 @@ def test_attention_materialises_at_mother_width():
     sin = torch.randn(2, cfg.head_dim // 2)
     with torch.no_grad():
         assert attn(x, cos, sin).shape == (1, 2, cfg.d_model)
+
+
+def test_chat_output_is_visibly_delimited(served, capsys, monkeypatch):
+    """An undertrained model emits mostly whitespace.
+
+    A blank screen is indistinguishable from a command that silently failed,
+    so chat frames its output and reports a token count.
+    """
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    args = build_parser().parse_args(
+        ["chat", "--prompt", "hello", "--max-tokens", "5",
+         "--corpus", str(corpus), "--run", str(run)])
+    assert args.func(args) == 0
+
+    out = capsys.readouterr().out
+    assert "MotherBrain v" in out
+    assert "─" * 10 in out          # the output is framed
+    assert "tokens in" in out       # and counted

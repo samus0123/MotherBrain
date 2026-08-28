@@ -49,6 +49,25 @@ mb chat --prompt "hello"
 mb serve            # 127.0.0.1 by default
 ```
 
+## How do I run it?
+
+Three commands, from a clean clone:
+
+```bash
+pip install -e .        # installs deps and the `mb` command
+mb bootstrap            # trains a base model if there is not one yet
+mb chat                 # talk to it
+```
+
+`mb serve` instead of `mb chat` exposes it over HTTP for your IDEs. `mb status`
+at any point tells you what state you are in.
+
+A freshly bootstrapped model is barely trained and will emit mostly whitespace
+and fragments — `mb chat` frames its output and reports a token count so you
+can tell it ran rather than failed, and warns when the step count is too low
+to expect anything coherent. `mb train --steps 2000 --resume` is what fixes
+that.
+
 ## How do I load it?
 
 Run `mb status` — it inspects what is on disk and tells you which situation
