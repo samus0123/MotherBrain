@@ -333,7 +333,8 @@ def cmd_chat(args) -> int:
         n = 0
         for token in model.generate(ids, max_new_tokens=args.max_tokens,
                                     temperature=args.temperature, top_k=args.top_k,
-                                    top_p=args.top_p, eos_id=EOS_ID):
+                                    top_p=args.top_p, eos_id=EOS_ID,
+                                    repetition_penalty=args.repetition_penalty):
             print(tok.decode([token]), end="", flush=True)
             n += 1
         elapsed = _time.time() - t0
@@ -816,6 +817,9 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--top-k", type=int, default=40)
     s.add_argument("--top-p", type=float, default=0.95)
     s.add_argument("--device", default="auto")
+    s.add_argument("--repetition-penalty", type=float, default=1.1,
+                   help="divide the logits of tokens already seen; small models "
+                        "loop without this (1.0 disables)")
     s.add_argument("--model", help="run an exported model file instead of a run dir")
     s.set_defaults(func=cmd_chat)
 

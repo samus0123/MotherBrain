@@ -801,3 +801,25 @@ def test_every_saved_checkpoint_is_immediately_loadable(tmp_path):
     model, _, version = build_version(str(run))   # must not raise
     assert version == 0
     assert model.n_params() > 0
+
+
+def test_repetition_penalty_is_applied_by_chat(served, capsys):
+    """Small models fall into loops at low temperature.
+
+    generate() has always supported a repetition penalty and the HTTP API
+    exposed it, but `mb chat` did not, so the CLI had no way out of a loop.
+    """
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    parser = build_parser()
+    args = parser.parse_args(["chat", "--prompt", "x", "--max-tokens", "3",
+                              "--corpus", str(corpus), "--run", str(run)])
+    assert args.repetition_penalty == 1.1     # on by default
+    assert args.func(args) == 0
+
+    args = parser.parse_args(["chat", "--prompt", "x", "--max-tokens", "3",
+                              "--repetition-penalty", "1.0",
+                              "--corpus", str(corpus), "--run", str(run)])
+    assert args.repetition_penalty == 1.0
+    assert args.func(args) == 0
