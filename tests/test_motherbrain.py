@@ -572,3 +572,73 @@ def test_status_does_not_create_a_workspace(tmp_path, capsys):
 
     assert not corpus.exists()
     assert not run.exists()
+
+
+# ---- fitting a model to real hardware -------------------------------------
+
+
+@pytest.mark.parametrize("n_gpus,gpu_gb", [
+    (1, 8), (1, 24), (1, 80), (8, 80), (64, 80), (1024, 80), (202459, 80),
+])
+def test_fit_to_hardware_returns_something_that_actually_fits(n_gpus, gpu_gb):
+    """A configuration that does not fit is worse than an honest refusal.
+
+    The first version of this returned the smallest shape it had tried even
+    when that shape exceeded the budget, so it claimed 100B parameters fit on
+    eight GPUs and then reported needing eighteen.
+    """
+    from motherbrain.cli import fit_to_hardware
+
+    cfg, _ = fit_to_hardware(n_gpus, gpu_gb)
+    assert cfg is not None
+    assert cfg.memory_bytes(optimizer=True) <= n_gpus * gpu_gb * 1e9
+    assert cfg.n_experts >= 1
+    assert cfg.n_experts_per_token <= cfg.n_experts
+
+
+def test_fit_to_hardware_grows_with_the_cluster():
+    from motherbrain.cli import fit_to_hardware
+
+    small, _ = fit_to_hardware(8, 80)
+    large, _ = fit_to_hardware(1024, 80)
+    assert large.n_params > small.n_params
+
+
+def test_fit_to_hardware_admits_when_nothing_fits():
+    from motherbrain.cli import fit_to_hardware
+
+    cfg, note = fit_to_hardware(1, 0.001)
+    assert cfg is None
+    assert "micro" in note
+
+
+def test_mother_config_artifact_matches_the_preset():
+    """configs/mother.json is the committed definition of the largest model."""
+    from motherbrain.config import PRESETS, ModelConfig
+
+    root = Path(__file__).resolve().parent.parent
+    cfg = ModelConfig.load(str(root / "configs" / "mother.json"))
+    assert cfg.n_params == PRESETS["mother"].n_params
+    assert cfg.n_params > 1e15
+
+
+def test_attention_materialises_at_mother_width():
+    """The largest preset is arithmetic unless its real modules can be built.
+
+    One attention block at mother's true width is ~0.9B parameters, which is
+    small enough to instantiate here and large enough to prove the shape is
+    real rather than a number in a table.
+    """
+    from motherbrain.config import PRESETS
+    from motherbrain.model import Attention
+
+    cfg = PRESETS["mother"]
+    attn = Attention(cfg)
+    built = sum(p.numel() for p in attn.parameters())
+    assert built == cfg.attn_params_per_layer
+
+    x = torch.randn(1, 2, cfg.d_model)
+    cos = torch.randn(2, cfg.head_dim // 2)
+    sin = torch.randn(2, cfg.head_dim // 2)
+    with torch.no_grad():
+        assert attn(x, cos, sin).shape == (1, 2, cfg.d_model)

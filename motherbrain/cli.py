@@ -45,6 +45,23 @@ DEFAULT_RUN = os.environ.get("MB_RUN") or str(project_root() / "runs" / "default
 
 
 def cmd_scale(args) -> int:
+    if args.fit_gpus:
+        cfg, note = fit_to_hardware(args.fit_gpus, args.gpu_gb, base=args.base)
+        if cfg is None:
+            print(note)
+            return 1
+        print(f"largest configuration that fits on "
+              f"{args.fit_gpus} x {args.gpu_gb:g}GB:\n")
+        if note:
+            print(f"note: {note}\n")
+        print(cfg.summary())
+        print()
+        print(feasibility(cfg))
+        if args.save:
+            cfg.save(args.save)
+            print(f"\nconfig written to {args.save}")
+        return 0
+
     if args.params:
         cfg = scale_to(parse_count(args.params), base=args.base)
     else:
@@ -71,6 +88,66 @@ def parse_count(s: str) -> float:
     if s and s[-1] in mult:
         return float(s[:-1]) * mult[s[-1]]
     return float(s)
+
+
+# Preset shapes ordered small to large; --fit-gpus walks down this ladder when
+# the requested shape cannot fit at all.
+SHAPE_LADDER = ["micro", "small", "small-moe", "medium", "large", "titan"]
+
+
+def fit_to_hardware(n_gpus: int, gpu_gb: float,
+                    base: str = "titan") -> tuple[ModelConfig | None, str]:
+    """The largest configuration that a given cluster can actually hold.
+
+    "As many parameters as possible" only means something once it is bounded by
+    memory you have. Experts are the axis grown here: they raise the total
+    parameter count without raising per-token compute. If even a single expert
+    of the requested shape does not fit, smaller shapes are tried in turn,
+    because returning a configuration that does not fit would be worse than
+    saying so.
+    """
+    budget = n_gpus * gpu_gb * 1e9
+
+    candidates = [base]
+    if base in SHAPE_LADDER:
+        candidates = list(reversed(SHAPE_LADDER[:SHAPE_LADDER.index(base) + 1]))
+
+    for shape in candidates:
+        cfg = ModelConfig.from_dict(PRESETS[shape].to_dict())
+        if cfg.n_experts == 0:
+            cfg.n_experts = 1
+            cfg.n_experts_per_token = 1
+        cfg.n_experts = 1
+        if cfg.memory_bytes(optimizer=True) > budget:
+            continue  # this shape cannot fit even at its smallest
+
+        low, high = 1, 1
+        while True:  # grow until it no longer fits, then bisect
+            cfg.n_experts = high * 2
+            if cfg.memory_bytes(optimizer=True) > budget or high > (1 << 24):
+                break
+            low, high = high * 2, high * 2
+        while low < high:
+            mid = (low + high + 1) // 2
+            cfg.n_experts = mid
+            if cfg.memory_bytes(optimizer=True) <= budget:
+                low = mid
+            else:
+                high = mid - 1
+
+        cfg.n_experts = max(low, 1)
+        cfg.n_experts_per_token = min(PRESETS[shape].n_experts_per_token or 1,
+                                      cfg.n_experts)
+        cfg.name = f"{shape}-fit-{n_gpus}x{gpu_gb:g}gb"
+        note = "" if shape == base else (
+            f"the {base} shape does not fit at any expert count; "
+            f"using the {shape} shape instead.")
+        return cfg, note
+
+    return None, (
+        f"nothing in the preset ladder fits in {n_gpus} x {gpu_gb:g}GB "
+        f"({budget / 1e9:,.0f} GB). Even the micro shape needs "
+        f"{PRESETS['micro'].memory_bytes(optimizer=True) / 1e9:.2f} GB to train.")
 
 
 def feasibility(cfg: ModelConfig) -> str:
@@ -583,6 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--params", help="instead: smallest config with at least N params (e.g. 2T)")
     s.add_argument("--base", default="titan", help="preset to scale up from with --params")
     s.add_argument("--experts", type=int, help="override the expert count")
+    s.add_argument("--fit-gpus", type=int,
+                   help="instead: the largest model that fits on this many GPUs")
+    s.add_argument("--gpu-gb", type=float, default=80.0,
+                   help="memory per GPU when using --fit-gpus (default 80)")
     s.add_argument("--save", help="write the resulting config to this path")
     s.set_defaults(func=cmd_scale)
 

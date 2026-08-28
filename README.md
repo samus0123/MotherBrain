@@ -356,6 +356,12 @@ $ mb scale --preset mother
 | `leviathan` | 137T | 2.7T | |
 | `mother` | 1157T | 6.9T | larger than any model ever trained |
 
+`configs/mother.json` is the committed definition of that model. The shape is
+not just arithmetic: one attention block at mother's true width instantiates
+here as 922,746,880 real parameters and runs a real forward pass, matching the
+analytic prediction exactly (`tests/` asserts both). What needs a datacenter is
+assembling 160 layers of them alongside 2048 experts apiece.
+
 `mb scale` prints the arithmetic honestly, including what it would actually
 take:
 
@@ -369,6 +375,25 @@ So: the architecture and the accounting are real and the counts are exact —
 `tests/` verifies the analytic formula against actually-instantiated models.
 Training the largest presets is a datacenter procurement problem, not a
 software one. Everything up to `medium` trains on hardware you have.
+
+For the practical inverse — the largest model your actual hardware can hold —
+ask it directly:
+
+```bash
+mb scale --fit-gpus 8              # largest config that fits on 8 x 80GB
+mb scale --fit-gpus 1 --gpu-gb 24  # ...or on one 24GB card
+```
+
+It grows the expert count until the weights plus optimizer state stop fitting,
+steps down to a smaller shape when the requested one cannot fit at all, and
+says plainly when nothing fits rather than returning a configuration that does
+not.
+
+```
+              1 x 24GB   medium-fit-1x24gb        1.321B
+              8 x 80GB   large-fit-8x80gb         42.73B
+           1024 x 80GB   titan-fit-1024x80gb       5.62T
+```
 
 ## Architecture
 
@@ -397,6 +422,7 @@ motherbrain/
   api_compat.py  OpenAI and Ollama protocol surfaces
   security.py    path confinement, auth, rate limiting, exposure checks
   cli.py         the mb command line
+configs/         mother.json, the largest model's definition
 tests/           49 tests
 .github/workflows/apply-information.yml   the automatic learning pipeline
 ```
