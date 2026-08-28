@@ -1,0 +1,37 @@
+# Shared defaults. Experiment configs `inherit:` this file and override
+# only what differs.
+model:
+  vocab_size: 32000
+  max_seq_len: 1024
+  dropout: 0.0
+  rope_theta: 10000.0
+  tie_embeddings: true
+
+data:
+  data_dir: data/tokenized
+  train_split: train
+  val_split: val
+  shuffle: true
+
+optim:
+  lr: 6.0e-4
+  min_lr_ratio: 0.1
+  warmup_steps: 2000
+  schedule: cosine
+  weight_decay: 0.1
+  beta1: 0.9
+  beta2: 0.95
+  grad_clip: 1.0
+  fused: true
+
+train:
+  device: auto
+  dtype: auto
+  compile: true
+  seed: 1337
+  eval_interval: 500
+  eval_steps: 50
+  log_interval: 10
+  ckpt_interval: 1000
+  keep_last_n: 3
+  save_best: true

@@ -1,0 +1,25 @@
+# 316M total params (283M non-embedding), 2k context.
+#
+# Grouped-query attention (16 query heads -> 8 KV heads) halves the KV cache at
+# inference for a negligible quality cost.
+#
+# Reference recipe: 8x A100-80GB. batch_size 8 x grad_accum 8 x 2048 tokens
+# x 8 GPUs = 1.05M tokens/step, so 60k steps ~= 63B tokens.
+inherit: base.yaml
+
+model:
+  n_layer: 24
+  n_head: 16
+  n_kv_head: 8
+  d_model: 1024
+  max_seq_len: 2048
+
+optim:
+  lr: 3.0e-4
+  warmup_steps: 3000
+
+train:
+  out_dir: runs/medium_320m
+  batch_size: 8
+  grad_accum_steps: 8
+  max_steps: 60000

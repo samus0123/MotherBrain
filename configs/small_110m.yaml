@@ -1,0 +1,27 @@
+# 110M total params (85M non-embedding) -- GPT-2-small scale, 1k context.
+#
+# Reference recipe: 8x A100-80GB. batch_size 16 x grad_accum 4 x 1024 tokens
+# x 8 GPUs = 524k tokens/step, so 40k steps ~= 21B tokens (~10x the
+# Chinchilla-compute-optimal budget for this size -- deliberately overtrained,
+# which is what you want if the model is going to be served).
+#
+# On fewer GPUs, scale grad_accum_steps by 8/num_gpus to hold the effective
+# batch (and therefore the LR schedule) fixed.
+inherit: base.yaml
+
+model:
+  n_layer: 12
+  n_head: 12
+  n_kv_head: 12       # plain multi-head attention at this scale
+  d_model: 768
+  max_seq_len: 1024
+
+optim:
+  lr: 6.0e-4
+  warmup_steps: 2000
+
+train:
+  out_dir: runs/small_110m
+  batch_size: 16
+  grad_accum_steps: 4
+  max_steps: 40000
