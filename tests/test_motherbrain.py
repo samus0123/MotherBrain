@@ -823,3 +823,31 @@ def test_repetition_penalty_is_applied_by_chat(served, capsys):
                               "--corpus", str(corpus), "--run", str(run)])
     assert args.repetition_penalty == 1.0
     assert args.func(args) == 0
+
+
+def test_training_keeps_the_best_checkpoint(tmp_path):
+    """Validation loss turns back up once a run overfits.
+
+    The rolling checkpoint is overwritten every save_every steps, so without a
+    separate copy the best weights are lost to later, worse ones - which is
+    exactly what a long run does after it passes its optimum.
+    """
+    import json
+
+    from motherbrain.data import Corpus
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns " * 300, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    tc = TrainConfig(steps=6, batch_size=2, seq_len=16, warmup=1, save_every=6,
+                     eval_every=2, log_every=100, eval_batches=1)
+    summary = train(str(tmp_path / "corpus"), str(run), cfg, tc)
+
+    assert (run / "best.pt").exists()
+    assert summary["best_val_loss"] is not None
+    evals = [h["val_loss"] for h in summary["history"]]
+    assert summary["best_val_loss"] == pytest.approx(min(evals))

@@ -191,6 +191,8 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
 
     t0 = time.time()
     last_loss = float("nan")
+    best_val = min((h["val_loss"] for h in history), default=float("inf"))
+    best_path = out / "best.pt"
 
     for step in range(start_step, tc.steps):
         lr = lr_at(step, tc)
@@ -233,7 +235,17 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
             ppl = math.exp(min(val, 20))
             history.append({"step": done, "train_loss": accum_loss,
                             "val_loss": val, "perplexity": ppl})
-            print(f"           eval  val_loss {val:.4f}  perplexity {ppl:.2f}", flush=True)
+            marker = ""
+            if val < best_val:
+                # Validation loss turns back up once a run starts overfitting,
+                # and the rolling checkpoint would overwrite the best weights
+                # with worse ones. Keep the best separately.
+                best_val = val
+                base = model._orig_mod if hasattr(model, "_orig_mod") else model
+                save_checkpoint(best_path, base, opt, done, cfg, tc, history)
+                marker = "  <- best"
+            print(f"           eval  val_loss {val:.4f}  perplexity {ppl:.2f}"
+                  f"{marker}", flush=True)
 
         if progress_cb is not None:
             progress_cb({"step": done, "total": tc.steps, "loss": accum_loss, "lr": lr})
@@ -251,9 +263,13 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
     # patches start from here rather than relearning the whole corpus.
     stamp_base(base)
 
+    if best_path.exists() and best_val < float("inf"):
+        print(f"best validation loss {best_val:.4f} kept at {best_path}")
+
     summary = {
         "steps": tc.steps,
         "final_loss": last_loss,
+        "best_val_loss": best_val if best_val < float("inf") else None,
         "params": base.n_params(),
         "checkpoint": str(ckpt_path),
         "history": history,
