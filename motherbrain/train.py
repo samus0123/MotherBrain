@@ -169,6 +169,26 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
     autocast = (torch.amp.autocast("cuda", dtype=torch.bfloat16)
                 if use_amp else torch.amp.autocast("cpu", enabled=False))
 
+    from motherbrain.patches import PatchStore, weights_fingerprint
+
+    store = PatchStore(out)
+    stamped = False
+
+    def stamp_base(base_model) -> None:
+        """Adopt these weights as the base as soon as they are written.
+
+        Doing this only at the end of training would leave every intermediate
+        checkpoint unloadable: the manifest would still describe the previous
+        base, and the lineage guard would refuse the new weights. An
+        interrupted run would produce a checkpoint nobody could open.
+        """
+        nonlocal stamped
+        dropped = store.set_base(weights_fingerprint(base_model), corpus.n_documents)
+        if dropped and not stamped:
+            print(f"note: dropped {len(dropped)} patch(es) trained against the "
+                  f"previous base checkpoint: {', '.join(dropped)}", flush=True)
+        stamped = True
+
     t0 = time.time()
     last_loss = float("nan")
 
@@ -221,20 +241,15 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
         if done % tc.save_every == 0 or done == tc.steps:
             base = model._orig_mod if hasattr(model, "_orig_mod") else model
             save_checkpoint(ckpt_path, base, opt, done, cfg, tc, history)
+            tok.save(str(out / "tokenizer.json"))
+            stamp_base(base)  # keep every saved checkpoint loadable
 
     base = model._orig_mod if hasattr(model, "_orig_mod") else model
     save_checkpoint(ckpt_path, base, opt, tc.steps, cfg, tc, history)
     tok.save(str(out / "tokenizer.json"))
-
     # Everything in the corpus right now lives in these weights, so later
     # patches start from here rather than relearning the whole corpus.
-    from motherbrain.patches import PatchStore, weights_fingerprint
-
-    store = PatchStore(out)
-    dropped = store.set_base(weights_fingerprint(base), corpus.n_documents)
-    if dropped:
-        print(f"note: dropped {len(dropped)} patch(es) trained against the previous "
-              f"base checkpoint: {', '.join(dropped)}")
+    stamp_base(base)
 
     summary = {
         "steps": tc.steps,

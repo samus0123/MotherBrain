@@ -772,3 +772,32 @@ def test_export_rejects_a_foreign_file(tmp_path):
     torch.save({"weights": {}}, bogus)
     with pytest.raises(ValueError, match="not a MotherBrain model export"):
         load_exported(str(bogus))
+
+
+def test_every_saved_checkpoint_is_immediately_loadable(tmp_path):
+    """Training stamps the base identity as it saves, not only at the end.
+
+    Stamping only on completion left every intermediate checkpoint unloadable:
+    the manifest still described the previous base, so the lineage guard
+    refused the new weights. A long run that got interrupted produced a large
+    checkpoint nobody could open.
+    """
+    from motherbrain.config import ModelConfig
+    from motherbrain.data import Corpus
+    from motherbrain.patches import build_version
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns " * 200, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    # save_every < steps, so a checkpoint exists well before the run ends
+    tc = TrainConfig(steps=4, batch_size=2, seq_len=16, warmup=1, save_every=2,
+                     eval_every=100, log_every=100, eval_batches=1)
+    train(str(tmp_path / "corpus"), str(run), cfg, tc)
+
+    model, _, version = build_version(str(run))   # must not raise
+    assert version == 0
+    assert model.n_params() > 0
