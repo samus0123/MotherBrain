@@ -41,6 +41,61 @@ def test_roundtrip_is_exact():
         assert tok.decode(tok.encode(text)) == text
 
 
+def _naive_bpe(texts, vocab_size):
+    """The obvious O(merges x corpus) implementation, as ground truth."""
+    from collections import Counter
+
+    from motherbrain.tokenizer import SPECIAL_TOKENS, SPLIT_PATTERN
+
+    ns = len(SPECIAL_TOKENS)
+    n_merges = max(0, vocab_size - ns - 256)
+    freqs_by_word = Counter()
+    for t in texts:
+        freqs_by_word.update(SPLIT_PATTERN.findall(t))
+    words = [[ns + b for b in w.encode()] for w in freqs_by_word]
+    freqs = list(freqs_by_word.values())
+
+    merges, next_id = [], ns + 256
+    for _ in range(n_merges):
+        counts = Counter()
+        for seq, f in zip(words, freqs):
+            for pair in zip(seq, seq[1:]):
+                counts[pair] += f
+        best, best_count = None, 1
+        for pair, c in counts.items():
+            if c > best_count or (c == best_count and best is not None and pair < best):
+                best, best_count = pair, c
+        if best is None:
+            break
+        merges.append(best)
+        a, b = best
+        for i, seq in enumerate(words):
+            out, j = [], 0
+            while j < len(seq):
+                if j < len(seq) - 1 and seq[j] == a and seq[j + 1] == b:
+                    out.append(next_id)
+                    j += 2
+                else:
+                    out.append(seq[j])
+                    j += 1
+            words[i] = out
+        next_id += 1
+    return merges
+
+
+def test_fast_bpe_matches_the_naive_implementation():
+    """The trainer is incremental and heap-driven for speed.
+
+    Both optimisations are easy to get subtly wrong, and a wrong merge table
+    is not an error - it is a slightly worse tokenizer nobody notices. So the
+    fast path is checked against the obvious implementation.
+    """
+    corpus = SAMPLE + ["def f(x_1): return x_1 + 1 " * 20, "aaa bbb aaa ccc " * 30]
+    tok = Tokenizer.train(corpus, vocab_size=500)
+    fast = [p for p, _ in sorted(tok.merges.items(), key=lambda kv: kv[1])]
+    assert fast == _naive_bpe(corpus, 500)
+
+
 def test_training_is_deterministic():
     a = Tokenizer.train(SAMPLE, vocab_size=400)
     b = Tokenizer.train(SAMPLE, vocab_size=400)
