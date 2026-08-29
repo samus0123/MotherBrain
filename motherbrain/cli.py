@@ -399,6 +399,10 @@ def cmd_status(args) -> int:
     versions = store.versions()
     print("lineage")
     print(f"  v0 base" + (f" + {len(versions)} patch(es)" if versions else ""))
+    grown = [v for v in versions if v.mode == "grow" and v.params_after]
+    if grown:
+        print(f"  grown {human(grown[0].params_before)} -> "
+              f"{human(grown[-1].params_after)} across {len(grown)} patch(es)")
     if versions:
         print(f"  current: v{store.current} of v{store.head}")
     if store.base_fingerprint:
@@ -581,7 +585,8 @@ def cmd_patch(args) -> int:
         return 0
 
     print(f"patching v{store.current} with {pending} new document(s) ...")
-    cfg = PatchConfig(rank=args.rank, steps=args.steps, batch_size=args.batch_size,
+    cfg = PatchConfig(mode=args.mode, grow_experts=args.grow,
+                      rank=args.rank, steps=args.steps, batch_size=args.batch_size,
                       lr=args.lr, replay_ratio=args.replay, seq_len=args.seq_len)
     version = create_patch(args.run, args.corpus, cfg, note=args.note,
                            device=args.device)
@@ -590,8 +595,16 @@ def cmd_patch(args) -> int:
         return 0
     print(f"\nv{version.parent} -> v{version.version}   patch {version.patch_id}")
     print(f"  learned      {version.n_documents} docs, {version.n_tokens:,} tokens")
-    print(f"  patch size   {version.trainable_params:,} trainable params "
-          f"(rank {version.rank})")
+    if version.mode == "grow":
+        added = version.params_after - version.params_before
+        print(f"  grew         +{version.grow_experts} expert(s) per layer, "
+              f"+{added:,} parameters")
+        print(f"  size         {human(version.params_before)} -> "
+              f"{human(version.params_after)}")
+    else:
+        print(f"  patch size   {version.trainable_params:,} trainable params "
+              f"(rank {version.rank})")
+    print(f"  trained      {version.trainable_params:,} parameters")
     print(f"  loss         {version.loss_before:.4f} -> {version.loss_after:.4f}")
     return 0
 
@@ -606,9 +619,11 @@ def cmd_versions(args) -> int:
     for v in versions:
         mark = "   <- current" if v.version == current else ""
         when = time.strftime("%Y-%m-%d %H:%M", time.localtime(v.created_at))
+        size = (f"  {human(v.params_before)}->{human(v.params_after)}"
+                if v.mode == "grow" and v.params_after else "")
         print(f"v{v.version}  {v.patch_id}  {when}  "
               f"{v.n_documents} docs / {v.n_tokens:,} tokens  "
-              f"loss {v.loss_before:.3f}->{v.loss_after:.3f}{mark}")
+              f"loss {v.loss_before:.3f}->{v.loss_after:.3f}{size}{mark}")
         if v.note:
             print(f"      note: {v.note}")
         if args.verbose and v.sources:
@@ -848,6 +863,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_export, fp16=True)
 
     s = common(sub.add_parser("patch", help="learn new information as the next version"))
+    s.add_argument("--mode", choices=["grow", "lora"], default="grow",
+                   help="grow: add experts, so the model gets larger with every "
+                        "version; lora: a low-rank delta that keeps its size")
+    s.add_argument("--grow", type=int, default=1,
+                   help="experts added per layer when growing")
     s.add_argument("--steps", type=int, default=100)
     s.add_argument("--rank", type=int, default=8)
     s.add_argument("--batch-size", type=int, default=8)

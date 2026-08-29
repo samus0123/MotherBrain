@@ -851,3 +851,96 @@ def test_training_keeps_the_best_checkpoint(tmp_path):
     assert summary["best_val_loss"] is not None
     evals = [h["val_loss"] for h in summary["history"]]
     assert summary["best_val_loss"] == pytest.approx(min(evals))
+
+
+# ---- growth ---------------------------------------------------------------
+
+
+def test_growth_preserves_behaviour_exactly():
+    """A grown model must compute what it computed before, to the bit.
+
+    New experts start with a zeroed output projection and a -1e9 router bias,
+    so they cannot be selected and contribute nothing. Anything else would mean
+    learning one new fact silently damaged everything already known.
+    """
+    from motherbrain.growth import grow, release
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny()).eval()
+    x = torch.randint(0, 300, (2, 8))
+    before, _ = model(x, None)
+
+    grow(model, 2)                       # dense -> MoE
+    after, _ = model(x, None)
+    assert torch.allclose(before, after, atol=1e-6)
+
+    release(model, 2)                    # routable, but still silent
+    assert torch.allclose(before, model(x, None)[0], atol=1e-6)
+
+    grow(model, 3)                       # MoE -> larger MoE
+    assert torch.allclose(before, model(x, None)[0], atol=1e-6)
+
+
+def test_growth_adds_parameters_and_keeps_compute_flat():
+    """The point of growing through experts: size rises, per-token cost does not."""
+    from motherbrain.growth import grow
+
+    model = MotherBrain(tiny())
+    before = model.n_params()
+    active_before = model.cfg.n_active_params
+
+    cfg, trainable = grow(model, 4)
+    assert model.n_params() > before
+    assert model.n_params() == cfg.n_params        # analytic accounting holds
+    assert trainable and sum(p.numel() for p in trainable) > 0
+
+    # Only n_experts_per_token experts run, so activation stays near the dense cost.
+    assert cfg.n_active_params < cfg.n_params
+    assert cfg.n_active_params < active_before * 3
+
+
+def test_growth_rejects_nonsense():
+    from motherbrain.growth import grow
+
+    with pytest.raises(ValueError):
+        grow(MotherBrain(tiny()), 0)
+
+
+def test_every_patch_grows_the_model_and_replays_exactly(tmp_path):
+    """The end-to-end promise: information in, parameters up, version up.
+
+    Each patch must also replay from the base, or the lineage is decorative.
+    """
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchConfig, build_version, create_patch
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns and grows " * 200, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    train(str(tmp_path / "corpus"), str(run),
+          cfg, TrainConfig(steps=2, batch_size=2, seq_len=16, warmup=1,
+                           save_every=2, eval_every=2, log_every=100,
+                           eval_batches=1))
+
+    sizes = []
+    for i in range(3):
+        corpus.add_text(f"fact number {i} about the growing mother brain", f"f{i}")
+        v = create_patch(str(run), str(tmp_path / "corpus"),
+                         PatchConfig(mode="grow", grow_experts=1, steps=3,
+                                     batch_size=2, seq_len=16))
+        assert v is not None
+        assert v.version == i + 1                      # sequential versions
+        assert v.params_after > v.params_before        # and it grew
+        assert v.mode == "grow"
+        sizes.append(v.params_after)
+
+    assert sizes == sorted(sizes)                      # monotonically larger
+
+    for target, expected in enumerate(sizes, start=1):
+        model, _, version = build_version(str(run), target=target)
+        assert version == target
+        assert model.n_params() == expected           # replays exactly

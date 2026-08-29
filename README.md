@@ -152,6 +152,46 @@ see below.
 Feeding stores text. *Training* is what absorbs it; with auto-patch on, the
 second follows the first by itself.
 
+## Growing as it learns
+
+By default every patch makes the model **larger**. New experts are appended to
+every feed-forward layer, only those are trained, and the parameter count rises
+with each version and never falls:
+
+```bash
+mb feed "the deploy key rotates on Fridays"
+mb patch                       # -> v1, and the model is bigger than it was
+```
+
+```
+v0 -> v1   patch 4f2a91c0
+  learned      1 docs, 48 tokens
+  grew         +1 expert(s) per layer, +9,437,184 parameters
+  size         15.74M -> 25.17M
+```
+
+Two properties make that safe rather than merely impressive:
+
+* **Growth is a no-op at birth.** A new expert's output projection starts at
+  zero and its router bias at -1e9, so it cannot be selected and contributes
+  nothing. The grown model computes exactly what it did before, bit for bit -
+  learning a new fact cannot silently damage what was already known. Training
+  is the only thing that makes it diverge.
+* **Compute does not grow with it.** Only `n_experts_per_token` experts run for
+  any token, so a model that has grown through fifty versions costs the same
+  per token as it did at version one. That is precisely why the parameter count
+  can be allowed to run away, and it is the same mechanism behind the `mother`
+  preset's quadrillion parameters.
+
+A dense model has no experts to append to, so the first patch converts its
+feed-forward layers into MoE layers: the existing dense FFN becomes an
+always-on shared expert, which preserves its behaviour exactly, and the new
+routed experts are added alongside.
+
+`mb patch --mode lora` keeps the old behaviour - a low-rank delta that teaches
+the model something new without changing its size - when growth is not wanted.
+`--grow N` adds N experts per layer instead of one.
+
 ## Versions
 
 New information never retrains the model from scratch. It trains a **patch**: a
@@ -455,7 +495,8 @@ motherbrain/
   model.py       the transformer
   data.py        ingestion, corpus on disk, memory-mapped token streams
   train.py       training loop, checkpoints, resume
-  patches.py     LoRA patches, replay, sequential versions
+  patches.py     patches, replay, sequential versions
+  growth.py      adding experts so each version is larger than the last
   server.py      HTTP API, auto-patcher, web UI
   api_compat.py  OpenAI and Ollama protocol surfaces
   security.py    path confinement, auth, rate limiting, exposure checks

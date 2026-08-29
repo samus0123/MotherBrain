@@ -120,7 +120,7 @@ class ModelConfig:
 
     @property
     def moe_ffn_params_per_layer(self) -> int:
-        router = self.d_model * self.n_experts
+        router = self.d_model * self.n_experts + self.n_experts  # weights + bias
         experts = self.n_experts * self.expert_params
         shared = self.n_shared_experts * self.expert_params
         return router + experts + shared
@@ -159,7 +159,7 @@ class ModelConfig:
         total += self.n_layers * (self.attn_params_per_layer + self.norm_params_per_layer)
         total += self.n_dense_layers * self.dense_ffn_params_per_layer
         if self.n_moe_layers:
-            router = self.d_model * self.n_experts
+            router = self.d_model * self.n_experts + self.n_experts
             live = (self.n_experts_per_token + self.n_shared_experts) * self.expert_params
             total += self.n_moe_layers * (router + live)
         return total
