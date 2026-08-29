@@ -305,7 +305,13 @@ class PatchStore:
 
     def record(self, v: Version, payload: dict) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)
-        torch.save(payload, self.dir / v.filename)
+        # Stored at half precision. A growth patch carries whole new experts
+        # rather than a small delta, so this is the difference between a
+        # lineage that fits in a repository and one that does not; fp16 is
+        # ample for weights that are about to be added to fp32 ones.
+        half = {k: (t.to(torch.float16) if t.is_floating_point() else t)
+                for k, t in payload.items()}
+        torch.save(half, self.dir / v.filename)
         m = self.manifest()
         m["versions"] = [x for x in m["versions"] if x["version"] != v.version]
         m["versions"].append(asdict(v))
@@ -322,7 +328,10 @@ class PatchStore:
         self.write(m)
 
     def load_payload(self, v: Version) -> dict:
-        return torch.load(self.dir / v.filename, map_location="cpu", weights_only=True)
+        payload = torch.load(self.dir / v.filename, map_location="cpu",
+                             weights_only=True)
+        return {k: (t.float() if t.is_floating_point() else t)
+                for k, t in payload.items()}
 
 
 def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
