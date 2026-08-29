@@ -13,10 +13,14 @@ data/corpus/meta.json
 runs/**/checkpoint.pt
 runs/**/history.json
 
-# Patches and the manifest are the model's lineage — those DO belong in git.
-!runs/**/patches/
-!runs/**/patches/*.pt
+# versions.json is the lineage record — small, and it belongs in git.
 !runs/**/versions.json
+
+# Patch binaries do not. A growth patch carries whole new experts, so it is
+# ~19MB and grows with the model; committing one per version is unbounded.
+# They are reproducible from the corpus and the base checkpoint, and the
+# distributable artifact is the exported current model in models/.
+runs/**/patches/
 
 # TLS material: private keys must never be committed.
 certs/

@@ -209,8 +209,12 @@ mb versions
 mb checkout v1     # any earlier version, exactly
 ```
 
-Patches are kilobytes to megabytes, so the lineage is cheap to keep forever and
-small enough to live in git.
+A LoRA patch is under a megabyte. A growth patch is not: it carries whole new
+experts, so against the 15.7M model it is 19MB at half precision and gets
+larger as the model does. Patch binaries are therefore kept out of git -
+committing one per version is unbounded - while `versions.json`, the record of
+what was learned and how much the model grew, is small and does live there.
+The distributable artifact is the exported current model in `models/`.
 
 A patch is a delta against *particular* weights, so the manifest records a
 fingerprint of the base checkpoint it was built on. Loading a lineage whose
@@ -508,16 +512,17 @@ tests/           49 tests
 
 ## The trained model
 
-`models/motherbrain-15m.pt` is a real trained model, committed to this
-repository. A clone can run it immediately:
+`models/motherbrain.pt` is a real trained model, committed to this repository.
+A clone can run it immediately:
 
 ```bash
-mb chat --model models/motherbrain-15m.pt --prompt "def softmax(x, axis=-1):"
+mb chat --model models/motherbrain.pt --prompt "def softmax(x, axis=-1):"
 ```
 
-15.7M parameters, trained for 4,000 steps (24.6M tokens) on a 53.2M-token
-corpus of Python source. 37.9MB of fp16 weights against a 181MB training
-checkpoint, loaded with `weights_only=True` so opening it executes no code.
+It is v1: a 15.7M-parameter base trained for 4,000 steps (24.6M tokens) on a
+53.2M-token corpus of Python source, grown to 25.18M parameters by one growth
+patch. 56.8MB of fp16 weights against a 181MB training checkpoint, loaded with
+`weights_only=True` so opening it executes no code.
 
 ```
 step   200   val loss 5.94   perplexity 381
@@ -547,7 +552,8 @@ corpus are the only cure, and `mb train` is how you apply them.
 
 ## Honest limits
 
-* The committed model is 15.7M parameters trained on CPU for under one epoch.
+* The committed model is 25.18M parameters (a 15.7M base plus one growth
+  patch), trained on CPU for under one epoch.
   It writes plausible Python structure, not working programs, and it is not a
   chatbot - it will not answer general questions. Scale and corpus are the only
   cure, and both are yours to choose.
