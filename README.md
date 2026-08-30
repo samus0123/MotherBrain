@@ -25,10 +25,16 @@ mb serve      expose it to every IDE you own
 ## Install
 
 ```bash
+scripts/install.sh          # handles the usual install failures
+```
+
+or, if your Python is not externally managed:
+
+```bash
 pip install -e .
 ```
 
-That installs the dependencies **and** the `mb` command, so every example below
+Either installs the dependencies **and** the `mb` command, so every example below
 works from any directory. Without it you would get `No module named
 motherbrain` outside the repository root.
 
@@ -40,6 +46,59 @@ pip install -e ".[dev]"      # plus pytest and httpx, to run the tests
 for a workspace, the way git finds `.git`, so it works from a subdirectory too.
 Override with `--corpus`/`--run`, or the `MB_CORPUS`/`MB_RUN` environment
 variables.
+
+### If `pip install -e .` fails
+
+Three causes account for almost all of it, and none are about this project.
+
+**`error: externally-managed-environment`** — Debian 12+, Ubuntu 23.04+ and
+Termux's proot images mark the system Python as managed by the OS (PEP 668), so
+pip refuses to install into it. Use a virtual environment:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+```
+
+`scripts/install.sh` does exactly that, and checks the other two causes before
+downloading several hundred megabytes to discover them.
+
+**`No matching distribution found for torch`** — PyTorch publishes wheels only
+for certain Python versions and platforms. A very new Python (3.14+) usually
+has no wheel yet, and neither does Termux's own Python, which is why the
+Android instructions install into a proot distro rather than Termux directly.
+Check with `python3 -VV`, and install an older Python if needed:
+
+```bash
+apt install python3.12 python3.12-venv
+PYTHON=python3.12 scripts/install.sh
+```
+
+**`No module named venv`** — `apt install python3-venv`.
+
+**It downloads gigabytes, or runs out of disk.** On Linux x86_64, `pip install
+torch` pulls the CUDA runtime — around 2.5GB — even with no GPU present. For a
+CPU-only machine, ask for the CPU build instead:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e .
+```
+
+That is about a tenth of the size. ARM64 machines, phones included, get a
+CPU-only wheel from PyPI anyway and need no flag.
+
+You do not have to install at all. From the repository root, everything works
+as a module once the dependencies are present:
+
+```bash
+pip install -r requirements.txt      # or: apt install python3-torch python3-numpy
+python3 -m motherbrain.cli console
+```
+
+That is the same program; `mb` is only a shortcut that works from any
+directory.
 
 ## Quick start
 
@@ -481,10 +540,28 @@ pkg install proot-distro
 proot-distro install debian
 proot-distro login debian
 
-apt update && apt install -y python3 python3-pip git
+apt update && apt install -y python3 python3-pip python3-venv git
 git clone <this-repo> && cd MotherBrain
-pip install -r requirements.txt
-mb serve --host 0.0.0.0 --port 8000
+scripts/install.sh
+.venv/bin/mb console
+```
+
+`python3-venv` matters: Debian's proot image marks its Python as externally
+managed, so installing without a virtual environment fails with
+`externally-managed-environment`. The script creates one.
+
+The clone already contains a trained model, so there is nothing to train
+before it will answer:
+
+```bash
+.venv/bin/mb chat --model models/motherbrain.pt --prompt "def softmax(x):"
+```
+
+For voice, serve it and open the page in Chrome on the phone — Android Chrome
+supports the Web Speech API, while the Termux terminal has no speech backends:
+
+```bash
+.venv/bin/mb serve --host 0.0.0.0
 ```
 
 Then reach it at `http://localhost:8000` from the phone's browser, or from
