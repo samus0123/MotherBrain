@@ -944,3 +944,104 @@ def test_every_patch_grows_the_model_and_replays_exactly(tmp_path):
         model, _, version = build_version(str(run), target=target)
         assert version == target
         assert model.n_params() == expected           # replays exactly
+
+
+# ---- the console ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("/help", "help"),
+    ("/status", "status"),
+    ("how big are you", "status"),
+    ("what version are you", "version"),
+    ("list versions", "versions"),
+    ("/versions", "versions"),
+    ("/learn the key rotates on Fridays", "learn"),
+    ("learn that the key rotates", "learn"),
+    ("remember: port 6543", "learn"),
+    ("/grow", "grow"),
+    ("grow yourself", "grow"),
+    ("/checkout v3", "checkout"),
+    ("roll back to 1", "checkout"),
+    ("/train 500", "train"),
+    ("/scale mother", "scale"),
+    ("def softmax(x):", "generate"),
+    ("the quick brown fox", "generate"),
+    ("", "noop"),
+])
+def test_console_parses_commands_and_prompts(text, expected):
+    from motherbrain.commands import parse
+
+    assert parse(text).name == expected
+
+
+def test_console_extracts_arguments():
+    from motherbrain.commands import parse
+
+    assert parse("/checkout v3").args["version"] == 3
+    assert parse("roll back to 1").args["version"] == 1
+    assert parse("/grow 4").args["experts"] == 4
+    assert parse("/grow").args["experts"] == 1          # sensible default
+    assert parse("/train 500").args["steps"] == 500
+    assert parse("/scale titan").args["preset"] == "titan"
+    assert parse("/learn a fact").text == "a fact"
+    assert parse("remember: port 6543").text == "port 6543"
+
+
+def test_console_refuses_ambiguity_instead_of_guessing():
+    """A parser that guesses is worse than one that says it did not understand."""
+    from motherbrain.commands import parse
+
+    assert parse("/checkout").name == "error"          # which version?
+    assert parse("learn").name == "error"              # learn what?
+    assert parse("/nonsense").name == "unknown"
+
+
+def test_a_prompt_that_looks_like_a_command_is_still_a_prompt():
+    """`learning rates` starts with an alias but is not an instruction."""
+    from motherbrain.commands import parse
+
+    assert parse("learning rates matter").name == "generate"
+    assert parse("versions of numpy differ").name == "generate"
+
+
+def test_command_endpoint_drives_the_system(served):
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+
+    def send(text, **kw):
+        return client.post("/command", json={"text": text, **kw}).json()
+
+    assert "MotherBrain console" in send("/help")["text"]
+    assert send("what version are you")["kind"] == "info"
+    assert send("how big are you")["kind"] == "status"
+    assert send("list versions")["kind"] == "versions"
+
+    learned = send("learn that the deploy key rotates on Fridays")
+    assert learned["kind"] == "learned"
+    assert learned["data"]["pending"] >= 1
+
+    assert send("/checkout v9")["kind"] == "error"      # no such version
+    assert send("/nonsense")["kind"] == "error"
+
+    generated = send("def f(", max_tokens=4)
+    assert generated["kind"] == "generated"
+    assert generated["data"]["tokens"] > 0
+
+
+def test_console_page_is_served(served):
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "MotherBrain console" in page.text

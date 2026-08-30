@@ -6,6 +6,7 @@ patching system that versions every new thing it learns, and an HTTP server
 that any IDE can talk to.
 
 ```
+mb console    tell it what to do, interactively
 mb status     what is on disk, and what to run next
 mb bootstrap  fresh clone -> a loaded model, in one command
 mb scale      what a configuration costs, before you build it
@@ -49,6 +50,43 @@ mb train --preset micro --steps 400 --batch-size 16 --seq-len 256
 mb chat --prompt "hello"
 mb serve            # 127.0.0.1 by default
 ```
+
+## Telling it what to do
+
+`mb console`, or the page `mb serve` puts at `/`, is one place to type both
+prompts and instructions:
+
+```
+> how big are you
+  version      v1
+  parameters   25.18M total · 15.75M active/token
+  shape        8 layers · d_model 384 · 1 experts/layer
+  pending      1 document(s) not yet learned
+
+> learn that the deploy key rotates on Fridays
+added 44 characters; 1 document(s) waiting. run /grow to learn them.
+
+> grow
+v1 -> v2: 25.18M -> 34.62M params, loss 3.402 -> 0.094
+
+> def softmax(x, axis=-1):
+    if not isinstance(x, np.ndarray):
+        return x.shape[0]
+    return x
+```
+
+Commands are `/learn`, `/grow`, `/train`, `/versions`, `/version`, `/checkout`,
+`/status`, `/scale`, `/export`, `/help`; a fixed set of plain phrasings mean
+the same things ("learn that …", "grow yourself", "how big are you", "list
+versions", "roll back to 1"). Anything unrecognised is treated as a prompt and
+completed by the model.
+
+**The parsing is a lookup table, not the model.** MotherBrain is a base
+language model trained on source code: it completes text and cannot follow
+instructions. A console that claimed to understand them would be theatre. So
+the table is small, literal, and refuses rather than guesses - `/checkout`
+without a version is an error, and "learning rates matter" is a prompt, not an
+instruction to learn something.
 
 ## How do I run it?
 
@@ -504,6 +542,7 @@ motherbrain/
   server.py      HTTP API, auto-patcher, web UI
   api_compat.py  OpenAI and Ollama protocol surfaces
   security.py    path confinement, auth, rate limiting, exposure checks
+  commands.py    parsing what you tell it to do
   cli.py         the mb command line
 configs/         mother.json, and the model actually being trained
 tests/           49 tests

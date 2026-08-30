@@ -487,6 +487,122 @@ def cmd_bootstrap(args) -> int:
 
 
 # --------------------------------------------------------------------------
+# console
+
+
+def cmd_console(args) -> int:
+    """An interactive console: tell MotherBrain what to do, one line at a time.
+
+    The same command table the web console uses. Parsing is deterministic; the
+    model completes prompts and does not interpret instructions.
+    """
+    import torch
+
+    from motherbrain.commands import HELP, parse
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchConfig, PatchStore, create_patch
+    from motherbrain.tokenizer import EOS_ID
+
+    model = tok = device = None
+    version = 0
+
+    def load() -> bool:
+        nonlocal model, tok, device, version
+        try:
+            model, tok, device, version = load_current(args.run, args.device)
+            return True
+        except FileNotFoundError:
+            return False
+
+    if not load():
+        print(f"no model in {args.run}; run `mb bootstrap` first", file=sys.stderr)
+        return 1
+
+    corpus = Corpus(args.corpus)
+    store = PatchStore(args.run, create=False)
+    print(f"MotherBrain console — v{version}, {human(model.n_params())} params.")
+    print("/help for commands, empty line or ctrl-c to leave.\n")
+
+    while True:
+        try:
+            line = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 0
+        if not line:
+            return 0
+
+        cmd = parse(line)
+
+        if cmd.name in ("noop",):
+            continue
+        if cmd.name == "help":
+            print(HELP + "\n")
+        elif cmd.name == "error":
+            print(f"{cmd.args['message']}\n")
+        elif cmd.name == "unknown":
+            print(f"unknown command /{cmd.args['command']} — try /help\n")
+        elif cmd.name == "version":
+            print(f"v{version}\n")
+        elif cmd.name == "status":
+            build_parser().parse_args(
+                ["status", "--corpus", args.corpus, "--run", args.run]).func(
+                argparse.Namespace(corpus=args.corpus, run=args.run))
+            print()
+        elif cmd.name == "versions":
+            cmd_versions(argparse.Namespace(run=args.run, corpus=args.corpus,
+                                            verbose=False))
+            print()
+        elif cmd.name == "checkout":
+            try:
+                store.set_current(cmd.args["version"])
+                load()
+                print(f"now serving v{version}\n")
+            except ValueError as exc:
+                print(f"{exc}\n")
+        elif cmd.name == "scale":
+            name = cmd.args.get("preset", "mother")
+            if name in PRESETS:
+                print(PRESETS[name].summary() + "\n")
+            else:
+                print(f"unknown preset {name}\n")
+        elif cmd.name == "learn":
+            n = corpus.add_text(cmd.text, source="console")
+            corpus.write_meta()
+            pending = corpus.n_documents - store.consumed_docs()
+            print(f"added {n:,} characters; {pending} document(s) waiting. "
+                  f"run /grow to learn them.\n")
+        elif cmd.name == "grow":
+            pending = corpus.n_documents - store.consumed_docs()
+            if pending <= 0:
+                print("nothing new to learn\n")
+                continue
+            n = cmd.args.get("experts", 1)
+            print(f"growing by {n} expert(s) per layer on {pending} document(s)...")
+            v = create_patch(args.run, args.corpus,
+                             PatchConfig(mode="grow", grow_experts=n, steps=args.steps),
+                             note="console", device=args.device)
+            if v is None:
+                print("nothing to do\n")
+            else:
+                print(f"v{v.parent} -> v{v.version}: "
+                      f"{human(v.params_before)} -> {human(v.params_after)} params, "
+                      f"loss {v.loss_before:.3f} -> {v.loss_after:.3f}\n")
+                load()
+        elif cmd.name in ("train", "export"):
+            print(f"run that from the command line: mb {cmd.name}\n")
+        else:
+            ids = torch.tensor([tok.encode(cmd.text, bos=True)], device=device)
+            for token in model.generate(ids, max_new_tokens=args.max_tokens,
+                                        temperature=args.temperature,
+                                        top_k=args.top_k, top_p=args.top_p,
+                                        repetition_penalty=args.repetition_penalty,
+                                        eos_id=EOS_ID):
+                print(tok.decode([token]), end="", flush=True)
+            print("\n")
+
+
+# --------------------------------------------------------------------------
 # export / import
 
 
@@ -854,6 +970,18 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--device", default="auto")
     s.add_argument("--force", action="store_true", help="retrain even if weights exist")
     s.set_defaults(func=cmd_bootstrap)
+
+    s = common(sub.add_parser(
+        "console", help="tell MotherBrain what to do, interactively"))
+    s.add_argument("--max-tokens", type=int, default=120)
+    s.add_argument("--temperature", type=float, default=0.8)
+    s.add_argument("--top-k", type=int, default=40)
+    s.add_argument("--top-p", type=float, default=0.95)
+    s.add_argument("--repetition-penalty", type=float, default=1.1)
+    s.add_argument("--steps", type=int, default=100,
+                   help="training steps used by /grow")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_console)
 
     s = common(sub.add_parser(
         "export", help="write a compact, shareable, inference-only model file"))
