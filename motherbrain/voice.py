@@ -116,35 +116,47 @@ def listen(cap: Capability | None = None, timeout: float = 10.0) -> str | None:
 
 
 def choose_mode(default: str = "text") -> tuple[str, Capability]:
-    """Ask whether to use text or voice, and report what is possible.
+    """Ask how to start: type, talk, or teach it something first.
 
-    Returns the chosen mode and the detected capability. Voice is only offered
-    when something on this machine can provide it; otherwise the reason is
-    printed and text is used, because silently ignoring the choice would be
-    worse than explaining it.
+    Returns one of "text", "voice" or "feed", together with the detected
+    capability. "feed" is an action rather than an input mode - the caller
+    takes the information, then carries on in text - but it belongs in this
+    question because feeding is the first thing most sessions want to do.
+
+    Voice is only offered when something on this machine can provide it.
+    Otherwise the reason is printed and it is left out of the question, because
+    offering a choice that cannot be honoured is worse than explaining why.
     """
     cap = detect()
-    if not cap.any:
-        print(f"voice is unavailable here: {cap.reason}")
-        print("using text.\n")
-        return "text", cap
 
-    parts = []
-    if cap.listen:
-        parts.append(f"speech in ({cap.listen})")
-    if cap.speak:
-        parts.append(f"speech out ({cap.speak})")
-    print(f"voice available: {', '.join(parts)}")
-    if not cap.listen:
-        print("  note: no recognition, so voice mode reads replies aloud "
-              "but you still type.")
+    if cap.any:
+        parts = []
+        if cap.listen:
+            parts.append(f"speech in ({cap.listen})")
+        if cap.speak:
+            parts.append(f"speech out ({cap.speak})")
+        print(f"voice available: {', '.join(parts)}")
+        if not cap.listen:
+            print("  note: no recognition, so voice mode reads replies aloud "
+                  "but you still type.")
+        question = f"text, voice, or feed it something? [{default}] "
+    else:
+        print(f"voice is unavailable here: {cap.reason}")
+        question = f"text, or feed it something? [{default}] "
 
     try:
-        answer = input(f"text or voice? [{default}] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+        answer = input(question).strip().lower()
+    except (EOFError, KeyboardInterrupt, OSError):
+        # Not interactive - piped input, a scheduled run, no terminal at all.
+        # Defaulting is right; crashing on a question nobody can answer is not.
         print()
         return default, cap
 
-    mode = "voice" if answer.startswith("v") else "text"
-    print(f"using {mode}.\n")
+    if answer.startswith("f"):
+        mode = "feed"
+    elif answer.startswith("v") and cap.any:
+        mode = "voice"
+    else:
+        mode = "text"
+    print(f"using {mode}.\n" if mode != "feed" else "")
     return mode, cap

@@ -1120,3 +1120,60 @@ def test_console_mode_flag_skips_the_question():
     assert build_parser().parse_args(["console"]).mode == "ask"
     assert build_parser().parse_args(["console", "--mode", "text"]).mode == "text"
     assert build_parser().parse_args(["console", "--mode", "voice"]).mode == "voice"
+
+
+def test_startup_offers_feeding_as_a_third_choice(monkeypatch):
+    """Feeding is the first thing most sessions want, so it is offered up front."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    for answer, expected in [("f", "feed"), ("feed", "feed"),
+                             ("v", "voice"), ("", "text"), ("t", "text")]:
+        monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
+        assert voice.choose_mode()[0] == expected
+
+
+def test_feeding_is_offered_even_without_voice(monkeypatch, capsys):
+    """A machine with no speech still gets the feed option, just not voice."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability(reason="none"))
+    monkeypatch.setattr("builtins.input", lambda _: "feed")
+    assert voice.choose_mode()[0] == "feed"
+
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_mode()[0] == "text"      # voice cannot be honoured here
+
+
+def test_startup_question_survives_no_terminal(monkeypatch):
+    """Piped input, cron, a daemon: `input` raises OSError, not EOFError.
+
+    Defaulting is right there; crashing on a question nobody can answer is not.
+    """
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+
+    def no_terminal(_):
+        raise OSError("reading from stdin while output is captured")
+
+    monkeypatch.setattr("builtins.input", no_terminal)
+    assert voice.choose_mode()[0] == "text"
+
+
+def test_console_page_offers_feeding_first():
+    from motherbrain.server import UI_HTML
+
+    assert 'data-mode="feed"' in UI_HTML
+    assert "Teach it" in UI_HTML
+    # the distinction people miss: storing text is not the same as learning it
+    assert "learning is what puts it in the weights" in UI_HTML
+    assert "learn it now (grows the model)" in UI_HTML
+
+
+def test_console_mode_flag_accepts_feed():
+    from motherbrain.cli import build_parser
+
+    assert build_parser().parse_args(["console", "--mode", "feed"]).mode == "feed"

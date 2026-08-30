@@ -542,6 +542,68 @@ def cmd_console(args) -> int:
         if mode == "voice" and cap.speak:
             speak(text, cap)
 
+    def feed_at_startup() -> None:
+        """Take information first, then offer to learn it before continuing.
+
+        Feeding only stores text; a patch is what puts it into the weights. The
+        offer to grow immediately is here because the gap between the two is
+        the thing people most often miss.
+        """
+        print("Paste or type what MotherBrain should learn.")
+        print("A file or directory path works too. Blank line to finish.\n")
+        collected: list[str] = []
+        while True:
+            try:
+                entry = input("  ")
+            except (EOFError, KeyboardInterrupt, OSError):
+                print()
+                break
+            if not entry.strip():
+                break
+            collected.append(entry)
+
+        if not collected:
+            print("nothing fed.\n")
+            return
+
+        chars = files = 0
+        for entry in collected:
+            path = Path(entry.strip()).expanduser()
+            if path.exists():
+                f, c = corpus.add_path(path)
+                files += f
+                chars += c
+                print(f"  {path}: {f} file(s), {c:,} characters")
+            else:
+                chars += corpus.add_text(entry, source="console")
+                files += 1
+        corpus.write_meta()
+
+        pending = corpus.n_documents - store.consumed_docs()
+        print(f"\nadded {files} document(s), {chars:,} characters. "
+              f"{pending} waiting to be learned.")
+
+        try:
+            answer = input("learn it now? this grows the model [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return
+        if answer.startswith("n"):
+            print("left in the corpus; run /grow when you want it learned.\n")
+            return
+
+        print("growing...")
+        v = create_patch(args.run, args.corpus,
+                         PatchConfig(mode="grow", grow_experts=1, steps=args.steps),
+                         note="startup feed", device=args.device)
+        if v is None:
+            print("nothing to learn.\n")
+        else:
+            print(f"v{v.parent} -> v{v.version}: "
+                  f"{human(v.params_before)} -> {human(v.params_after)} params, "
+                  f"loss {v.loss_before:.3f} -> {v.loss_after:.3f}\n")
+            load()
+
     def read_line() -> str:
         """One line of input: spoken when that is possible, typed otherwise."""
         if mode == "voice" and cap.listen:
@@ -555,12 +617,16 @@ def cmd_console(args) -> int:
                 return heard
         return input("> ")
 
+    if mode == "feed":
+        feed_at_startup()
+        mode = "text"
+
     print("/help for commands, empty line or ctrl-c to leave.\n")
 
     while True:
         try:
             line = read_line().strip()
-        except (EOFError, KeyboardInterrupt):
+        except (EOFError, KeyboardInterrupt, OSError):
             print()
             return 0
         if not line:
@@ -1022,7 +1088,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repetition-penalty", type=float, default=1.1)
     s.add_argument("--steps", type=int, default=100,
                    help="training steps used by /grow")
-    s.add_argument("--mode", choices=["ask", "text", "voice"], default="ask",
+    s.add_argument("--mode", choices=["ask", "text", "voice", "feed"],
+                   default="ask",
                    help="ask at startup (default), or go straight to one")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_console)

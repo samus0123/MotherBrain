@@ -51,9 +51,29 @@ mb chat --prompt "hello"
 mb serve            # 127.0.0.1 by default
 ```
 
-## Text or voice
+## Text, voice, or teach it something
 
-Both consoles ask how you want to talk to it before anything else.
+Both consoles ask how you want to start: **text**, **voice**, or **teach it**
+— feed it something before you begin.
+
+Choosing to teach it takes the information first, then offers to learn it
+immediately, because the gap between those two is the thing people most often
+miss: feeding stores text in the corpus, and a patch is what puts it into the
+weights.
+
+```
+text, voice, or feed it something? [text] feed
+Paste or type what MotherBrain should learn.
+A file or directory path works too. Blank line to finish.
+
+  the deploy key rotates on Fridays
+
+added 1 document(s), 33 characters. 1 waiting to be learned.
+learn it now? this grows the model [Y/n]
+```
+
+Say yes and it grows a version before dropping you at the prompt; say no and it
+stays in the corpus until you run `/grow`.
 
 In the browser, voice is real: recognition and synthesis come from the
 browser's own Web Speech API, so there is no dependency and no service of ours
@@ -68,6 +88,7 @@ out and told why.
 
 ```bash
 mb console                 # asks
+mb console --mode feed     # straight to feeding
 mb console --mode text     # skips the question
 mb console --mode voice
 ```

@@ -675,6 +675,16 @@ UI_HTML = """<!doctype html>
          border-radius:6px; padding:7px 12px; cursor:pointer; }
   #mic.on { border-color:var(--err); color:var(--err); }
   #mic.hidden { display:none; }
+  #feedpanel { display:flex; flex-direction:column; gap:10px; width:min(560px,92vw);
+               text-align:left; }
+  #feedpanel[hidden] { display:none; }
+  #feedpanel textarea, #feedpanel input { background:var(--panel); color:var(--text);
+    border:1px solid var(--line); border-radius:8px; padding:10px 12px;
+    font:inherit; font-size:13px; width:100%; resize:vertical; }
+  .feedrow { display:flex; gap:10px; flex-wrap:wrap; }
+  .feedrow[hidden] { display:none; }
+  .feedrow .choice { min-width:0; padding:10px 16px; font-size:13px; }
+  .choice.go { border-color:var(--accent); color:var(--accent); }
 </style>
 </head>
 <body>
@@ -685,8 +695,25 @@ UI_HTML = """<!doctype html>
       <b>Text</b><span>type prompts and commands</span></button>
     <button class="choice" id="voice-choice" data-mode="voice">
       <b>Voice</b><span id="voice-note">speak, and hear replies</span></button>
+    <button class="choice" data-mode="feed">
+      <b>Teach it</b><span>feed it something first</span></button>
   </div>
   <div class="why" id="voice-why"></div>
+
+  <div id="feedpanel" hidden>
+    <textarea id="feedtext" rows="6"
+      placeholder="Paste what MotherBrain should learn."></textarea>
+    <input id="feedpath" placeholder="…or a path on the server (needs --allow-path)">
+    <div class="feedrow">
+      <button class="choice go" id="feedadd">add to corpus</button>
+      <button class="choice" id="feedback">back</button>
+    </div>
+    <div class="why" id="feedout"></div>
+    <div class="feedrow" id="growrow" hidden>
+      <button class="choice go" id="feedgrow">learn it now (grows the model)</button>
+      <button class="choice" id="feedlater">continue to console</button>
+    </div>
+  </div>
 </div>
 <header>
   <h1>MotherBrain</h1>
@@ -914,8 +941,63 @@ function speak(text) {
   TTS.speak(u);
 }
 
-document.querySelectorAll('.choice').forEach(b => {
-  b.onclick = () => setMode(b.dataset.mode);
+// ---- teaching it something before you start ------------------------------
+// Feeding only stores text; a patch is what puts it into the weights. The
+// offer to grow immediately is here because the gap between those two is the
+// thing people most often miss.
+function showFeed() {
+  document.querySelector('.choices').hidden = true;
+  $('voice-why').hidden = true;
+  $('feedpanel').hidden = false;
+  $('feedtext').focus();
+}
+
+$('feedback').onclick = () => {
+  $('feedpanel').hidden = true;
+  $('voice-why').hidden = false;
+  document.querySelector('.choices').hidden = false;
+};
+
+$('feedadd').onclick = async () => {
+  const text = $('feedtext').value.trim();
+  const path = $('feedpath').value.trim();
+  if (!text && !path) { $('feedout').textContent = 'nothing to add'; return; }
+  $('feedadd').disabled = true;
+  $('feedout').textContent = 'adding…';
+  try {
+    const r = await fetch('/feed', {method:'POST', headers:H(),
+      body: JSON.stringify({text: text || null, path: path || null, source:'startup'})});
+    const j = await r.json();
+    if (!r.ok) {
+      $('feedout').textContent = 'error: ' + (j.detail || JSON.stringify(j));
+    } else {
+      $('feedout').textContent =
+        `added ${j.added_documents} document(s), ${j.added_chars.toLocaleString()} `
+        + `characters. Feeding stores it; learning is what puts it in the weights.`;
+      $('feedtext').value = ''; $('feedpath').value = '';
+      $('growrow').hidden = false;
+    }
+  } catch (e) { $('feedout').textContent = 'error: ' + e; }
+  $('feedadd').disabled = false;
+};
+
+$('feedgrow').onclick = async () => {
+  $('feedgrow').disabled = true;
+  $('feedout').textContent = 'growing…';
+  try {
+    const r = await fetch('/command', {method:'POST', headers:H(),
+                                       body: JSON.stringify({text:'/grow'})});
+    const j = await r.json();
+    setMode('text');
+    add(j.text || 'growing', j.kind === 'error' ? 'err' : 'ok');
+    window._wasBusy = true;          // so the result is reported when it lands
+  } catch (e) { $('feedout').textContent = 'error: ' + e; }
+};
+
+$('feedlater').onclick = () => setMode('text');
+
+document.querySelectorAll('.choice[data-mode]').forEach(b => {
+  b.onclick = () => b.dataset.mode === 'feed' ? showFeed() : setMode(b.dataset.mode);
 });
 $('mic').onclick = () => listening ? recog.stop() : startListening();
 document.addEventListener('keydown', e => {
