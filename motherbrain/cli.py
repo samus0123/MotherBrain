@@ -503,6 +503,8 @@ def cmd_console(args) -> int:
     from motherbrain.patches import PatchConfig, PatchStore, create_patch
     from motherbrain.tokenizer import EOS_ID
 
+    from motherbrain.voice import Capability, choose_mode, detect, speak
+
     model = tok = device = None
     version = 0
 
@@ -521,11 +523,43 @@ def cmd_console(args) -> int:
     corpus = Corpus(args.corpus)
     store = PatchStore(args.run, create=False)
     print(f"MotherBrain console — v{version}, {human(model.n_params())} params.")
+    print()
+
+    if args.mode == "ask":
+        mode, cap = choose_mode()
+    else:
+        mode, cap = args.mode, Capability()
+        if mode == "voice":
+            cap = detect()
+            if not cap.any:
+                print(f"voice is unavailable here: {cap.reason}")
+                print("using text.")
+                print()
+                mode = "text"
+
+    def say(text: str) -> None:
+        """Read a reply aloud in voice mode. Printing happens either way."""
+        if mode == "voice" and cap.speak:
+            speak(text, cap)
+
+    def read_line() -> str:
+        """One line of input: spoken when that is possible, typed otherwise."""
+        if mode == "voice" and cap.listen:
+            from motherbrain.voice import listen
+
+            print("listening...", end="", flush=True)
+            heard = listen(cap)
+            print()
+            if heard:
+                print(f"> {heard}")
+                return heard
+        return input("> ")
+
     print("/help for commands, empty line or ctrl-c to leave.\n")
 
     while True:
         try:
-            line = input("> ").strip()
+            line = read_line().strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return 0
@@ -544,6 +578,7 @@ def cmd_console(args) -> int:
             print(f"unknown command /{cmd.args['command']} — try /help\n")
         elif cmd.name == "version":
             print(f"v{version}\n")
+            say(f"version {version}")
         elif cmd.name == "status":
             build_parser().parse_args(
                 ["status", "--corpus", args.corpus, "--run", args.run]).func(
@@ -572,6 +607,7 @@ def cmd_console(args) -> int:
             pending = corpus.n_documents - store.consumed_docs()
             print(f"added {n:,} characters; {pending} document(s) waiting. "
                   f"run /grow to learn them.\n")
+            say(f"learned. {pending} documents waiting.")
         elif cmd.name == "grow":
             pending = corpus.n_documents - store.consumed_docs()
             if pending <= 0:
@@ -588,18 +624,24 @@ def cmd_console(args) -> int:
                 print(f"v{v.parent} -> v{v.version}: "
                       f"{human(v.params_before)} -> {human(v.params_after)} params, "
                       f"loss {v.loss_before:.3f} -> {v.loss_after:.3f}\n")
+                say(f"grown to version {v.version}, "
+                    f"{human(v.params_after)} parameters")
                 load()
         elif cmd.name in ("train", "export"):
             print(f"run that from the command line: mb {cmd.name}\n")
         else:
             ids = torch.tensor([tok.encode(cmd.text, bos=True)], device=device)
+            produced: list[str] = []
             for token in model.generate(ids, max_new_tokens=args.max_tokens,
                                         temperature=args.temperature,
                                         top_k=args.top_k, top_p=args.top_p,
                                         repetition_penalty=args.repetition_penalty,
                                         eos_id=EOS_ID):
-                print(tok.decode([token]), end="", flush=True)
+                piece = tok.decode([token])
+                produced.append(piece)
+                print(piece, end="", flush=True)
             print("\n")
+            say("".join(produced))
 
 
 # --------------------------------------------------------------------------
@@ -980,6 +1022,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--repetition-penalty", type=float, default=1.1)
     s.add_argument("--steps", type=int, default=100,
                    help="training steps used by /grow")
+    s.add_argument("--mode", choices=["ask", "text", "voice"], default="ask",
+                   help="ask at startup (default), or go straight to one")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_console)
 

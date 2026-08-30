@@ -657,12 +657,41 @@ UI_HTML = """<!doctype html>
   button:disabled { opacity:.45; cursor:default; }
   .hint { max-width:980px; margin:6px auto 0; color:var(--muted);
           font-size:12px; }
+  #ask { position:fixed; inset:0; background:rgba(11,13,16,.97); display:flex;
+         flex-direction:column; align-items:center; justify-content:center;
+         gap:22px; z-index:10; padding:24px; text-align:center; }
+  #ask h2 { margin:0; font-size:17px; font-weight:600; }
+  #ask .why { color:var(--muted); font-size:12.5px; max-width:460px;
+              line-height:1.7; }
+  .choices { display:flex; gap:14px; flex-wrap:wrap; justify-content:center; }
+  .choice { background:var(--panel); border:1px solid var(--line);
+            border-radius:10px; padding:18px 28px; cursor:pointer; color:var(--text);
+            font:inherit; min-width:170px; text-align:left; }
+  .choice:hover:not(:disabled) { border-color:var(--accent); }
+  .choice:disabled { opacity:.45; cursor:not-allowed; }
+  .choice b { display:block; font-size:15px; margin-bottom:4px; }
+  .choice span { color:var(--muted); font-size:12px; }
+  #mic { background:transparent; border:1px solid var(--line); color:var(--muted);
+         border-radius:6px; padding:7px 12px; cursor:pointer; }
+  #mic.on { border-color:var(--err); color:var(--err); }
+  #mic.hidden { display:none; }
 </style>
 </head>
 <body>
+<div id="ask">
+  <h2>How do you want to talk to MotherBrain?</h2>
+  <div class="choices">
+    <button class="choice" data-mode="text">
+      <b>Text</b><span>type prompts and commands</span></button>
+    <button class="choice" id="voice-choice" data-mode="voice">
+      <b>Voice</b><span id="voice-note">speak, and hear replies</span></button>
+  </div>
+  <div class="why" id="voice-why"></div>
+</div>
 <header>
   <h1>MotherBrain</h1>
   <span id="stat">connecting…</span>
+  <span id="modelabel" class="muted" style="font-size:12px"></span>
 </header>
 <main><div id="log"></div></main>
 <footer>
@@ -670,6 +699,7 @@ UI_HTML = """<!doctype html>
     <span class="prompt">&gt;</span>
     <input id="in" autocomplete="off" autofocus
            placeholder="type a prompt, or an instruction like: learn that … / grow / status">
+    <button id="mic" class="hidden" type="button" title="hold to speak">speak</button>
     <button id="go">send</button>
   </form>
   <div class="hint">/help for commands · ↑ ↓ for history · plain English works
@@ -741,9 +771,11 @@ async function status(quiet) {
 function render(r) {
   if (r.kind === 'generated') {
     add(esc(r.text), 'out');
+    speak(r.text);
     if (r.data) add(`${r.data.tokens} tokens · v${r.data.version}`, 'muted');
   } else if (r.kind === 'status') {
     const d = r.data, m = d.model;
+    if (m) speak(`version ${m.version}, ${m.total_params_human} parameters`);
     add(rows(m ? [
       ['version', 'v' + m.version],
       ['parameters', `${m.total_params_human} total · ${m.active_params_human} active/token`],
@@ -765,10 +797,13 @@ function render(r) {
     });
   } else if (r.kind === 'error') {
     add(esc(r.text), 'err');
+    speak(r.text);
   } else if (r.kind === 'started' || r.kind === 'learned') {
     add(esc(r.text), 'ok');
+    speak(r.text);
   } else if (r.text) {
     add(esc(r.text), r.kind === 'help' ? 'muted' : 'out');
+    if (r.kind !== 'help') speak(r.text);
   }
 }
 
@@ -800,9 +835,92 @@ $('in').onkeydown = e => {
   }
 };
 
-add('MotherBrain console. Type /help for commands, or just start writing and '
-    + 'the model will continue it.', 'muted');
-status();
+// ---- text or voice -------------------------------------------------------
+// Speech uses the browser's own Web Speech API: recognition and synthesis are
+// built into Chrome, Edge and Safari, so this needs no dependency and no
+// service of ours. Firefox has synthesis but not recognition, which is why the
+// two halves are detected separately rather than as one "voice" capability.
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+const TTS = window.speechSynthesis;
+let mode = 'text', recog = null, listening = false;
+
+(function offerVoice() {
+  const btn = $('voice-choice'), note = $('voice-note'), why = $('voice-why');
+  if (!SR && !TTS) {
+    btn.disabled = true;
+    note.textContent = 'not supported by this browser';
+    why.textContent = 'This browser exposes neither speech recognition nor '
+      + 'speech synthesis. Chrome, Edge and Safari support both.';
+  } else if (!SR) {
+    note.textContent = 'hear replies (no dictation here)';
+    why.textContent = 'This browser can speak but not listen, so voice mode '
+      + 'reads replies aloud while you still type. Chrome, Edge and Safari '
+      + 'support dictation.';
+  } else {
+    why.textContent = 'Voice uses your browser\u2019s built-in speech, so audio '
+      + 'stays between you and the browser. It will ask for microphone '
+      + 'permission. You can switch back to typing at any time.';
+  }
+})();
+
+function setMode(chosen) {
+  mode = chosen;
+  $('ask').style.display = 'none';
+  $('modelabel').textContent = chosen === 'voice' ? '· voice' : '';
+  if (chosen === 'voice' && SR) {
+    $('mic').classList.remove('hidden');
+    recog = new SR();
+    recog.lang = 'en-US';
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+    recog.onresult = e => {
+      const said = e.results[0][0].transcript;
+      $('in').value = said;
+      $('f').requestSubmit();
+    };
+    recog.onerror = e => {
+      add('microphone: ' + e.error, 'err');
+      stopListening();
+    };
+    recog.onend = stopListening;
+  }
+  add(chosen === 'voice'
+      ? 'Voice mode. Press speak (or ctrl) and say a prompt or an instruction. '
+        + 'Replies are read aloud. Typing still works.'
+      : 'Text mode. Type /help for commands, or just start writing and the '
+        + 'model will continue it.', 'muted');
+  status();
+  $('in').focus();
+}
+
+function startListening() {
+  if (!recog || listening) return;
+  listening = true;
+  $('mic').classList.add('on');
+  $('mic').textContent = 'listening';
+  try { recog.start(); } catch (e) { stopListening(); }
+}
+function stopListening() {
+  listening = false;
+  $('mic').classList.remove('on');
+  $('mic').textContent = 'speak';
+}
+function speak(text) {
+  if (mode !== 'voice' || !TTS || !text) return;
+  TTS.cancel();
+  // A long completion is not worth reciting in full.
+  const u = new SpeechSynthesisUtterance(String(text).slice(0, 600));
+  u.rate = 1.05;
+  TTS.speak(u);
+}
+
+document.querySelectorAll('.choice').forEach(b => {
+  b.onclick = () => setMode(b.dataset.mode);
+});
+$('mic').onclick = () => listening ? recog.stop() : startListening();
+document.addEventListener('keydown', e => {
+  if (e.key === 'Control' && mode === 'voice' && !listening) startListening();
+});
 </script>
 </body>
 </html>

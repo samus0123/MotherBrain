@@ -1044,4 +1044,79 @@ def test_console_page_is_served(served):
                                    auto_patch=False))
     page = client.get("/")
     assert page.status_code == 200
-    assert "MotherBrain console" in page.text
+    assert "<title>MotherBrain</title>" in page.text
+    assert "How do you want to talk to MotherBrain?" in page.text  # the chooser
+    assert 'id="log"' in page.text                                 # the transcript
+
+
+# ---- text or voice --------------------------------------------------------
+
+
+def test_voice_capability_detection_is_honest():
+    """Speech is optional and machine-dependent, so it is detected, not assumed."""
+    from motherbrain.voice import detect
+
+    cap = detect()
+    assert isinstance(cap.any, bool)
+    if not cap.any:
+        # An unavailable capability must explain itself rather than fail silently.
+        assert cap.reason
+        assert "install" in cap.reason or "pip" in cap.reason
+
+
+def test_speaking_without_a_backend_reports_failure(monkeypatch):
+    from motherbrain.voice import Capability, speak
+
+    assert speak("hello", Capability()) is False          # no backend
+    assert speak("", Capability(speak="espeak")) is False  # nothing to say
+
+
+def test_listening_without_a_backend_returns_nothing():
+    from motherbrain.voice import Capability, listen
+
+    assert listen(Capability()) is None
+
+
+def test_choose_mode_falls_back_to_text_when_voice_is_impossible(monkeypatch, capsys):
+    """Offering a choice the machine cannot honour would be worse than saying so."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability(reason="no engine"))
+    mode, cap = voice.choose_mode()
+    assert mode == "text"
+    assert "unavailable" in capsys.readouterr().out
+
+
+def test_choose_mode_asks_when_voice_is_possible(monkeypatch):
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_mode()[0] == "voice"
+
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert voice.choose_mode()[0] == "text"          # default
+
+    monkeypatch.setattr("builtins.input", lambda _: "t")
+    assert voice.choose_mode()[0] == "text"
+
+
+def test_console_offers_both_modes_in_the_browser():
+    """The page asks before it starts, and detects the two halves separately."""
+    from motherbrain.server import UI_HTML
+
+    assert "How do you want to talk to MotherBrain?" in UI_HTML
+    assert 'data-mode="text"' in UI_HTML and 'data-mode="voice"' in UI_HTML
+    # recognition and synthesis are detected apart: Firefox has one, not both
+    assert "webkitSpeechRecognition" in UI_HTML
+    assert "speechSynthesis" in UI_HTML
+    assert "not supported by this browser" in UI_HTML
+
+
+def test_console_mode_flag_skips_the_question():
+    from motherbrain.cli import build_parser
+
+    assert build_parser().parse_args(["console"]).mode == "ask"
+    assert build_parser().parse_args(["console", "--mode", "text"]).mode == "text"
+    assert build_parser().parse_args(["console", "--mode", "voice"]).mode == "voice"

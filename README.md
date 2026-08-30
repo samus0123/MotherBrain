@@ -51,6 +51,41 @@ mb chat --prompt "hello"
 mb serve            # 127.0.0.1 by default
 ```
 
+## Text or voice
+
+Both consoles ask how you want to talk to it before anything else.
+
+In the browser, voice is real: recognition and synthesis come from the
+browser's own Web Speech API, so there is no dependency and no service of ours
+in the loop — audio stays between you and the browser, which asks for
+microphone permission itself. Press **speak** (or hold ctrl), say a prompt or
+an instruction, and replies are read back. Typing keeps working throughout.
+
+The two halves are detected separately, because they are separate: Firefox can
+speak but not listen, so it is offered voice-out with dictation disabled rather
+than a promise it cannot keep. A browser with neither gets the option greyed
+out and told why.
+
+```bash
+mb console                 # asks
+mb console --mode text     # skips the question
+mb console --mode voice
+```
+
+In the terminal there is no equivalent guarantee — voice needs a microphone, an
+audio stack, and software to drive them — so `mb console` detects what is
+actually installed (`say`, `espeak-ng`, `pyttsx3`, `SpeechRecognition`) and
+falls back to typing with the reason printed:
+
+```
+voice is unavailable here: no speech synthesis (install espeak-ng, or
+pyttsx3); no speech recognition (pip install SpeechRecognition PyAudio)
+using text.
+```
+
+None of that is installed as a dependency. Speech is optional, and a model you
+can only talk to would be worse than one you can also type at.
+
 ## Telling it what to do
 
 `mb console`, or the page `mb serve` puts at `/`, is one place to type both
@@ -543,6 +578,7 @@ motherbrain/
   api_compat.py  OpenAI and Ollama protocol surfaces
   security.py    path confinement, auth, rate limiting, exposure checks
   commands.py    parsing what you tell it to do
+  voice.py       speech backends for the terminal, and what to say without one
   cli.py         the mb command line
 configs/         mother.json, and the model actually being trained
 tests/           49 tests
