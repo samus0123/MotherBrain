@@ -1045,7 +1045,7 @@ def test_console_page_is_served(served):
     page = client.get("/")
     assert page.status_code == 200
     assert "<title>MotherBrain</title>" in page.text
-    assert "How do you want to talk to MotherBrain?" in page.text  # the chooser
+    assert "What would you like to do?" in page.text               # the menu
     assert 'id="log"' in page.text                                 # the transcript
 
 
@@ -1106,8 +1106,9 @@ def test_console_offers_both_modes_in_the_browser():
     """The page asks before it starts, and detects the two halves separately."""
     from motherbrain.server import UI_HTML
 
-    assert "How do you want to talk to MotherBrain?" in UI_HTML
-    assert 'data-mode="text"' in UI_HTML and 'data-mode="voice"' in UI_HTML
+    assert "What would you like to do?" in UI_HTML
+    assert 'data-mode="text"' in UI_HTML
+    assert 'data-mode="program-voice"' in UI_HTML
     # recognition and synthesis are detected apart: Firefox has one, not both
     assert "webkitSpeechRecognition" in UI_HTML
     assert "speechSynthesis" in UI_HTML
@@ -1161,6 +1162,51 @@ def test_startup_question_survives_no_terminal(monkeypatch):
 
     monkeypatch.setattr("builtins.input", no_terminal)
     assert voice.choose_mode()[0] == "text"
+
+
+def test_opening_menu_lists_the_four_things_you_can_do(monkeypatch):
+    """The program opens on a menu of tasks, not a question about typing."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    for answer, expected in [("1", "program"), ("2", "program-voice"),
+                             ("3", "feed"), ("4", "console"),
+                             ("", "console"), ("write", "program"),
+                             ("teach", "feed"), ("9", "console")]:
+        monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
+        assert voice.choose_start()[0] == expected
+
+
+def test_menu_downgrades_voice_when_it_cannot_be_honoured(monkeypatch, capsys):
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability(reason="none"))
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    assert voice.choose_start()[0] == "program"        # by text instead
+    assert "unavailable" in capsys.readouterr().out
+
+
+def test_menu_survives_no_terminal(monkeypatch):
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability())
+
+    def no_terminal(_):
+        raise OSError("no stdin")
+
+    monkeypatch.setattr("builtins.input", no_terminal)
+    assert voice.choose_start()[0] == "console"
+
+
+def test_web_menu_matches_the_terminal_menu():
+    from motherbrain.server import UI_HTML
+
+    assert "What would you like to do?" in UI_HTML
+    for mode in ("program", "program-voice", "feed", "text"):
+        assert f'data-mode="{mode}"' in UI_HTML
+    # the page must not overstate what a model this size can do
+    assert "cannot be told what to write" in UI_HTML
 
 
 def test_console_page_offers_feeding_first():

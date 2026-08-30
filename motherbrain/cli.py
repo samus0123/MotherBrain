@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import time
 import sys
 from pathlib import Path
@@ -503,7 +504,7 @@ def cmd_console(args) -> int:
     from motherbrain.patches import PatchConfig, PatchStore, create_patch
     from motherbrain.tokenizer import EOS_ID
 
-    from motherbrain.voice import Capability, choose_mode, detect, speak
+    from motherbrain.voice import Capability, choose_start, detect, speak
 
     model = tok = device = None
     version = 0
@@ -526,9 +527,12 @@ def cmd_console(args) -> int:
     print()
 
     if args.mode == "ask":
-        mode, cap = choose_mode()
+        action, cap = choose_start()
+        mode = "voice" if action == "program-voice" else "text"
     else:
-        mode, cap = args.mode, Capability()
+        action = "console"
+        action = "feed" if args.mode == "feed" else "console"
+        mode, cap = ("text" if args.mode == "feed" else args.mode), Capability()
         if mode == "voice":
             cap = detect()
             if not cap.any:
@@ -541,6 +545,73 @@ def cmd_console(args) -> int:
         """Read a reply aloud in voice mode. Printing happens either way."""
         if mode == "voice" and cap.speak:
             speak(text, cap)
+
+    def write_program() -> None:
+        """Describe a program; MotherBrain writes code from the description.
+
+        The description becomes a module docstring, because that is the shape
+        the model saw during training: a docstring followed by definitions. It
+        writes plausible Python, not correct Python, and says so rather than
+        letting the output imply more than it is.
+        """
+        import torch
+
+        from motherbrain.tokenizer import EOS_ID
+
+        print("Describe the program. One line is enough.")
+        print('  e.g. "read a csv file and print the column averages"\n')
+        try:
+            want = read_line().strip() if mode == "voice" else input("  ").strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return
+        if not want:
+            print("nothing to write.\n")
+            return
+
+        # Shape the prompt like the training data - a docstring, then a
+        # definition - and put the description's own words in the function
+        # name. The model cannot follow an instruction, but it does continue
+        # from context, so words that appear in the signature pull the body
+        # towards the same subject. That is the most a base model gives you.
+        words = [w for w in re.findall(r"[A-Za-z]+", want.lower())
+                 if w not in {"a", "an", "the", "that", "to", "and", "of",
+                              "for", "in", "it", "with", "program"}]
+        slug = "_".join(words[:4]) or "main"
+        head = f'"""{want}"""\n\n\ndef {slug}('
+        opener = f"def {slug}("
+
+        print(f"\nwriting ({args.max_tokens} tokens)...\n")
+        rule = "─" * 60
+        print(rule)
+        print(opener, end="", flush=True)
+
+        ids = torch.tensor([tok.encode(head, bos=True)], device=device)
+        produced = [opener]
+        for token in model.generate(ids, max_new_tokens=args.max_tokens,
+                                    temperature=0.6, top_k=40, top_p=0.95,
+                                    repetition_penalty=1.2, eos_id=EOS_ID):
+            piece = tok.decode([token])
+            produced.append(piece)
+            print(piece, end="", flush=True)
+        code = "".join(produced)
+        print(f"\n{rule}")
+        print(f"{len(produced) - 1} tokens from a {human(model.n_params())} model. "
+              f"This is plausible Python, not working Python: a model this size "
+              f"reproduces the shape of code, and cannot be told what to write. "
+              f"Read it before running it.\n")
+        say("program written")
+
+        try:
+            where = input("save to a file? [path, or blank to skip] ").strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return
+        if where:
+            path = Path(where).expanduser()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f'"""{want}"""\n\n{code}\n', encoding="utf-8")
+            print(f"written to {path}\n")
 
     def feed_at_startup() -> None:
         """Take information first, then offer to learn it before continuing.
@@ -617,7 +688,9 @@ def cmd_console(args) -> int:
                 return heard
         return input("> ")
 
-    if mode == "feed":
+    if action in ("program", "program-voice"):
+        write_program()
+    elif action == "feed" or mode == "feed":
         feed_at_startup()
         mode = "text"
 

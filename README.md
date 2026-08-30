@@ -110,6 +110,46 @@ mb chat --prompt "hello"
 mb serve            # 127.0.0.1 by default
 ```
 
+## The opening menu
+
+Starting MotherBrain shows a menu of things to do, rather than a question
+about how you want to type:
+
+```
+What would you like to do?
+
+  1  Write a program — describe it and MotherBrain writes the code
+  2  Write a program — by voice
+  3  Teach it something new — add information it can learn
+  4  Open the console — prompts and commands, free-form
+
+choose [1-4, default 4]
+```
+
+The browser console at `/` opens on the same four choices.
+
+**Writing a program.** Describe it in a line and the description becomes a
+module docstring, with its own words forming the function name:
+
+```
+> read a csv file and print column averages
+
+def read_csv_file_print(
+    path: str,
+    *,
+    name: str | None = "str",
+    ...
+```
+
+That naming is not decoration. A base model cannot be told what to write — it
+continues from context — so putting the description's words in the signature is
+what pulls the body towards the subject. It is also the ceiling: at 25M
+parameters this reproduces the *shape* of Python, and the console says so under
+every program it writes rather than letting the output imply more than it is.
+
+Option 2 is only offered when the machine can provide speech; otherwise it
+says why and writes by text instead.
+
 ## Text, voice, or teach it something
 
 Both consoles ask how you want to start: **text**, **voice**, or **teach it**

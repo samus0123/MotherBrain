@@ -115,17 +115,67 @@ def listen(cap: Capability | None = None, timeout: float = 10.0) -> str | None:
         return None
 
 
+MENU = """What would you like to do?
+
+  1  Write a program — describe it and MotherBrain writes the code
+  2  Write a program — by voice
+  3  Teach it something new — add information it can learn
+  4  Open the console — prompts and commands, free-form
+"""
+
+
+def choose_start(default: str = "console") -> tuple[str, Capability]:
+    """Show the opening menu and return the chosen action.
+
+    Returns one of "program", "program-voice", "feed" or "console", with the
+    detected speech capability. The voice entry is only offered when something
+    on this machine can actually provide it: presenting a choice that cannot be
+    honoured is worse than explaining why it is missing.
+    """
+    cap = detect()
+
+    print(MENU)
+    if cap.any:
+        parts = []
+        if cap.listen:
+            parts.append(f"speech in ({cap.listen})")
+        if cap.speak:
+            parts.append(f"speech out ({cap.speak})")
+        print(f"  voice available: {', '.join(parts)}")
+        if not cap.listen:
+            print("  (no dictation here, so option 2 reads replies aloud "
+                  "while you type)")
+    else:
+        print(f"  option 2 is unavailable here: {cap.reason}")
+    print()
+
+    try:
+        answer = input(f"choose [1-4, default 4] ").strip().lower()
+    except (EOFError, KeyboardInterrupt, OSError):
+        # Not interactive - piped input, a scheduled run, no terminal at all.
+        # Defaulting is right; crashing on a question nobody can answer is not.
+        print()
+        return default, cap
+
+    choice = {
+        "1": "program", "2": "program-voice", "3": "feed", "4": "console",
+        "program": "program", "write": "program", "voice": "program-voice",
+        "teach": "feed", "feed": "feed", "learn": "feed",
+        "console": "console", "text": "console", "": default,
+    }.get(answer, default)
+
+    if choice == "program-voice" and not cap.any:
+        print("voice is unavailable here; writing by text instead.")
+        choice = "program"
+    print()
+    return choice, cap
+
+
 def choose_mode(default: str = "text") -> tuple[str, Capability]:
-    """Ask how to start: type, talk, or teach it something first.
+    """Backwards-compatible input-mode question, kept for `--mode ask`.
 
-    Returns one of "text", "voice" or "feed", together with the detected
-    capability. "feed" is an action rather than an input mode - the caller
-    takes the information, then carries on in text - but it belongs in this
-    question because feeding is the first thing most sessions want to do.
-
-    Voice is only offered when something on this machine can provide it.
-    Otherwise the reason is printed and it is left out of the question, because
-    offering a choice that cannot be honoured is worse than explaining why.
+    The opening menu (choose_start) is what a session normally sees; this
+    remains for callers that only need to know how the user wants to type.
     """
     cap = detect()
 
@@ -147,8 +197,6 @@ def choose_mode(default: str = "text") -> tuple[str, Capability]:
     try:
         answer = input(question).strip().lower()
     except (EOFError, KeyboardInterrupt, OSError):
-        # Not interactive - piped input, a scheduled run, no terminal at all.
-        # Defaulting is right; crashing on a question nobody can answer is not.
         print()
         return default, cap
 

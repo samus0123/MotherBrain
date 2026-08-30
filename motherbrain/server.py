@@ -675,6 +675,12 @@ UI_HTML = """<!doctype html>
          border-radius:6px; padding:7px 12px; cursor:pointer; }
   #mic.on { border-color:var(--err); color:var(--err); }
   #mic.hidden { display:none; }
+  #programpanel { display:flex; flex-direction:column; gap:10px;
+                  width:min(560px,92vw); text-align:left; }
+  #programpanel[hidden] { display:none; }
+  #programpanel input { background:var(--panel); color:var(--text);
+    border:1px solid var(--line); border-radius:8px; padding:10px 12px;
+    font:inherit; font-size:13px; width:100%; }
   #feedpanel { display:flex; flex-direction:column; gap:10px; width:min(560px,92vw);
                text-align:left; }
   #feedpanel[hidden] { display:none; }
@@ -689,16 +695,28 @@ UI_HTML = """<!doctype html>
 </head>
 <body>
 <div id="ask">
-  <h2>How do you want to talk to MotherBrain?</h2>
+  <h2>What would you like to do?</h2>
   <div class="choices">
-    <button class="choice" data-mode="text">
-      <b>Text</b><span>type prompts and commands</span></button>
-    <button class="choice" id="voice-choice" data-mode="voice">
-      <b>Voice</b><span id="voice-note">speak, and hear replies</span></button>
+    <button class="choice" data-mode="program">
+      <b>Write a program</b><span>describe it, by text</span></button>
+    <button class="choice" id="voice-choice" data-mode="program-voice">
+      <b>Write a program</b><span id="voice-note">describe it, by voice</span></button>
     <button class="choice" data-mode="feed">
-      <b>Teach it</b><span>feed it something first</span></button>
+      <b>Teach it</b><span>add information it can learn</span></button>
+    <button class="choice" data-mode="text">
+      <b>Console</b><span>prompts and commands, free-form</span></button>
   </div>
   <div class="why" id="voice-why"></div>
+
+  <div id="programpanel" hidden>
+    <input id="progwant" placeholder="what should the program do?">
+    <div class="why">e.g. read a csv file and print the column averages</div>
+    <div class="feedrow">
+      <button class="choice go" id="progwrite">write it</button>
+      <button class="choice" id="progback">back</button>
+    </div>
+    <div class="why" id="progout"></div>
+  </div>
 
   <div id="feedpanel" hidden>
     <textarea id="feedtext" rows="6"
@@ -945,18 +963,7 @@ function speak(text) {
 // Feeding only stores text; a patch is what puts it into the weights. The
 // offer to grow immediately is here because the gap between those two is the
 // thing people most often miss.
-function showFeed() {
-  document.querySelector('.choices').hidden = true;
-  $('voice-why').hidden = true;
-  $('feedpanel').hidden = false;
-  $('feedtext').focus();
-}
-
-$('feedback').onclick = () => {
-  $('feedpanel').hidden = true;
-  $('voice-why').hidden = false;
-  document.querySelector('.choices').hidden = false;
-};
+$('feedback').onclick = () => hidePanels();
 
 $('feedadd').onclick = async () => {
   const text = $('feedtext').value.trim();
@@ -996,8 +1003,66 @@ $('feedgrow').onclick = async () => {
 
 $('feedlater').onclick = () => setMode('text');
 
+// ---- writing a program ---------------------------------------------------
+// The description becomes a docstring and its own words become the function
+// name, because a base model cannot be told what to write - it continues from
+// context, and words in the signature pull the body towards the same subject.
+const Q = '"'.repeat(3);
+
+function showPanel(which) {
+  document.querySelector('.choices').hidden = true;
+  $('voice-why').hidden = true;
+  $(which).hidden = false;
+  $(which === 'feedpanel' ? 'feedtext' : 'progwant').focus();
+}
+function hidePanels() {
+  $('feedpanel').hidden = true;
+  $('programpanel').hidden = true;
+  $('voice-why').hidden = false;
+  document.querySelector('.choices').hidden = false;
+}
+$('progback').onclick = hidePanels;
+
+$('progwrite').onclick = async () => {
+  const want = $('progwant').value.trim();
+  if (!want) { $('progout').textContent = 'describe it first'; return; }
+  const stop = new Set(['a','an','the','that','to','and','of','for','in','it',
+                        'with','program']);
+  const words = (want.toLowerCase().match(/[a-z]+/g) || []).filter(w => !stop.has(w));
+  const slug = words.slice(0, 4).join('_') || 'main';
+  const opener = `def ${slug}(`;
+
+  setMode(pendingVoice ? 'voice' : 'text');
+  add(esc(want), 'you');
+  $('progwrite').disabled = false;
+  add('writing…', 'muted');
+  try {
+    const r = await fetch('/command', {method:'POST', headers:H(),
+      // Q is built rather than written literally: a triple quote would end the
+      // Python string that carries this page.
+      body: JSON.stringify({text: Q + want + Q + '\n\n\n' + opener,
+                            max_tokens: 160, temperature: 0.6})});
+    const j = await r.json();
+    add(opener + (j.text || ''), 'out');
+    add(`from a ${$('stat').textContent.match(/[\d.]+M|[\d.]+B/)?.[0] || 'small'} `
+        + 'model: plausible Python, not working Python. A model this size '
+        + 'reproduces the shape of code and cannot be told what to write. '
+        + 'Read it before running it.', 'muted');
+    speak('program written');
+  } catch (e) { add('error: ' + e, 'err'); }
+};
+
+let pendingVoice = false;
 document.querySelectorAll('.choice[data-mode]').forEach(b => {
-  b.onclick = () => b.dataset.mode === 'feed' ? showFeed() : setMode(b.dataset.mode);
+  b.onclick = () => {
+    const m = b.dataset.mode;
+    if (m === 'feed') return showPanel('feedpanel');
+    if (m === 'program' || m === 'program-voice') {
+      pendingVoice = (m === 'program-voice');
+      return showPanel('programpanel');
+    }
+    setMode(m);
+  };
 });
 $('mic').onclick = () => listening ? recog.stop() : startListening();
 document.addEventListener('keydown', e => {
