@@ -47,6 +47,25 @@ for a workspace, the way git finds `.git`, so it works from a subdirectory too.
 Override with `--corpus`/`--run`, or the `MB_CORPUS`/`MB_RUN` environment
 variables.
 
+### If it will not start
+
+Run the diagnostic and read the first two sections:
+
+```bash
+sh scripts/doctor.sh
+```
+
+It reports the branch, whether the files exist, the Python version, the
+virtual environment, the dependencies, and then tries to start.
+
+**The most common cause is the branch.** `main` holds only a LICENSE and a
+README, so a plain `git clone` produces a directory with nothing to run in it:
+
+```bash
+git fetch origin
+git checkout claude/massive-parameter-llm-mcs613
+```
+
 ### If `pip install -e .` fails
 
 Three causes account for almost all of it, and none are about this project.
