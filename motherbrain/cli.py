@@ -18,7 +18,6 @@ import sys
 from pathlib import Path
 
 from motherbrain.config import PRESETS, ModelConfig, human, scale_to
-from motherbrain.security import check_exposure
 
 def project_root() -> Path:
     """Find the MotherBrain workspace, the way git walks up to find .git.
@@ -1047,6 +1046,7 @@ def cmd_cert(args) -> int:
 def cmd_serve(args) -> int:
     import uvicorn
 
+    from motherbrain.security import check_exposure
     from motherbrain.server import create_app
 
     # Validate the exposure before building anything, so a misconfigured

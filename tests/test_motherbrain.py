@@ -1270,3 +1270,37 @@ def test_a_fresh_clone_runs_without_training(tmp_path, monkeypatch):
     assert version == 1
     assert loaded.n_params() == model.n_params()
     assert loaded_tok.vocab_size == tok.vocab_size
+
+
+def test_cli_does_not_need_a_web_framework(monkeypatch):
+    """`mb console` failed on a phone that had torch but no fastapi.
+
+    cli.py imported motherbrain.security at module scope, which imported
+    fastapi, so a chat session dragged in an HTTP stack it never touches.
+    Only serving needs a web framework.
+    """
+    import importlib
+    import sys
+
+    blocked = ("fastapi", "starlette", "uvicorn")
+
+    class Blocker:
+        def find_module(self, name, path=None):
+            return self if name.split(".")[0] in blocked else None
+
+        def load_module(self, name):
+            raise ImportError(f"No module named {name!r}")
+
+    for name in list(sys.modules):
+        if name.split(".")[0] in blocked:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    for name in ("motherbrain.cli", "motherbrain.security"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    monkeypatch.setattr(sys, "meta_path", [Blocker(), *sys.meta_path])
+
+    security = importlib.import_module("motherbrain.security")
+    cli = importlib.import_module("motherbrain.cli")
+
+    assert security.check_exposure("127.0.0.1", None, tls=False, insecure=False) == []
+    assert cli.build_parser().parse_args(["console"]).mode == "ask"

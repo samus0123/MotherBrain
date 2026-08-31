@@ -108,8 +108,17 @@ pip install -e .
 That is about a tenth of the size. ARM64 machines, phones included, get a
 CPU-only wheel from PyPI anyway and need no flag.
 
-You do not have to install at all. From the repository root, everything works
-as a module once the dependencies are present:
+**Running it needs only torch and numpy.** fastapi, uvicorn and pydantic are
+imported only by `mb serve`, so a machine that cannot install a web stack can
+still run the console:
+
+```bash
+pip install torch numpy
+python3 -m motherbrain.cli console
+```
+
+You do not have to install the package at all. From the repository root,
+everything works as a module once the dependencies are present:
 
 ```bash
 pip install -r requirements.txt      # or: apt install python3-torch python3-numpy
