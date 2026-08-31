@@ -279,11 +279,37 @@ def load_runtime(run_dir: str, device: str = "auto"):
     return model, tok, dev, meta
 
 
+def shipped_model(run_dir: str) -> Path | None:
+    """The exported model committed alongside the code, if there is one.
+
+    A clone carries `models/motherbrain.pt` but not a training checkpoint -
+    checkpoints are far too large for a repository. Without this, a fresh
+    clone has a model sitting right there and every command insists there is
+    none, which is the least helpful thing it could say.
+    """
+    root = Path(run_dir).resolve()
+    for base in (project_root(), root.parent.parent, Path.cwd()):
+        for name in ("motherbrain.pt", "motherbrain-15m.pt"):
+            candidate = Path(base) / "models" / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
 def load_current(run_dir: str, device: str = "auto"):
-    """The model as of the current version: base checkpoint + applied patches."""
+    """The model as of the current version: base checkpoint + applied patches.
+
+    Falls back to the exported model shipped with the repository when there is
+    no trained checkpoint, so a fresh clone runs without training anything.
+    """
     from motherbrain.patches import build_version
     from motherbrain.train import pick_device
 
+    if not (Path(run_dir) / "checkpoint.pt").exists():
+        shipped = shipped_model(run_dir)
+        if shipped is not None:
+            model, tok, dev, version, _steps = load_exported(str(shipped), device)
+            return model, tok, dev, version
     model, tok, version = build_version(run_dir, device=device)
     return model, tok, pick_device(device), version
 

@@ -296,7 +296,14 @@ mb serve     # loads it and serves it to your IDEs
 Both load the *current version*: the base checkpoint with patches 1..N applied.
 `mb checkout v1` changes which version that is.
 
-**On a fresh clone there is nothing to load yet.** `checkpoint.pt` holds the
+**On a fresh clone, `mb console` and `mb chat` just work.** The clone carries
+`models/motherbrain.pt`, and both fall back to it when there is no training
+checkpoint — so a clone runs the trained model without training anything.
+
+`mb train`, `mb patch` and `mb grow` do need a checkpoint, because they
+continue training rather than only running the model.
+
+**If you want to train your own base,** `checkpoint.pt` holds the
 weights and is far too large to commit, so a clone carries the code, the
 tokenizer, the manifest and the patches — but no base model. One command fixes
 that:

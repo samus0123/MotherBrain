@@ -1223,3 +1223,50 @@ def test_console_mode_flag_accepts_feed():
     from motherbrain.cli import build_parser
 
     assert build_parser().parse_args(["console", "--mode", "feed"]).mode == "feed"
+
+
+def test_a_fresh_clone_runs_without_training(tmp_path, monkeypatch):
+    """A clone ships models/motherbrain.pt but no training checkpoint.
+
+    Checkpoints are far too large for a repository, so without a fallback
+    every command insisted there was no model while one sat in models/ - the
+    least helpful thing it could say to someone who had just cloned it.
+    """
+    import motherbrain.cli as cli
+    from motherbrain.config import ModelConfig
+    from motherbrain.data import Corpus
+    from motherbrain.model import MotherBrain
+
+    workspace = tmp_path / "clone"
+    (workspace / "runs" / "default").mkdir(parents=True)
+    (workspace / "models").mkdir()
+
+    corpus = Corpus(workspace / "data" / "corpus")
+    corpus.add_text("the mother brain awakens " * 60, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    model = MotherBrain(cfg)
+    tok.save(str(workspace / "runs" / "default" / "tokenizer.json"))
+
+    # write an export exactly as `mb export` does
+    import json as _json
+
+    import torch as _torch
+
+    _torch.save({
+        "format": "motherbrain-model-v1",
+        "config_json": _json.dumps(cfg.to_dict()),
+        "tokenizer_json": (workspace / "runs" / "default" / "tokenizer.json").read_text(),
+        "weights": {k: v.to(_torch.float16) for k, v in model.state_dict().items()},
+        "version": 1, "steps": 100, "base_fingerprint": "",
+    }, workspace / "models" / "motherbrain.pt")
+
+    assert not (workspace / "runs" / "default" / "checkpoint.pt").exists()
+    monkeypatch.chdir(workspace)
+
+    loaded, loaded_tok, _device, version = cli.load_current(
+        str(workspace / "runs" / "default"))
+    assert version == 1
+    assert loaded.n_params() == model.n_params()
+    assert loaded_tok.vocab_size == tok.vocab_size
