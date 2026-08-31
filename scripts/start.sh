@@ -48,7 +48,24 @@ if [ ! -x .venv/bin/mb ]; then
     exit 1
   }
 fi
-echo "  ok: installed"
+
+# An install can exit cleanly and still not produce a runnable command. Say so
+# here rather than letting a later step fail for a reason that looks unrelated.
+if [ -x .venv/bin/mb ]; then
+  RUN=".venv/bin/mb"
+  echo "  ok: installed"
+elif [ -x .venv/bin/python ] && .venv/bin/python -c "import motherbrain" 2>/dev/null; then
+  RUN=".venv/bin/python -m motherbrain.cli"
+  echo "  ok: installed (running as a module)"
+elif "$PY" -c "import motherbrain, torch" 2>/dev/null; then
+  RUN="$PY -m motherbrain.cli"
+  echo "  ok: using the system python"
+else
+  echo
+  echo "step 2 failed: the install finished but left nothing runnable."
+  echo "Run 'sh scripts/doctor.sh' and send the output."
+  exit 1
+fi
 
 # 3. something to run. A clone ships models/motherbrain.pt, so this is only
 #    missing if the checkout is incomplete.
@@ -62,4 +79,5 @@ fi
 echo "  ok: model present"
 
 echo
-exec .venv/bin/mb console "$@"
+# shellcheck disable=SC2086
+exec $RUN console "$@"
