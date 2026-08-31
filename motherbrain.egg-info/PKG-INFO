@@ -64,10 +64,16 @@ mb serve      expose it to every IDE you own
 ## Install
 
 ```bash
+scripts/install.sh          # handles the usual install failures
+```
+
+or, if your Python is not externally managed:
+
+```bash
 pip install -e .
 ```
 
-That installs the dependencies **and** the `mb` command, so every example below
+Either installs the dependencies **and** the `mb` command, so every example below
 works from any directory. Without it you would get `No module named
 motherbrain` outside the repository root.
 
@@ -80,6 +86,78 @@ for a workspace, the way git finds `.git`, so it works from a subdirectory too.
 Override with `--corpus`/`--run`, or the `MB_CORPUS`/`MB_RUN` environment
 variables.
 
+### If it will not start
+
+Run the diagnostic and read the first two sections:
+
+```bash
+sh scripts/doctor.sh
+```
+
+It reports the branch, whether the files exist, the Python version, the
+virtual environment, the dependencies, and then tries to start.
+
+**The most common cause is the branch.** `main` holds only a LICENSE and a
+README, so a plain `git clone` produces a directory with nothing to run in it:
+
+```bash
+git fetch origin
+git checkout claude/massive-parameter-llm-mcs613
+```
+
+### If `pip install -e .` fails
+
+Three causes account for almost all of it, and none are about this project.
+
+**`error: externally-managed-environment`** — Debian 12+, Ubuntu 23.04+ and
+Termux's proot images mark the system Python as managed by the OS (PEP 668), so
+pip refuses to install into it. Use a virtual environment:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+```
+
+`scripts/install.sh` does exactly that, and checks the other two causes before
+downloading several hundred megabytes to discover them.
+
+**`No matching distribution found for torch`** — PyTorch publishes wheels only
+for certain Python versions and platforms. A very new Python (3.14+) usually
+has no wheel yet, and neither does Termux's own Python, which is why the
+Android instructions install into a proot distro rather than Termux directly.
+Check with `python3 -VV`, and install an older Python if needed:
+
+```bash
+apt install python3.12 python3.12-venv
+PYTHON=python3.12 scripts/install.sh
+```
+
+**`No module named venv`** — `apt install python3-venv`.
+
+**It downloads gigabytes, or runs out of disk.** On Linux x86_64, `pip install
+torch` pulls the CUDA runtime — around 2.5GB — even with no GPU present. For a
+CPU-only machine, ask for the CPU build instead:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e .
+```
+
+That is about a tenth of the size. ARM64 machines, phones included, get a
+CPU-only wheel from PyPI anyway and need no flag.
+
+You do not have to install at all. From the repository root, everything works
+as a module once the dependencies are present:
+
+```bash
+pip install -r requirements.txt      # or: apt install python3-torch python3-numpy
+python3 -m motherbrain.cli console
+```
+
+That is the same program; `mb` is only a shortcut that works from any
+directory.
+
 ## Quick start
 
 ```bash
@@ -89,6 +167,46 @@ mb train --preset micro --steps 400 --batch-size 16 --seq-len 256
 mb chat --prompt "hello"
 mb serve            # 127.0.0.1 by default
 ```
+
+## The opening menu
+
+Starting MotherBrain shows a menu of things to do, rather than a question
+about how you want to type:
+
+```
+What would you like to do?
+
+  1  Write a program — describe it and MotherBrain writes the code
+  2  Write a program — by voice
+  3  Teach it something new — add information it can learn
+  4  Open the console — prompts and commands, free-form
+
+choose [1-4, default 4]
+```
+
+The browser console at `/` opens on the same four choices.
+
+**Writing a program.** Describe it in a line and the description becomes a
+module docstring, with its own words forming the function name:
+
+```
+> read a csv file and print column averages
+
+def read_csv_file_print(
+    path: str,
+    *,
+    name: str | None = "str",
+    ...
+```
+
+That naming is not decoration. A base model cannot be told what to write — it
+continues from context — so putting the description's words in the signature is
+what pulls the body towards the subject. It is also the ceiling: at 25M
+parameters this reproduces the *shape* of Python, and the console says so under
+every program it writes rather than letting the output imply more than it is.
+
+Option 2 is only offered when the machine can provide speech; otherwise it
+says why and writes by text instead.
 
 ## Text, voice, or teach it something
 
@@ -217,7 +335,14 @@ mb serve     # loads it and serves it to your IDEs
 Both load the *current version*: the base checkpoint with patches 1..N applied.
 `mb checkout v1` changes which version that is.
 
-**On a fresh clone there is nothing to load yet.** `checkpoint.pt` holds the
+**On a fresh clone, `mb console` and `mb chat` just work.** The clone carries
+`models/motherbrain.pt`, and both fall back to it when there is no training
+checkpoint — so a clone runs the trained model without training anything.
+
+`mb train`, `mb patch` and `mb grow` do need a checkpoint, because they
+continue training rather than only running the model.
+
+**If you want to train your own base,** `checkpoint.pt` holds the
 weights and is far too large to commit, so a clone carries the code, the
 tokenizer, the manifest and the patches — but no base model. One command fixes
 that:
@@ -520,10 +645,28 @@ pkg install proot-distro
 proot-distro install debian
 proot-distro login debian
 
-apt update && apt install -y python3 python3-pip git
+apt update && apt install -y python3 python3-pip python3-venv git
 git clone <this-repo> && cd MotherBrain
-pip install -r requirements.txt
-mb serve --host 0.0.0.0 --port 8000
+scripts/install.sh
+.venv/bin/mb console
+```
+
+`python3-venv` matters: Debian's proot image marks its Python as externally
+managed, so installing without a virtual environment fails with
+`externally-managed-environment`. The script creates one.
+
+The clone already contains a trained model, so there is nothing to train
+before it will answer:
+
+```bash
+.venv/bin/mb chat --model models/motherbrain.pt --prompt "def softmax(x):"
+```
+
+For voice, serve it and open the page in Chrome on the phone — Android Chrome
+supports the Web Speech API, while the Termux terminal has no speech backends:
+
+```bash
+.venv/bin/mb serve --host 0.0.0.0
 ```
 
 Then reach it at `http://localhost:8000` from the phone's browser, or from
