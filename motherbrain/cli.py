@@ -571,18 +571,111 @@ def cmd_console(args) -> int:
         if mode == "voice" and cap.speak:
             speak(text, cap)
 
-    def write_program() -> None:
-        """Describe a program; MotherBrain writes code from the description.
+    def generate_code(want: str) -> str:
+        """Write code from a description and return it.
 
-        The description becomes a module docstring, because that is the shape
-        the model saw during training: a docstring followed by definitions. It
-        writes plausible Python, not correct Python, and says so rather than
-        letting the output imply more than it is.
+        The description becomes a module docstring and its own words become the
+        function name, because that is the shape the model saw in training. A
+        base model cannot be told what to write - it continues from context -
+        so seeding the signature is what pulls the body towards the subject.
         """
         import torch
 
         from motherbrain.tokenizer import EOS_ID
 
+        words = [w for w in re.findall(r"[A-Za-z]+", want.lower())
+                 if w not in {"a", "an", "the", "that", "to", "and", "of",
+                              "for", "in", "it", "with", "program", "script"}]
+        slug = "_".join(words[:4]) or "main"
+        opener = f"def {slug}("
+        head = f'"""{want}"""\n\n\n{opener}'
+
+        rule = "─" * 60
+        print(rule)
+        print(opener, end="", flush=True)
+        ids = torch.tensor([tok.encode(head, bos=True)], device=device)
+        produced = [opener]
+        for token in model.generate(ids, max_new_tokens=args.max_tokens,
+                                    temperature=0.6, top_k=40, top_p=0.95,
+                                    repetition_penalty=1.2, eos_id=EOS_ID):
+            piece = tok.decode([token])
+            produced.append(piece)
+            print(piece, end="", flush=True)
+        print(f"\n{rule}")
+        print(f"{len(produced) - 1} tokens from a {human(model.n_params())} model. "
+              f"This is plausible Python, not working Python: a model this size "
+              f"reproduces the shape of code, and cannot be told what to write. "
+              f"Read it before running it.\n")
+        say("program written")
+        return f'"""{want}"""\n\n{"".join(produced)}\n'
+
+    def do_make(want: str, path: str | None) -> None:
+        """Write a program, save it, and offer to run it."""
+        code = generate_code(want)
+
+        if not path:
+            words = [w for w in re.findall(r"[A-Za-z]+", want.lower())][:3]
+            default = "_".join(words) or "program"
+            try:
+                path = input(f"save as [{default}.py, blank to skip] ").strip()
+            except (EOFError, KeyboardInterrupt, OSError):
+                print()
+                return
+            if not path:
+                return
+            path = path or f"{default}.py"
+
+        target = Path(path).expanduser()
+        if target.suffix == "":
+            target = target.with_suffix(".py")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(code, encoding="utf-8")
+        print(f"written to {target}")
+
+        try:
+            answer = input("run it? it was written by a 25M model [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return
+        if answer.startswith("y"):
+            do_run(str(target))
+        else:
+            print()
+
+    def do_run(path: str) -> None:
+        """Run a python file and show what it did."""
+        import subprocess
+
+        target = Path(path).expanduser()
+        if not target.is_file():
+            print(f"no such file: {target}\n")
+            return
+
+        print(f"running {target} ...")
+        rule = "─" * 60
+        print(rule)
+        try:
+            proc = subprocess.run([sys.executable, str(target)],
+                                  capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            print(f"{rule}\nstopped after 30 seconds.\n")
+            return
+        except OSError as exc:
+            print(f"{rule}\ncould not run it: {exc}\n")
+            return
+
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.stderr:
+            print(proc.stderr, end="")
+        print(rule)
+        print(f"exit code {proc.returncode}"
+              + ("" if proc.returncode == 0 else "  (it failed, which is usual "
+                                                 "for code this model writes)")
+              + "\n")
+
+    def write_program() -> None:
+        """The menu's write-a-program entry: describe it, then save and run it."""
         print("Describe the program. One line is enough.")
         print('  e.g. "read a csv file and print the column averages"\n')
         try:
@@ -593,50 +686,8 @@ def cmd_console(args) -> int:
         if not want:
             print("nothing to write.\n")
             return
-
-        # Shape the prompt like the training data - a docstring, then a
-        # definition - and put the description's own words in the function
-        # name. The model cannot follow an instruction, but it does continue
-        # from context, so words that appear in the signature pull the body
-        # towards the same subject. That is the most a base model gives you.
-        words = [w for w in re.findall(r"[A-Za-z]+", want.lower())
-                 if w not in {"a", "an", "the", "that", "to", "and", "of",
-                              "for", "in", "it", "with", "program"}]
-        slug = "_".join(words[:4]) or "main"
-        head = f'"""{want}"""\n\n\ndef {slug}('
-        opener = f"def {slug}("
-
         print(f"\nwriting ({args.max_tokens} tokens)...\n")
-        rule = "─" * 60
-        print(rule)
-        print(opener, end="", flush=True)
-
-        ids = torch.tensor([tok.encode(head, bos=True)], device=device)
-        produced = [opener]
-        for token in model.generate(ids, max_new_tokens=args.max_tokens,
-                                    temperature=0.6, top_k=40, top_p=0.95,
-                                    repetition_penalty=1.2, eos_id=EOS_ID):
-            piece = tok.decode([token])
-            produced.append(piece)
-            print(piece, end="", flush=True)
-        code = "".join(produced)
-        print(f"\n{rule}")
-        print(f"{len(produced) - 1} tokens from a {human(model.n_params())} model. "
-              f"This is plausible Python, not working Python: a model this size "
-              f"reproduces the shape of code, and cannot be told what to write. "
-              f"Read it before running it.\n")
-        say("program written")
-
-        try:
-            where = input("save to a file? [path, or blank to skip] ").strip()
-        except (EOFError, KeyboardInterrupt, OSError):
-            print()
-            return
-        if where:
-            path = Path(where).expanduser()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f'"""{want}"""\n\n{code}\n', encoding="utf-8")
-            print(f"written to {path}\n")
+        do_make(want, None)
 
     def feed_at_startup() -> None:
         """Take information first, then offer to learn it before continuing.
@@ -791,6 +842,31 @@ def cmd_console(args) -> int:
                 say(f"grown to version {v.version}, "
                     f"{human(v.params_after)} parameters")
                 load()
+        elif cmd.name == "make":
+            do_make(cmd.text, cmd.args.get("path"))
+        elif cmd.name == "run":
+            do_run(cmd.args["path"])
+        elif cmd.name == "ls":
+            where = Path(cmd.text.strip() or ".").expanduser()
+            if not where.is_dir():
+                print(f"no such directory: {where}\n")
+            else:
+                for entry in sorted(where.iterdir())[:60]:
+                    mark = "/" if entry.is_dir() else " "
+                    print(f"  {entry.name}{mark}")
+                print()
+        elif cmd.name == "cat":
+            target = Path(cmd.args["path"]).expanduser()
+            if not target.is_file():
+                print(f"no such file: {target}\n")
+            else:
+                try:
+                    body = target.read_text(encoding="utf-8", errors="replace")
+                except OSError as exc:
+                    print(f"could not read it: {exc}\n")
+                else:
+                    print(body[:8000] + ("\n... (truncated)" if len(body) > 8000 else ""))
+                    print()
         elif cmd.name in ("train", "export"):
             print(f"run that from the command line: mb {cmd.name}\n")
         else:

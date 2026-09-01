@@ -45,10 +45,21 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "checkout": ("checkout", "switch to", "go back to", "roll back to"),
     "scale": ("scale", "how large could you be", "largest"),
     "clear": ("clear", "reset the screen"),
+    # Actions: these do something to the machine rather than print an answer.
+    "make": ("make", "write a program", "build", "create a program", "create"),
+    "run": ("run", "execute"),
+    "ls": ("ls", "list files", "what files"),
+    "cat": ("cat", "show", "show me", "open"),
 }
 
+# Actions that touch the filesystem or run code. They are available in the
+# terminal, where you already have a shell, and refused over HTTP, where they
+# would be remote code execution against whoever is serving the model.
+LOCAL_ONLY = {"make", "run", "ls", "cat"}
+
 # Commands that consume the rest of the line as their payload.
-TAKES_TEXT = {"learn", "checkout", "train", "grow", "export", "scale"}
+TAKES_TEXT = {"learn", "checkout", "train", "grow", "export", "scale",
+              "make", "run", "cat"}
 
 
 def _match_alias(lowered: str) -> tuple[str, str] | None:
@@ -128,6 +139,24 @@ def _with_args(name: str, rest: str, raw: str) -> Command:
     elif name == "export":
         args["path"] = rest.strip() or "models/motherbrain.pt"
 
+    elif name == "make":
+        if not rest:
+            return Command("error", raw,
+                           {"message": "make needs a description, e.g. "
+                                       "/make a script that renames files"})
+        # An optional "-> path" says where to save it.
+        target = None
+        if "->" in rest:
+            rest, _, target = rest.partition("->")
+            rest, target = rest.strip(), target.strip()
+        args["path"] = target
+
+    elif name in ("run", "cat"):
+        if not rest:
+            return Command("error", raw,
+                           {"message": f"{name} needs a file, e.g. /{name} script.py"})
+        args["path"] = rest.strip()
+
     return Command(name, rest, args)
 
 
@@ -145,6 +174,13 @@ HELP = """MotherBrain console
   /scale [preset]        what a configuration would cost to build
   /export [path]         write a shareable model file
   /help                  this
+
+Actions — terminal only, never over the network:
+
+  /make <what> [-> file] write a program, save it, offer to run it
+  /run <file>            run a python file and show its output
+  /ls [dir]              list files
+  /cat <file>            show a file
 
 Plain English works for the same things: "learn that ...", "grow", "how big
 are you", "what version are you", "list versions". The parsing is a fixed

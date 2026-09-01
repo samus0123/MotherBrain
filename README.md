@@ -234,6 +234,47 @@ using text.
 None of that is installed as a dependency. Speech is optional, and a model you
 can only talk to would be worse than one you can also type at.
 
+## Making it do things
+
+The console does more than print. In the terminal:
+
+```
+> /make a script that renames files -> tools/rename.py
+────────────────────────────────────────────────────────────
+def make_script_renames(
+    path: str,
+    ...
+────────────────────────────────────────────────────────────
+written to tools/rename.py
+run it? it was written by a 25M model [y/N] y
+running tools/rename.py ...
+────────────────────────────────────────────────────────────
+SyntaxError: unterminated triple-quoted string literal
+────────────────────────────────────────────────────────────
+exit code 1  (it failed, which is usual for code this model writes)
+```
+
+| command | what it does |
+|---|---|
+| `/make <what> [-> file]` | writes a program, saves it, offers to run it |
+| `/run <file>` | runs a python file and shows its output |
+| `/ls [dir]` | lists files |
+| `/cat <file>` | shows a file |
+
+**Two things are worth being exact about.**
+
+*The model does not choose the action.* Your command does. MotherBrain is a
+base model over source code: it cannot follow an instruction, so `/make` uses
+it for the one thing it can do — continue text — and everything else is
+ordinary Python doing what you asked. A console that claimed the model decided
+would be theatre.
+
+*These never work over the network.* `/make`, `/run`, `/ls` and `/cat` write
+files and execute code. In your own terminal that is no more than your shell
+already allows. Reached over HTTP it would be remote code execution against
+whoever is serving the model, so the server refuses them outright rather than
+guarding them — there is no configuration of that which is safe to expose.
+
 ## Telling it what to do
 
 `mb console`, or the page `mb serve` puts at `/`, is one place to type both

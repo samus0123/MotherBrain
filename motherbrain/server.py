@@ -499,7 +499,7 @@ def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
         """
         from dataclasses import asdict
 
-        from motherbrain.commands import HELP, parse
+        from motherbrain.commands import HELP, LOCAL_ONLY, parse
         from motherbrain.config import PRESETS, ModelConfig
         from motherbrain.data import Corpus
         from motherbrain.patches import PatchStore
@@ -516,6 +516,17 @@ def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
 
         if cmd.name == "error":
             return {"kind": "error", "text": cmd.args["message"]}
+
+        if cmd.name in LOCAL_ONLY:
+            # /make, /run, /ls and /cat write files and execute code. In a
+            # terminal that is no more than the shell already allows. Over
+            # HTTP it is remote code execution against whoever is serving the
+            # model, so it is refused here rather than guarded - there is no
+            # configuration of this that is safe to expose.
+            return {"kind": "error",
+                    "text": f"/{cmd.name} runs code and touches files, so it "
+                            f"works only in the local terminal (mb console), "
+                            f"never over the network."}
 
         if cmd.name == "unknown":
             return {"kind": "error",

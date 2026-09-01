@@ -1304,3 +1304,61 @@ def test_cli_does_not_need_a_web_framework(monkeypatch):
 
     assert security.check_exposure("127.0.0.1", None, tls=False, insecure=False) == []
     assert cli.build_parser().parse_args(["console"]).mode == "ask"
+
+
+# ---- actions --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,name", [
+    ("/make a script that renames files", "make"),
+    ("write a program that sorts a list", "make"),
+    ("/run script.py", "run"),
+    ("/ls", "ls"),
+    ("/cat setup.py", "cat"),
+])
+def test_action_commands_parse(text, name):
+    from motherbrain.commands import parse
+
+    assert parse(text).name == name
+
+
+def test_make_accepts_a_destination():
+    from motherbrain.commands import parse
+
+    cmd = parse("make a csv reader -> tools/csv.py")
+    assert cmd.name == "make"
+    assert cmd.args["path"] == "tools/csv.py"
+    assert cmd.text == "a csv reader"
+    assert parse("/make a csv reader").args["path"] is None
+
+
+def test_actions_without_arguments_are_errors():
+    from motherbrain.commands import parse
+
+    assert parse("/make").name == "error"
+    assert parse("/run").name == "error"
+    assert parse("/cat").name == "error"
+
+
+def test_actions_are_refused_over_http(served):
+    """/make, /run, /ls and /cat write files and execute code.
+
+    In a terminal that is no more than the shell already allows. Over HTTP it
+    is remote code execution against whoever is serving the model, so there is
+    no configuration of it that is safe to expose.
+    """
+    from fastapi.testclient import TestClient
+
+    from motherbrain.commands import LOCAL_ONLY
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+
+    for text in ("/run /etc/passwd", "/make a thing", "/ls /", "/cat /etc/passwd"):
+        result = client.post("/command", json={"text": text}).json()
+        assert result["kind"] == "error"
+        assert "never over the network" in result["text"]
+
+    assert LOCAL_ONLY == {"make", "run", "ls", "cat"}
