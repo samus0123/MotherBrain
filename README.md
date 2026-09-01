@@ -605,6 +605,35 @@ What is still on you:
 * Rate limiting is per process and in memory; it is not a substitute for a
   real gateway if you are genuinely exposed to the internet.
 
+## Running it on Windows 11
+
+Install Python from python.org (tick **Add python.exe to PATH**), then in
+PowerShell:
+
+```powershell
+git clone -b claude/massive-parameter-llm-mcs613 https://github.com/samus0123/MotherBrain
+cd MotherBrain
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1
+```
+
+`start.ps1` is the Windows twin of `start.sh`: it checks out the branch if the
+code is missing, creates `.venv`, installs, and launches — stopping at whichever
+step fails and naming it.
+
+By hand, if you prefer:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\mb console
+```
+
+Note `\Scripts\` rather than `/bin/` — that is the only path difference from
+Linux. PyTorch's default Windows wheel is CPU-only, so there is no 2.5GB CUDA
+download to avoid here.
+
+WSL works too, and there the Linux instructions apply unchanged.
+
 ## Running it on Termux (Android)
 
 PyTorch publishes no Termux-native wheels, so install into a proot distro,

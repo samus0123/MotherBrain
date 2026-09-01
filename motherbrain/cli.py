@@ -1264,6 +1264,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    # A Windows console defaults to a legacy code page, and the rules and
+    # dashes this CLI prints are not in it - printing them raises
+    # UnicodeEncodeError partway through a reply. Ask for UTF-8 and fall back
+    # to replacement characters rather than dying mid-sentence.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
     args = build_parser().parse_args(argv)
     try:
         return args.func(args)
