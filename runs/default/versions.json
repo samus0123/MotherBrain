@@ -1,7 +1,33 @@
 {
-  "current": 0,
-  "head": 0,
+  "current": 1,
+  "head": 1,
   "base_docs": 23904,
-  "versions": [],
+  "versions": [
+    {
+      "version": 1,
+      "patch_id": "e22273f6",
+      "parent": 0,
+      "created_at": 1788375183.3364756,
+      "doc_start": 23904,
+      "doc_end": 23905,
+      "n_documents": 1,
+      "n_chars": 84,
+      "n_tokens": 22,
+      "steps": 40,
+      "rank": 8,
+      "trainable_params": 9440264,
+      "loss_before": 3.2255,
+      "loss_after": 0.0825,
+      "sources": [
+        "console"
+      ],
+      "note": "update",
+      "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3",
+      "mode": "grow",
+      "grow_experts": 1,
+      "params_before": 18880896,
+      "params_after": 28321160
+    }
+  ],
   "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3"
 }
