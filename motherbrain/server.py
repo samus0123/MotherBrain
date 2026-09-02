@@ -1051,7 +1051,7 @@ $('progwrite').onclick = async () => {
     const r = await fetch('/command', {method:'POST', headers:H(),
       // Q is built rather than written literally: a triple quote would end the
       // Python string that carries this page.
-      body: JSON.stringify({text: Q + want + Q + '\n\n\n' + opener,
+      body: JSON.stringify({text: Q + want + Q + '\\n\\n\\n' + opener,
                             max_tokens: 160, temperature: 0.6})});
     const j = await r.json();
     add(opener + (j.text || ''), 'out');

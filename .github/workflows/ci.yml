@@ -16,6 +16,10 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+      # The web console's script is checked by parsing it, so node has to exist.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
       - run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
