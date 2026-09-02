@@ -1396,3 +1396,31 @@ def test_no_fingerprint_check_without_patches(tmp_path):
     model, _, version = build_version(str(run))   # must not raise
     assert version == 0
     assert model.n_params() > 0
+
+
+def test_the_page_javascript_actually_parses():
+    """A syntax error in the page kills every click handler silently.
+
+    An escape written as \\n in the Python source became a real newline inside
+    a JavaScript string literal, so the whole script failed to parse, no
+    handlers were bound, and clicking the menu did nothing at all - with no
+    error anywhere the server could see it. Parsing the page's script is the
+    only check that would have caught it.
+    """
+    import re
+    import shutil
+    import subprocess
+
+    from motherbrain.server import UI_HTML
+
+    script = re.search(r"<script>(.*?)</script>", UI_HTML, re.S)
+    assert script, "the page has no script block"
+
+    node = shutil.which("node") or shutil.which("nodejs")
+    if not node:
+        pytest.skip("no node available to parse the page javascript")
+
+    result = subprocess.run([node, "--check", "-"], input=script.group(1),
+                            capture_output=True, text=True)
+    assert result.returncode == 0, (
+        f"the page's javascript does not parse:\n{result.stderr}")
