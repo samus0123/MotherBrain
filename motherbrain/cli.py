@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import re
 import time
@@ -969,6 +970,47 @@ def load_exported(path: str | Path, device: str = "auto"):
 # patches and versions
 
 
+def grown_config(cfg: ModelConfig, n_new: int) -> ModelConfig:
+    """The config a growth patch of `n_new` experts per layer would produce.
+
+    This mirrors motherbrain.growth.grow: the first growth of a dense model
+    converts its feed-forward layers to MoE, so the dense FFN becomes an
+    always-on shared expert and each layer gains a router. Anything that needs
+    to know the size after growing calls this, so the arithmetic exists once.
+    """
+    grown = ModelConfig.from_dict(cfg.to_dict())
+    grown.n_experts = (cfg.n_experts or 0) + n_new
+    grown.moe_every = 1
+    if cfg.n_experts == 0:
+        grown.n_shared_experts = max(cfg.n_shared_experts, 1)
+    grown.n_experts_per_token = min(max(cfg.n_experts_per_token, 1),
+                                    grown.n_experts)
+    return grown
+
+
+def experts_for_target(cfg: ModelConfig, target: float) -> int:
+    """How many experts per layer are needed to pass `target` parameters.
+
+    Not a straight division: converting dense layers to MoE changes what a
+    layer costs, so an estimate undershoots. This starts from the estimate and
+    then checks the real count.
+    """
+    if cfg.n_params >= target:
+        return 1
+
+    probe = grown_config(cfg, 1)
+    per_expert = probe.expert_params * max(probe.n_moe_layers, 1)
+    if per_expert <= 0:
+        raise ValueError("this shape cannot grow by experts")
+
+    n = max(1, math.ceil((target - cfg.n_params) / per_expert))
+    while grown_config(cfg, n).n_params < target:
+        n += 1
+    while n > 1 and grown_config(cfg, n - 1).n_params >= target:
+        n -= 1
+    return n
+
+
 def cmd_patch(args) -> int:
     """Train the not-yet-learned corpus documents into the next version."""
     from motherbrain.data import Corpus
@@ -982,8 +1024,30 @@ def cmd_patch(args) -> int:
               f"already in v{store.current}")
         return 0
 
+    grow_experts = args.grow
+    if args.to:
+        target = parse_count(args.to)
+        model, _tok, _dev, _v = load_current(args.run, "cpu")
+        if model.cfg.n_params >= target:
+            print(f"already {human(model.cfg.n_params)} parameters, "
+                  f"past {human(target)}")
+            return 0
+        grow_experts = experts_for_target(model.cfg, target)
+        grown = grown_config(model.cfg, grow_experts)
+        need_gb = grown.memory_bytes(optimizer=True) / 1e9
+        print(f"to pass {human(target)}: +{grow_experts} expert(s) per layer, "
+              f"{human(model.cfg.n_params)} -> {human(grown.n_params)}")
+        print(f"  training that needs about {need_gb:,.1f} GB of memory")
+        if need_gb > args.max_gb and not args.force:
+            print(f"\nthat exceeds --max-gb {args.max_gb:g}. Growth is cheap to "
+                  f"describe and expensive to hold:\n  a patch trains whole new "
+                  f"experts, and they have to fit in memory.\n  Raise --max-gb, "
+                  f"lower --to, or pass --force to try anyway.", file=sys.stderr)
+            return 1
+        del model
+
     print(f"patching v{store.current} with {pending} new document(s) ...")
-    cfg = PatchConfig(mode=args.mode, grow_experts=args.grow,
+    cfg = PatchConfig(mode=args.mode, grow_experts=grow_experts,
                       rank=args.rank, steps=args.steps, batch_size=args.batch_size,
                       lr=args.lr, replay_ratio=args.replay, seq_len=args.seq_len)
     version = create_patch(args.run, args.corpus, cfg, note=args.note,
@@ -1004,6 +1068,53 @@ def cmd_patch(args) -> int:
               f"(rank {version.rank})")
     print(f"  trained      {version.trainable_params:,} parameters")
     print(f"  loss         {version.loss_before:.4f} -> {version.loss_after:.4f}")
+    return 0
+
+
+def cmd_record(args) -> int:
+    """Where MotherBrain stands, separating what exists from what is specified.
+
+    A parameter count in a config file is a claim about JSON. A trained model
+    is a claim about weights somebody computed. Conflating the two is the
+    easiest way to overstate this project, so they are reported apart.
+    """
+    from motherbrain.patches import PatchStore
+
+    store = PatchStore(args.run, create=False)
+    print("trained — weights that exist")
+    try:
+        model, _tok, _dev, version = load_current(args.run, "cpu")
+        print(f"  v{version}  {human(model.n_params())} parameters "
+              f"({model.n_params():,})")
+        if store.largest:
+            print(f"  largest version in the lineage: {human(store.largest)}")
+        del model
+    except FileNotFoundError:
+        print("  none — run `mb bootstrap` or clone the shipped model")
+
+    print()
+    print("specified — configurations, not weights")
+    for name in ("titan", "leviathan", "mother"):
+        cfg = PRESETS[name]
+        print(f"  {name:<10} {human(cfg.n_params):>8} total, "
+              f"{human(cfg.n_active_params):>8} active/token")
+
+    print()
+    reference = args.reference or os.environ.get("MB_RECORD_REFERENCE")
+    if reference:
+        target = parse_count(reference)
+        mother = PRESETS["mother"].n_params
+        print(f"reference {human(target)}")
+        print(f"  the mother configuration is {mother / target:,.1f}x that")
+        print(f"  it is a config file; nobody has trained it")
+    else:
+        print("no reference set. Pass --reference (e.g. --reference 2T) or set")
+        print("MB_RECORD_REFERENCE to compare against a figure you trust.")
+        print("Sizes of the largest models are mostly undisclosed or")
+        print("unverifiable, so this tool does not ship a number of its own.")
+
+    print()
+    print(f"to grow the trained model:  mb patch --to 1B")
     return 0
 
 
@@ -1282,6 +1393,12 @@ def build_parser() -> argparse.ArgumentParser:
                         "version; lora: a low-rank delta that keeps its size")
     s.add_argument("--grow", type=int, default=1,
                    help="experts added per layer when growing")
+    s.add_argument("--to", help="grow until the model passes this many "
+                                "parameters, e.g. 1B, 500M, 2T")
+    s.add_argument("--max-gb", type=float, default=12.0,
+                   help="refuse a growth that needs more memory than this")
+    s.add_argument("--force", action="store_true",
+                   help="grow past --max-gb anyway")
     s.add_argument("--steps", type=int, default=100)
     s.add_argument("--rank", type=int, default=8)
     s.add_argument("--batch-size", type=int, default=8)
@@ -1292,6 +1409,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--note", default="")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_patch)
+
+    s = common(sub.add_parser(
+        "record", help="what is trained, what is only configured, and how big"))
+    s.add_argument("--reference", help="compare against a parameter count you "
+                                       "trust, e.g. 2T")
+    s.set_defaults(func=cmd_record)
 
     s = common(sub.add_parser("versions", help="show the model's lineage"))
     s.add_argument("--verbose", "-v", action="store_true")

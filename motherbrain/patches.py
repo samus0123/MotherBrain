@@ -277,6 +277,12 @@ class PatchStore:
         self.write(m)
 
     @property
+    def largest(self) -> int:
+        """The parameter count of the largest version in this lineage."""
+        return max((v["params_after"] for v in self.manifest()["versions"]
+                    if v.get("params_after")), default=0)
+
+    @property
     def base_fingerprint(self) -> str:
         return self.manifest().get("base_fingerprint", "")
 
@@ -304,6 +310,24 @@ class PatchStore:
         return dropped
 
     def record(self, v: Version, payload: dict) -> None:
+        # A growth lineage must never shrink. Each version is meant to be
+        # larger than the one before it, and a patch that does not enlarge the
+        # model is a bug in the caller rather than a version worth keeping -
+        # recording it would leave a lineage that claims growth it did not do.
+        if v.mode == "grow" and v.params_after and v.params_before:
+            if v.params_after <= v.params_before:
+                raise ValueError(
+                    f"a growth patch must add parameters: v{v.version} went "
+                    f"{v.params_before:,} -> {v.params_after:,}")
+            previous = [x for x in self.manifest()["versions"]
+                        if x["version"] < v.version and x.get("params_after")]
+            if previous:
+                largest = max(x["params_after"] for x in previous)
+                if v.params_after <= largest:
+                    raise ValueError(
+                        f"v{v.version} ({v.params_after:,}) is not larger than "
+                        f"an earlier version ({largest:,}); the lineage only grows")
+
         self.dir.mkdir(parents=True, exist_ok=True)
         # Stored at half precision. A growth patch carries whole new experts
         # rather than a small delta, so this is the difference between a

@@ -1424,3 +1424,82 @@ def test_the_page_javascript_actually_parses():
                             capture_output=True, text=True)
     assert result.returncode == 0, (
         f"the page's javascript does not parse:\n{result.stderr}")
+
+
+# ---- the lineage only grows -----------------------------------------------
+
+
+def test_a_growth_version_that_does_not_grow_is_refused(tmp_path):
+    """The whole point of growth mode is that each version is larger.
+
+    Recording one that is not would leave a lineage claiming growth it never
+    did, and nothing downstream would notice.
+    """
+    import time as _time
+
+    from motherbrain.patches import PatchStore, Version
+
+    store = PatchStore(tmp_path)
+
+    def version(n, before, after):
+        return Version(version=n, patch_id=f"p{n}", parent=n - 1,
+                       created_at=_time.time(), doc_start=0, doc_end=1,
+                       n_documents=1, n_chars=1, n_tokens=1, steps=1, rank=8,
+                       trainable_params=1, loss_before=2.0, loss_after=1.0,
+                       mode="grow", grow_experts=1,
+                       params_before=before, params_after=after)
+
+    store.record(version(1, 100, 200), {"x": torch.zeros(1)})
+    assert store.largest == 200
+
+    with pytest.raises(ValueError, match="must add parameters"):
+        store.record(version(2, 200, 200), {"x": torch.zeros(1)})
+
+    # grows against its own parent, but lands below an earlier version:
+    # only the lineage-wide check catches this one
+    with pytest.raises(ValueError, match="only grows"):
+        store.record(version(2, 50, 180), {"x": torch.zeros(1)})
+
+    store.record(version(2, 200, 400), {"x": torch.zeros(1)})   # larger: fine
+    assert store.largest == 400
+
+
+def test_lora_versions_are_not_required_to_grow(tmp_path):
+    """A low-rank patch deliberately keeps the model the same size."""
+    import time as _time
+
+    from motherbrain.patches import PatchStore, Version
+
+    store = PatchStore(tmp_path)
+    store.record(Version(version=1, patch_id="p1", parent=0,
+                         created_at=_time.time(), doc_start=0, doc_end=1,
+                         n_documents=1, n_chars=1, n_tokens=1, steps=1, rank=8,
+                         trainable_params=1, loss_before=2.0, loss_after=1.0,
+                         mode="lora"), {"x": torch.zeros(1)})
+    assert store.largest == 0
+
+
+@pytest.mark.parametrize("target", [1e8, 1e9, 1e10])
+def test_growth_target_is_reached(target):
+    """`mb patch --to 1B` has to actually pass 1B."""
+    from motherbrain.cli import experts_for_target, grown_config
+    from motherbrain.config import ModelConfig
+
+    cfg = ModelConfig(vocab_size=16384, max_seq_len=256, d_model=384,
+                      n_layers=8, n_heads=6, n_kv_heads=2, d_ff=1024)
+    n = experts_for_target(cfg, target)
+    assert grown_config(cfg, n).n_params >= target
+    # and not wastefully past it: one expert fewer should fall short
+    if n > 1:
+        assert grown_config(cfg, n - 1).n_params < target
+
+
+def test_record_separates_trained_from_configured(capsys):
+    """A parameter count in a config file is a claim about JSON, not weights."""
+    from motherbrain.cli import build_parser
+
+    args = build_parser().parse_args(["record", "--reference", "2T"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "trained" in out and "specified" in out
+    assert "nobody has trained it" in out
