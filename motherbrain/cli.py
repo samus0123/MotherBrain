@@ -530,7 +530,8 @@ def cmd_console(args) -> int:
     from motherbrain.patches import PatchConfig, PatchStore, create_patch
     from motherbrain.tokenizer import EOS_ID
 
-    from motherbrain.voice import Capability, choose_start, detect, speak
+    from motherbrain.voice import (Capability, choose_input, choose_start,
+                                   detect, speak)
 
     model = tok = device = None
     version = 0
@@ -554,10 +555,11 @@ def cmd_console(args) -> int:
 
     if args.mode == "ask":
         action, cap = choose_start()
-        mode = "voice" if action == "program-voice" else "text"
+        # Only the first option involves talking, so only it asks how.
+        mode = choose_input(cap) if action == "tell" else "text"
     else:
         action = "console"
-        action = "feed" if args.mode == "feed" else "console"
+        action = args.mode if args.mode in ("feed", "update") else "console"
         mode, cap = ("text" if args.mode == "feed" else args.mode), Capability()
         if mode == "voice":
             cap = detect()
@@ -690,6 +692,52 @@ def cmd_console(args) -> int:
         print(f"\nwriting ({args.max_tokens} tokens)...\n")
         do_make(want, None)
 
+    def update_motherbrain() -> None:
+        """Put fed information into effect: learn it, and ascend a version.
+
+        Feeding stores text; it changes nothing about the model until this
+        runs. Updating trains the pending documents into new experts, which
+        makes the model larger and mints the next version - the information is
+        in the weights afterwards, not merely on disk.
+        """
+        pending = corpus.n_documents - store.consumed_docs()
+        print(f"{pending} document(s) fed but not yet learned.")
+        if pending <= 0:
+            print("Nothing to put into effect. Feed it something first "
+                  "(option 2).\n")
+            return
+
+        current = model.n_params()
+        print(f"Learning them grows the model from {human(current)} and "
+              f"ascends to v{store.current + 1}.")
+        try:
+            answer = input("go ahead? [Y/n] ").strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return
+        if answer.startswith("n"):
+            print("left unlearned; run option 3 again whenever you want it.\n")
+            return
+
+        print("\nlearning ...")
+        v = create_patch(args.run, args.corpus,
+                         PatchConfig(mode="grow", grow_experts=args.grow,
+                                     steps=args.steps),
+                         note="update", device=args.device)
+        if v is None:
+            print("nothing to learn.\n")
+            return
+
+        print(f"\nv{v.parent} -> v{v.version}")
+        print(f"  learned    {v.n_documents} document(s), {v.n_tokens:,} tokens")
+        print(f"  grew       {human(v.params_before)} -> {human(v.params_after)} "
+              f"(+{v.params_after - v.params_before:,} parameters)")
+        print(f"  loss       {v.loss_before:.3f} -> {v.loss_after:.3f} "
+              f"on the new material")
+        print(f"  in effect  the model now serving is v{v.version}\n")
+        say(f"updated to version {v.version}, {human(v.params_after)} parameters")
+        load()
+
     def feed_at_startup() -> None:
         """Take information first, then offer to learn it before continuing.
 
@@ -765,8 +813,8 @@ def cmd_console(args) -> int:
                 return heard
         return input("> ")
 
-    if action in ("program", "program-voice"):
-        write_program()
+    if action == "update":
+        update_motherbrain()
     elif action == "feed" or mode == "feed":
         feed_at_startup()
         mode = "text"
@@ -1373,8 +1421,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--top-p", type=float, default=0.95)
     s.add_argument("--repetition-penalty", type=float, default=1.1)
     s.add_argument("--steps", type=int, default=100,
-                   help="training steps used by /grow")
-    s.add_argument("--mode", choices=["ask", "text", "voice", "feed"],
+                   help="training steps used by /grow and by updating")
+    s.add_argument("--grow", type=int, default=1,
+                   help="experts added per layer when updating")
+    s.add_argument("--mode",
+                   choices=["ask", "text", "voice", "feed", "update"],
                    default="ask",
                    help="ask at startup (default), or go straight to one")
     s.add_argument("--device", default="auto")

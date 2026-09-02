@@ -140,43 +140,45 @@ mb serve            # 127.0.0.1 by default
 
 ## The opening menu
 
-Starting MotherBrain shows a menu of things to do, rather than a question
-about how you want to type:
+Starting MotherBrain shows three things to do:
 
 ```
 What would you like to do?
 
-  1  Write a program — describe it and MotherBrain writes the code
-  2  Write a program — by voice
-  3  Teach it something new — add information it can learn
-  4  Open the console — prompts and commands, free-form
+  1  Tell MotherBrain what to do — by voice or by text
+  2  Feed MotherBrain new information
+  3  Update MotherBrain
 
-choose [1-4, default 4]
+choose [1-3, default 1]
 ```
 
-The browser console at `/` opens on the same four choices.
+The browser console at `/` opens on the same three.
 
-**Writing a program.** Describe it in a line and the description becomes a
-module docstring, with its own words forming the function name:
+**1 — Tell it what to do.** Asks voice or text, then drops you at the prompt
+where you can write prompts for it to continue, or run commands like `/make`,
+`/run`, `/versions`. Voice is only offered when the machine can provide it.
+
+**2 — Feed it new information.** Type, paste, or give a path. This *stores*
+the text; it changes nothing about the model yet.
+
+**3 — Update MotherBrain.** Puts what was fed into effect: trains it into new
+experts, grows the model, and ascends to the next version.
 
 ```
-> read a csv file and print column averages
+1 document(s) fed but not yet learned.
+Learning them grows the model from 18.88M and ascends to v1.
+go ahead? [Y/n] y
 
-def read_csv_file_print(
-    path: str,
-    *,
-    name: str | None = "str",
-    ...
+v0 -> v1
+  learned    1 document(s), 22 tokens
+  grew       18.88M -> 28.32M (+9,440,264 parameters)
+  loss       3.225 -> 0.083 on the new material
+  in effect  the model now serving is v1
 ```
 
-That naming is not decoration. A base model cannot be told what to write — it
-continues from context — so putting the description's words in the signature is
-what pulls the body towards the subject. It is also the ceiling: at 25M
-parameters this reproduces the *shape* of Python, and the console says so under
-every program it writes rather than letting the output imply more than it is.
-
-Option 2 is only offered when the machine can provide speech; otherwise it
-says why and writes by text instead.
+Feeding and updating are deliberately separate, because they are different
+things: text on disk, and text in the weights. Option 3 is what moves it from
+one to the other.
 
 ## Text, voice, or teach it something
 

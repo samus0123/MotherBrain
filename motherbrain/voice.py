@@ -117,58 +117,66 @@ def listen(cap: Capability | None = None, timeout: float = 10.0) -> str | None:
 
 MENU = """What would you like to do?
 
-  1  Write a program — describe it and MotherBrain writes the code
-  2  Write a program — by voice
-  3  Teach it something new — add information it can learn
-  4  Open the console — prompts and commands, free-form
+  1  Tell MotherBrain what to do — by voice or by text
+  2  Feed MotherBrain new information
+  3  Update MotherBrain
 """
 
 
-def choose_start(default: str = "console") -> tuple[str, Capability]:
+def choose_start(default: str = "tell") -> tuple[str, Capability]:
     """Show the opening menu and return the chosen action.
 
-    Returns one of "program", "program-voice", "feed" or "console", with the
-    detected speech capability. The voice entry is only offered when something
-    on this machine can actually provide it: presenting a choice that cannot be
-    honoured is worse than explaining why it is missing.
+    Returns "tell", "feed" or "update", with the detected speech capability.
+    Choosing to tell it something asks voice or text next, and only offers
+    voice when this machine can actually provide it - presenting a choice that
+    cannot be honoured is worse than explaining why it is missing.
     """
     cap = detect()
-
     print(MENU)
-    if cap.any:
-        parts = []
-        if cap.listen:
-            parts.append(f"speech in ({cap.listen})")
-        if cap.speak:
-            parts.append(f"speech out ({cap.speak})")
-        print(f"  voice available: {', '.join(parts)}")
-        if not cap.listen:
-            print("  (no dictation here, so option 2 reads replies aloud "
-                  "while you type)")
-    else:
-        print(f"  option 2 is unavailable here: {cap.reason}")
-    print()
 
     try:
-        answer = input(f"choose [1-4, default 4] ").strip().lower()
+        answer = input("choose [1-3, default 1] ").strip().lower()
     except (EOFError, KeyboardInterrupt, OSError):
         # Not interactive - piped input, a scheduled run, no terminal at all.
-        # Defaulting is right; crashing on a question nobody can answer is not.
         print()
         return default, cap
 
     choice = {
-        "1": "program", "2": "program-voice", "3": "feed", "4": "console",
-        "program": "program", "write": "program", "voice": "program-voice",
-        "teach": "feed", "feed": "feed", "learn": "feed",
-        "console": "console", "text": "console", "": default,
+        "1": "tell", "2": "feed", "3": "update",
+        "tell": "tell", "talk": "tell", "say": "tell",
+        "feed": "feed", "teach": "feed", "learn": "feed",
+        "update": "update", "upgrade": "update", "grow": "update",
+        "": default,
     }.get(answer, default)
-
-    if choice == "program-voice" and not cap.any:
-        print("voice is unavailable here; writing by text instead.")
-        choice = "program"
     print()
     return choice, cap
+
+
+def choose_input(cap: Capability, default: str = "text") -> str:
+    """Voice or text, asked only when voice is actually available."""
+    if not cap.any:
+        print(f"voice is unavailable here: {cap.reason}")
+        print("using text.\n")
+        return "text"
+
+    parts = []
+    if cap.listen:
+        parts.append(f"speech in ({cap.listen})")
+    if cap.speak:
+        parts.append(f"speech out ({cap.speak})")
+    print(f"voice available: {', '.join(parts)}")
+    if not cap.listen:
+        print("  (no dictation here, so voice reads replies aloud "
+              "while you type)")
+
+    try:
+        answer = input(f"voice or text? [{default}] ").strip().lower()
+    except (EOFError, KeyboardInterrupt, OSError):
+        print()
+        return default
+    mode = "voice" if answer.startswith("v") else "text"
+    print(f"using {mode}.\n")
+    return mode
 
 
 def choose_mode(default: str = "text") -> tuple[str, Capability]:

@@ -1108,7 +1108,7 @@ def test_console_offers_both_modes_in_the_browser():
 
     assert "What would you like to do?" in UI_HTML
     assert 'data-mode="text"' in UI_HTML
-    assert 'data-mode="program-voice"' in UI_HTML
+    assert 'data-mode="voice"' in UI_HTML
     # recognition and synthesis are detected apart: Firefox has one, not both
     assert "webkitSpeechRecognition" in UI_HTML
     assert "speechSynthesis" in UI_HTML
@@ -1121,6 +1121,7 @@ def test_console_mode_flag_skips_the_question():
     assert build_parser().parse_args(["console"]).mode == "ask"
     assert build_parser().parse_args(["console", "--mode", "text"]).mode == "text"
     assert build_parser().parse_args(["console", "--mode", "voice"]).mode == "voice"
+    assert build_parser().parse_args(["console", "--mode", "update"]).mode == "update"
 
 
 def test_startup_offers_feeding_as_a_third_choice(monkeypatch):
@@ -1170,21 +1171,27 @@ def test_opening_menu_lists_the_four_things_you_can_do(monkeypatch):
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(speak="espeak", listen="sr"))
-    for answer, expected in [("1", "program"), ("2", "program-voice"),
-                             ("3", "feed"), ("4", "console"),
-                             ("", "console"), ("write", "program"),
-                             ("teach", "feed"), ("9", "console")]:
+    for answer, expected in [("1", "tell"), ("2", "feed"), ("3", "update"),
+                             ("", "tell"), ("tell", "tell"), ("teach", "feed"),
+                             ("update", "update"), ("9", "tell")]:
         monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
         assert voice.choose_start()[0] == expected
 
 
-def test_menu_downgrades_voice_when_it_cannot_be_honoured(monkeypatch, capsys):
+def test_voice_is_only_offered_when_it_can_be_honoured(monkeypatch, capsys):
+    """Only option 1 involves talking, so only it asks how."""
     import motherbrain.voice as voice
 
-    monkeypatch.setattr(voice, "detect", lambda: voice.Capability(reason="none"))
-    monkeypatch.setattr("builtins.input", lambda _: "2")
-    assert voice.choose_start()[0] == "program"        # by text instead
+    cap = voice.Capability(reason="no engine")
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_input(cap) == "text"           # cannot be honoured
     assert "unavailable" in capsys.readouterr().out
+
+    able = voice.Capability(speak="espeak", listen="sr")
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_input(able) == "voice"
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert voice.choose_input(able) == "text"          # default
 
 
 def test_menu_survives_no_terminal(monkeypatch):
@@ -1196,24 +1203,25 @@ def test_menu_survives_no_terminal(monkeypatch):
         raise OSError("no stdin")
 
     monkeypatch.setattr("builtins.input", no_terminal)
-    assert voice.choose_start()[0] == "console"
+    assert voice.choose_start()[0] == "tell"
 
 
 def test_web_menu_matches_the_terminal_menu():
     from motherbrain.server import UI_HTML
 
     assert "What would you like to do?" in UI_HTML
-    for mode in ("program", "program-voice", "feed", "text"):
+    for mode in ("text", "voice", "feed", "update"):
         assert f'data-mode="{mode}"' in UI_HTML
-    # the page must not overstate what a model this size can do
-    assert "cannot be told what to write" in UI_HTML
+    for label in ("Tell MotherBrain what to do", "Feed it new information",
+                  "Update MotherBrain"):
+        assert label in UI_HTML
 
 
 def test_console_page_offers_feeding_first():
     from motherbrain.server import UI_HTML
 
     assert 'data-mode="feed"' in UI_HTML
-    assert "Teach it" in UI_HTML
+    assert "Feed it new information" in UI_HTML
     # the distinction people miss: storing text is not the same as learning it
     assert "learning is what puts it in the weights" in UI_HTML
     assert "learn it now (grows the model)" in UI_HTML

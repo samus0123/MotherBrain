@@ -708,14 +708,16 @@ UI_HTML = """<!doctype html>
 <div id="ask">
   <h2>What would you like to do?</h2>
   <div class="choices">
-    <button class="choice" data-mode="program">
-      <b>Write a program</b><span>describe it, by text</span></button>
-    <button class="choice" id="voice-choice" data-mode="program-voice">
-      <b>Write a program</b><span id="voice-note">describe it, by voice</span></button>
-    <button class="choice" data-mode="feed">
-      <b>Teach it</b><span>add information it can learn</span></button>
     <button class="choice" data-mode="text">
-      <b>Console</b><span>prompts and commands, free-form</span></button>
+      <b>1 · Tell MotherBrain what to do</b><span>by text</span></button>
+    <button class="choice" id="voice-choice" data-mode="voice">
+      <b>1 · Tell MotherBrain what to do</b>
+      <span id="voice-note">by voice</span></button>
+    <button class="choice" data-mode="feed">
+      <b>2 · Feed it new information</b><span>stored until you update</span></button>
+    <button class="choice" data-mode="update">
+      <b>3 · Update MotherBrain</b>
+      <span>learn what was fed, ascend a version, grow</span></button>
   </div>
   <div class="why" id="voice-why"></div>
 
@@ -1063,15 +1065,29 @@ $('progwrite').onclick = async () => {
   } catch (e) { add('error: ' + e, 'err'); }
 };
 
+// ---- update: put fed information into effect ------------------------------
+// Feeding stores text and changes nothing. Updating trains it into new
+// experts, which grows the model and mints the next version, so afterwards the
+// information is in the weights rather than only on disk.
+async function doUpdate() {
+  setMode('text');
+  add('Updating: learning what has been fed, and ascending a version.', 'muted');
+  try {
+    const r = await fetch('/command', {method:'POST', headers:H(),
+                                       body: JSON.stringify({text:'/grow'})});
+    const j = await r.json();
+    add(j.text || 'updating', j.kind === 'error' ? 'err' : 'ok');
+    window._wasBusy = true;      // so the result is reported when it lands
+    status();
+  } catch (e) { add('error: ' + e, 'err'); }
+}
+
 let pendingVoice = false;
 document.querySelectorAll('.choice[data-mode]').forEach(b => {
   b.onclick = () => {
     const m = b.dataset.mode;
     if (m === 'feed') return showPanel('feedpanel');
-    if (m === 'program' || m === 'program-voice') {
-      pendingVoice = (m === 'program-voice');
-      return showPanel('programpanel');
-    }
+    if (m === 'update') return doUpdate();
     setMode(m);
   };
 });
