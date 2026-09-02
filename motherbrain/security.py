@@ -20,8 +20,10 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse
+# fastapi is imported inside the functions that need it, not here. Only
+# serving needs a web framework, and importing one at module scope made
+# `mb console` fail on a machine that had torch but no fastapi - a chat
+# session dragging in an HTTP stack it never touches.
 
 # Anything under these names is refused outright, even inside an allowed root.
 SENSITIVE_NAMES = {
@@ -38,6 +40,12 @@ def constant_time_eq(a: str | None, b: str | None) -> bool:
     return secrets.compare_digest(a.encode(), b.encode())
 
 
+def _http_error(status: int, detail: str):
+    from fastapi import HTTPException
+
+    return HTTPException(status, detail)
+
+
 def safe_resolve(candidate: str, allowed_roots: list[Path]) -> Path:
     """Resolve `candidate` and prove it lives inside an allowed root.
 
@@ -46,13 +54,13 @@ def safe_resolve(candidate: str, allowed_roots: list[Path]) -> Path:
     than being string-matched beforehand.
     """
     if not allowed_roots:
-        raise HTTPException(
+        raise _http_error(
             403, "path ingestion is disabled; start the server with --allow-path")
 
     try:
         target = Path(candidate).expanduser().resolve(strict=True)
     except (OSError, RuntimeError):
-        raise HTTPException(404, "path not found")
+        raise _http_error(404, "path not found")
 
     for root in allowed_roots:
         try:
@@ -62,7 +70,7 @@ def safe_resolve(candidate: str, allowed_roots: list[Path]) -> Path:
         _reject_sensitive(target)
         return target
 
-    raise HTTPException(
+    raise _http_error(
         403, "path is outside every allowed root; pass --allow-path to widen it")
 
 
@@ -70,9 +78,9 @@ def _reject_sensitive(target: Path) -> None:
     """Refuse credential-shaped files even when they sit inside an allowed root."""
     for part in target.parts:
         if part in SENSITIVE_NAMES:
-            raise HTTPException(403, f"refusing to read {part!r}: looks like a secret")
+            raise _http_error(403, f"refusing to read {part!r}: looks like a secret")
     if target.suffix.lower() in SENSITIVE_SUFFIXES:
-        raise HTTPException(
+        raise _http_error(
             403, f"refusing to read {target.suffix} files: they hold private keys")
 
 
@@ -104,16 +112,17 @@ class RateLimiter:
             return True
 
 
-def client_key(request: Request) -> str:
+def client_key(request) -> str:
     return request.client.host if request.client else "unknown"
 
 
 def install_middleware(app, rate_limiter: RateLimiter | None,
                        max_body_bytes: int = 8 * 1024 * 1024) -> None:
     """Body-size caps, rate limiting, and conservative response headers."""
+    from fastapi.responses import JSONResponse
 
     @app.middleware("http")
-    async def _guard(request: Request, call_next):
+    async def _guard(request, call_next):
         declared = request.headers.get("content-length")
         if declared and declared.isdigit() and int(declared) > max_body_bytes:
             return JSONResponse(

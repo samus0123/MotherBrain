@@ -1,72 +1,7 @@
 {
-  "current": 3,
-  "head": 3,
-  "base_docs": 170,
-  "versions": [
-    {
-      "version": 1,
-      "patch_id": "500af452",
-      "parent": 0,
-      "created_at": 1787861078.7143211,
-      "doc_start": 170,
-      "doc_end": 172,
-      "n_documents": 2,
-      "n_chars": 769,
-      "n_tokens": 252,
-      "steps": 150,
-      "rank": 8,
-      "trainable_params": 224256,
-      "loss_before": 6.2549,
-      "loss_after": 1.2647,
-      "sources": [
-        "corpus/inbox/README.md",
-        "corpus/inbox/motherbrain-facts.md"
-      ],
-      "note": "operating notes",
-      "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
-    },
-    {
-      "version": 2,
-      "patch_id": "859de298",
-      "parent": 1,
-      "created_at": 1787861657.7931848,
-      "doc_start": 172,
-      "doc_end": 173,
-      "n_documents": 1,
-      "n_chars": 176,
-      "n_tokens": 66,
-      "steps": 100,
-      "rank": 8,
-      "trainable_params": 224256,
-      "loss_before": 6.2841,
-      "loss_after": 1.0311,
-      "sources": [
-        "demo"
-      ],
-      "note": "auto",
-      "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
-    },
-    {
-      "version": 3,
-      "patch_id": "989d8cdc",
-      "parent": 2,
-      "created_at": 1787861844.6657834,
-      "doc_start": 173,
-      "doc_end": 174,
-      "n_documents": 1,
-      "n_chars": 89,
-      "n_tokens": 34,
-      "steps": 100,
-      "rank": 8,
-      "trainable_params": 224256,
-      "loss_before": 5.3504,
-      "loss_after": 0.7473,
-      "sources": [
-        "tls-demo"
-      ],
-      "note": "auto",
-      "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
-    }
-  ],
-  "base_fingerprint": "353043ceb0b7071f64beb599679c5e48"
+  "current": 0,
+  "head": 0,
+  "base_docs": 23904,
+  "versions": [],
+  "base_fingerprint": "8253f1509f7ddc11c8f01361cb05bf6a"
 }

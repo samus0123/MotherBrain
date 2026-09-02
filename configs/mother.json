@@ -1,0 +1,22 @@
+{
+  "vocab_size": 262144,
+  "max_seq_len": 32768,
+  "d_model": 20480,
+  "n_layers": 160,
+  "n_heads": 160,
+  "n_kv_heads": 16,
+  "head_dim": 128,
+  "d_ff": 57344,
+  "n_experts": 2048,
+  "n_experts_per_token": 8,
+  "n_shared_experts": 4,
+  "moe_every": 1,
+  "router_aux_loss_coef": 0.01,
+  "router_z_loss_coef": 0.001,
+  "dropout": 0.0,
+  "norm_eps": 1e-05,
+  "rope_theta": 10000.0,
+  "tie_embeddings": false,
+  "init_std": 0.02,
+  "name": "mother"
+}

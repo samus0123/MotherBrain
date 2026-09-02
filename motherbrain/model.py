@@ -137,13 +137,18 @@ class MoE(nn.Module):
         self.shared = nn.ModuleList(
             [SwiGLU(cfg.d_model, cfg.d_ff) for _ in range(cfg.n_shared_experts)]
         )
+        # Added to the router logits. Zero for a model trained from scratch; an
+        # expert appended later starts strongly negative here so it cannot be
+        # selected, which is what lets the model grow without its output
+        # changing. The patch trainer releases the new experts when it starts.
+        self.expert_bias = nn.Parameter(torch.zeros(cfg.n_experts))
         self.aux_loss = torch.tensor(0.0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         b, t, d = x.shape
         flat = x.view(-1, d)
 
-        logits = self.router(flat).float()
+        logits = self.router(flat).float() + self.expert_bias.float()
         probs = F.softmax(logits, dim=-1)
         weights, idx = torch.topk(probs, self.top_k, dim=-1)
         weights = weights / weights.sum(dim=-1, keepdim=True)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import re
+import heapq
 from collections import Counter
 from typing import Iterable
 
@@ -84,27 +85,42 @@ class Tokenizer:
         # pair -> total frequency, and pair -> which words currently contain it.
         pair_counts: Counter[tuple[int, int]] = Counter()
         pair_words: dict[tuple[int, int], set[int]] = {}
+        touched: set[tuple[int, int]] = set()
 
         def add_word_pairs(i: int, sign: int) -> None:
             seq, freq = words[i], freqs[i]
             for pair in zip(seq, seq[1:]):
                 pair_counts[pair] += sign * freq
+                touched.add(pair)
                 if sign > 0:
                     pair_words.setdefault(pair, set()).add(i)
 
         for i in range(len(words)):
             add_word_pairs(i, 1)
 
+        # A heap over (-count, pair), so choosing each merge costs a pop rather
+        # than a scan of every pair in the corpus. Scanning was fine on a few
+        # megabytes and quadratic on a few hundred: entries are pushed when a
+        # count changes and validated against pair_counts on the way out, which
+        # is cheaper than keeping the heap exact.
+        heap = [(-c, p) for p, c in pair_counts.items()]
+        heapq.heapify(heap)
+        touched.clear()
+
         merges: list[tuple[int, int]] = []
         next_id = n_special + 256
 
         for step in range(n_merges):
-            # Highest count wins; ties break on the pair itself so that training
-            # the same corpus twice always yields the same merge table.
-            best, count = None, 1
-            for pair, c in pair_counts.items():
-                if c > count or (c == count and best is not None and pair < best):
-                    best, count = pair, c
+            # Highest count wins; ties break on the pair itself, so training the
+            # same corpus twice always yields the same merge table.
+            best, count = None, 0
+            while heap:
+                neg, pair = heapq.heappop(heap)
+                current = pair_counts.get(pair, 0)
+                if current != -neg or current < 2:
+                    continue  # a stale entry, superseded by a later push
+                best, count = pair, current
+                break
             if best is None:
                 break  # nothing left worth merging
 
@@ -130,6 +146,12 @@ class Tokenizer:
 
             pair_counts.pop(best, None)
             pair_words.pop(best, None)
+            touched.discard(best)
+            for pair in touched:  # re-publish only the counts that moved
+                c = pair_counts.get(pair, 0)
+                if c >= 2:
+                    heapq.heappush(heap, (-c, pair))
+            touched.clear()
             next_id += 1
             if verbose and (step + 1) % 500 == 0:
                 print(f"  merge {step + 1}/{n_merges}  (pair seen {count:,}x)", flush=True)

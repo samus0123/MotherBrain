@@ -39,10 +39,14 @@ class Corpus:
     """
 
     root: Path
+    create: bool = True
 
     def __post_init__(self) -> None:
         self.root = Path(self.root)
-        self.root.mkdir(parents=True, exist_ok=True)
+        # Read-only callers (`mb status`) must not bring a workspace into
+        # existence just by looking at one.
+        if self.create:
+            self.root.mkdir(parents=True, exist_ok=True)
 
     # ---- paths -------------------------------------------------------------
 
@@ -69,6 +73,7 @@ class Corpus:
         text = text.strip()
         if not text:
             return 0
+        self.root.mkdir(parents=True, exist_ok=True)
         with open(self.docs_path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps({
                 "source": source,
@@ -173,6 +178,7 @@ class Corpus:
     # ---- metadata ----------------------------------------------------------
 
     def write_meta(self, **kw) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
         meta = self.meta()
         meta.update(kw)
         meta["documents"] = self.n_documents

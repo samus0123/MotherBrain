@@ -6,6 +6,9 @@ patching system that versions every new thing it learns, and an HTTP server
 that any IDE can talk to.
 
 ```
+mb console    tell it what to do, interactively
+mb status     what is on disk, and what to run next
+mb bootstrap  fresh clone -> a loaded model, in one command
 mb scale      what a configuration costs, before you build it
 mb feed       put information in
 mb prepare    learn a vocabulary from it
@@ -14,6 +17,7 @@ mb patch      learn new information           -> v1, v2, v3 ...
 mb versions   the lineage
 mb checkout   go back to any earlier version
 mb chat       talk to it locally
+mb export     write a shareable model file
 mb cert       make a TLS certificate
 mb serve      expose it to every IDE you own
 ```
@@ -21,18 +25,370 @@ mb serve      expose it to every IDE you own
 ## Install
 
 ```bash
-pip install -r requirements.txt
+scripts/install.sh          # handles the usual install failures
 ```
+
+or, if your Python is not externally managed:
+
+```bash
+pip install -e .
+```
+
+Either installs the dependencies **and** the `mb` command, so every example below
+works from any directory. Without it you would get `No module named
+motherbrain` outside the repository root.
+
+```bash
+pip install -e ".[dev]"      # plus pytest and httpx, to run the tests
+```
+
+`mb` finds your corpus and checkpoints by walking up from the current directory
+for a workspace, the way git finds `.git`, so it works from a subdirectory too.
+Override with `--corpus`/`--run`, or the `MB_CORPUS`/`MB_RUN` environment
+variables.
+
+### If it will not start
+
+Run the diagnostic and read the first two sections:
+
+```bash
+sh scripts/doctor.sh
+```
+
+It reports the branch, whether the files exist, the Python version, the
+virtual environment, the dependencies, and then tries to start.
+
+**The most common cause is the branch.** `main` holds only a LICENSE and a
+README, so a plain `git clone` produces a directory with nothing to run in it:
+
+```bash
+git fetch origin
+git checkout claude/massive-parameter-llm-mcs613
+```
+
+### If `pip install -e .` fails
+
+Three causes account for almost all of it, and none are about this project.
+
+**`error: externally-managed-environment`** — Debian 12+, Ubuntu 23.04+ and
+Termux's proot images mark the system Python as managed by the OS (PEP 668), so
+pip refuses to install into it. Use a virtual environment:
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -e .
+```
+
+`scripts/install.sh` does exactly that, and checks the other two causes before
+downloading several hundred megabytes to discover them.
+
+**`No matching distribution found for torch`** — PyTorch publishes wheels only
+for certain Python versions and platforms. A very new Python (3.14+) usually
+has no wheel yet, and neither does Termux's own Python, which is why the
+Android instructions install into a proot distro rather than Termux directly.
+Check with `python3 -VV`, and install an older Python if needed:
+
+```bash
+apt install python3.12 python3.12-venv
+PYTHON=python3.12 scripts/install.sh
+```
+
+**`No module named venv`** — `apt install python3-venv`.
+
+**It downloads gigabytes, or runs out of disk.** On Linux x86_64, `pip install
+torch` pulls the CUDA runtime — around 2.5GB — even with no GPU present. For a
+CPU-only machine, ask for the CPU build instead:
+
+```bash
+pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install -e .
+```
+
+That is about a tenth of the size. ARM64 machines, phones included, get a
+CPU-only wheel from PyPI anyway and need no flag.
+
+**Running it needs only torch and numpy.** fastapi, uvicorn and pydantic are
+imported only by `mb serve`, so a machine that cannot install a web stack can
+still run the console:
+
+```bash
+pip install torch numpy
+python3 -m motherbrain.cli console
+```
+
+You do not have to install the package at all. From the repository root,
+everything works as a module once the dependencies are present:
+
+```bash
+pip install -r requirements.txt      # or: apt install python3-torch python3-numpy
+python3 -m motherbrain.cli console
+```
+
+That is the same program; `mb` is only a shortcut that works from any
+directory.
 
 ## Quick start
 
 ```bash
-python -m motherbrain.cli feed ./my-notes ./src        # anything textual
-python -m motherbrain.cli prepare --vocab-size 4096
-python -m motherbrain.cli train --preset micro --steps 400 --batch-size 16 --seq-len 256
-python -m motherbrain.cli chat --prompt "hello"
-python -m motherbrain.cli serve            # 127.0.0.1 by default
+mb feed ./my-notes ./src        # anything textual
+mb prepare --vocab-size 4096
+mb train --preset micro --steps 400 --batch-size 16 --seq-len 256
+mb chat --prompt "hello"
+mb serve            # 127.0.0.1 by default
 ```
+
+## The opening menu
+
+Starting MotherBrain shows a menu of things to do, rather than a question
+about how you want to type:
+
+```
+What would you like to do?
+
+  1  Write a program — describe it and MotherBrain writes the code
+  2  Write a program — by voice
+  3  Teach it something new — add information it can learn
+  4  Open the console — prompts and commands, free-form
+
+choose [1-4, default 4]
+```
+
+The browser console at `/` opens on the same four choices.
+
+**Writing a program.** Describe it in a line and the description becomes a
+module docstring, with its own words forming the function name:
+
+```
+> read a csv file and print column averages
+
+def read_csv_file_print(
+    path: str,
+    *,
+    name: str | None = "str",
+    ...
+```
+
+That naming is not decoration. A base model cannot be told what to write — it
+continues from context — so putting the description's words in the signature is
+what pulls the body towards the subject. It is also the ceiling: at 25M
+parameters this reproduces the *shape* of Python, and the console says so under
+every program it writes rather than letting the output imply more than it is.
+
+Option 2 is only offered when the machine can provide speech; otherwise it
+says why and writes by text instead.
+
+## Text, voice, or teach it something
+
+Both consoles ask how you want to start: **text**, **voice**, or **teach it**
+— feed it something before you begin.
+
+Choosing to teach it takes the information first, then offers to learn it
+immediately, because the gap between those two is the thing people most often
+miss: feeding stores text in the corpus, and a patch is what puts it into the
+weights.
+
+```
+text, voice, or feed it something? [text] feed
+Paste or type what MotherBrain should learn.
+A file or directory path works too. Blank line to finish.
+
+  the deploy key rotates on Fridays
+
+added 1 document(s), 33 characters. 1 waiting to be learned.
+learn it now? this grows the model [Y/n]
+```
+
+Say yes and it grows a version before dropping you at the prompt; say no and it
+stays in the corpus until you run `/grow`.
+
+In the browser, voice is real: recognition and synthesis come from the
+browser's own Web Speech API, so there is no dependency and no service of ours
+in the loop — audio stays between you and the browser, which asks for
+microphone permission itself. Press **speak** (or hold ctrl), say a prompt or
+an instruction, and replies are read back. Typing keeps working throughout.
+
+The two halves are detected separately, because they are separate: Firefox can
+speak but not listen, so it is offered voice-out with dictation disabled rather
+than a promise it cannot keep. A browser with neither gets the option greyed
+out and told why.
+
+```bash
+mb console                 # asks
+mb console --mode feed     # straight to feeding
+mb console --mode text     # skips the question
+mb console --mode voice
+```
+
+In the terminal there is no equivalent guarantee — voice needs a microphone, an
+audio stack, and software to drive them — so `mb console` detects what is
+actually installed (`say`, `espeak-ng`, `pyttsx3`, `SpeechRecognition`) and
+falls back to typing with the reason printed:
+
+```
+voice is unavailable here: no speech synthesis (install espeak-ng, or
+pyttsx3); no speech recognition (pip install SpeechRecognition PyAudio)
+using text.
+```
+
+None of that is installed as a dependency. Speech is optional, and a model you
+can only talk to would be worse than one you can also type at.
+
+## Making it do things
+
+The console does more than print. In the terminal:
+
+```
+> /make a script that renames files -> tools/rename.py
+────────────────────────────────────────────────────────────
+def make_script_renames(
+    path: str,
+    ...
+────────────────────────────────────────────────────────────
+written to tools/rename.py
+run it? it was written by a 25M model [y/N] y
+running tools/rename.py ...
+────────────────────────────────────────────────────────────
+SyntaxError: unterminated triple-quoted string literal
+────────────────────────────────────────────────────────────
+exit code 1  (it failed, which is usual for code this model writes)
+```
+
+| command | what it does |
+|---|---|
+| `/make <what> [-> file]` | writes a program, saves it, offers to run it |
+| `/run <file>` | runs a python file and shows its output |
+| `/ls [dir]` | lists files |
+| `/cat <file>` | shows a file |
+
+**Two things are worth being exact about.**
+
+*The model does not choose the action.* Your command does. MotherBrain is a
+base model over source code: it cannot follow an instruction, so `/make` uses
+it for the one thing it can do — continue text — and everything else is
+ordinary Python doing what you asked. A console that claimed the model decided
+would be theatre.
+
+*These never work over the network.* `/make`, `/run`, `/ls` and `/cat` write
+files and execute code. In your own terminal that is no more than your shell
+already allows. Reached over HTTP it would be remote code execution against
+whoever is serving the model, so the server refuses them outright rather than
+guarding them — there is no configuration of that which is safe to expose.
+
+## Telling it what to do
+
+`mb console`, or the page `mb serve` puts at `/`, is one place to type both
+prompts and instructions:
+
+```
+> how big are you
+  version      v1
+  parameters   25.18M total · 15.75M active/token
+  shape        8 layers · d_model 384 · 1 experts/layer
+  pending      1 document(s) not yet learned
+
+> learn that the deploy key rotates on Fridays
+added 44 characters; 1 document(s) waiting. run /grow to learn them.
+
+> grow
+v1 -> v2: 25.18M -> 34.62M params, loss 3.402 -> 0.094
+
+> def softmax(x, axis=-1):
+    if not isinstance(x, np.ndarray):
+        return x.shape[0]
+    return x
+```
+
+Commands are `/learn`, `/grow`, `/train`, `/versions`, `/version`, `/checkout`,
+`/status`, `/scale`, `/export`, `/help`; a fixed set of plain phrasings mean
+the same things ("learn that …", "grow yourself", "how big are you", "list
+versions", "roll back to 1"). Anything unrecognised is treated as a prompt and
+completed by the model.
+
+**The parsing is a lookup table, not the model.** MotherBrain is a base
+language model trained on source code: it completes text and cannot follow
+instructions. A console that claimed to understand them would be theatre. So
+the table is small, literal, and refuses rather than guesses - `/checkout`
+without a version is an error, and "learning rates matter" is a prompt, not an
+instruction to learn something.
+
+## How do I run it?
+
+Three commands, from a clean clone:
+
+```bash
+pip install -e .        # installs deps and the `mb` command
+mb bootstrap            # trains a base model if there is not one yet
+mb chat                 # talk to it
+```
+
+`mb serve` instead of `mb chat` exposes it over HTTP for your IDEs. `mb status`
+at any point tells you what state you are in.
+
+A freshly bootstrapped model is barely trained and will emit mostly whitespace
+and fragments — `mb chat` frames its output and reports a token count so you
+can tell it ran rather than failed, and warns when the step count is too low
+to expect anything coherent. `mb train --steps 2000 --resume` is what fixes
+that.
+
+## How do I load it?
+
+Run `mb status` — it inspects what is on disk and tells you which situation
+you are in and what to run next.
+
+**On a machine that has already trained:**
+
+```bash
+mb chat      # loads the current version, interactively
+mb serve     # loads it and serves it to your IDEs
+```
+
+Both load the *current version*: the base checkpoint with patches 1..N applied.
+`mb checkout v1` changes which version that is.
+
+**On a fresh clone, `mb console` and `mb chat` just work.** The clone carries
+`models/motherbrain.pt`, and both fall back to it when there is no training
+checkpoint — so a clone runs the trained model without training anything.
+
+`mb train`, `mb patch` and `mb grow` do need a checkpoint, because they
+continue training rather than only running the model.
+
+**If you want to train your own base,** `checkpoint.pt` holds the
+weights and is far too large to commit, so a clone carries the code, the
+tokenizer, the manifest and the patches — but no base model. One command fixes
+that:
+
+```bash
+mb bootstrap        # feed -> prepare -> train -> ready
+```
+
+Or download the `motherbrain-base-checkpoint` artifact from a CI run into
+`runs/default/`, which gives you the exact base the committed patches belong to.
+
+Loading a lineage against the wrong base is refused rather than silently
+applied, and training a new base drops the patches that no longer apply:
+
+```
+note: dropped 3 patch(es) trained against the previous base checkpoint:
+      v1 (500af452), v2 (859de298), v3 (989d8cdc)
+```
+
+## Sharing a trained model
+
+A training checkpoint carries optimizer state, weighs several times what the
+weights alone do, and loads through pickle. `mb export` writes the model
+instead: fp16 weights with the config and tokenizer embedded as JSON.
+
+```bash
+mb export --out models/motherbrain-15m.pt
+mb chat --model models/motherbrain-15m.pt      # runs it directly
+```
+
+The result is roughly a sixth the size of the checkpoint, self-contained, and
+loads under `torch.load(weights_only=True)` — no code executes when you open
+one, which is what makes it safe to hand to someone else. This is also how a
+trained model survives a machine: checkpoints are gitignored, exports are
+small enough to keep.
 
 ## How do I feed it new information?
 
@@ -41,8 +397,8 @@ Four ways, all landing in the same corpus and all producing a new version.
 **1. The command line.** Files, whole directories, or literal text:
 
 ```bash
-python -m motherbrain.cli feed ./docs ./notes.md "The deploy key rotates on Fridays."
-python -m motherbrain.cli patch --steps 150      # -> v1
+mb feed ./docs ./notes.md "The deploy key rotates on Fridays."
+mb patch --steps 150      # -> v1
 ```
 
 **2. Over HTTP, from anywhere:**
@@ -65,6 +421,46 @@ see below.
 Feeding stores text. *Training* is what absorbs it; with auto-patch on, the
 second follows the first by itself.
 
+## Growing as it learns
+
+By default every patch makes the model **larger**. New experts are appended to
+every feed-forward layer, only those are trained, and the parameter count rises
+with each version and never falls:
+
+```bash
+mb feed "the deploy key rotates on Fridays"
+mb patch                       # -> v1, and the model is bigger than it was
+```
+
+```
+v0 -> v1   patch 4f2a91c0
+  learned      1 docs, 48 tokens
+  grew         +1 expert(s) per layer, +9,437,184 parameters
+  size         15.74M -> 25.17M
+```
+
+Two properties make that safe rather than merely impressive:
+
+* **Growth is a no-op at birth.** A new expert's output projection starts at
+  zero and its router bias at -1e9, so it cannot be selected and contributes
+  nothing. The grown model computes exactly what it did before, bit for bit -
+  learning a new fact cannot silently damage what was already known. Training
+  is the only thing that makes it diverge.
+* **Compute does not grow with it.** Only `n_experts_per_token` experts run for
+  any token, so a model that has grown through fifty versions costs the same
+  per token as it did at version one. That is precisely why the parameter count
+  can be allowed to run away, and it is the same mechanism behind the `mother`
+  preset's quadrillion parameters.
+
+A dense model has no experts to append to, so the first patch converts its
+feed-forward layers into MoE layers: the existing dense FFN becomes an
+always-on shared expert, which preserves its behaviour exactly, and the new
+routed experts are added alongside.
+
+`mb patch --mode lora` keeps the old behaviour - a low-rank delta that teaches
+the model something new without changing its size - when growth is not wanted.
+`--grow N` adds N experts per layer instead of one.
+
 ## Versions
 
 New information never retrains the model from scratch. It trains a **patch**: a
@@ -78,12 +474,16 @@ v2  = v1 + patch-0002        the API docs you fed it next
 ```
 
 ```bash
-python -m motherbrain.cli versions
-python -m motherbrain.cli checkout v1     # any earlier version, exactly
+mb versions
+mb checkout v1     # any earlier version, exactly
 ```
 
-Patches are kilobytes to megabytes, so the lineage is cheap to keep forever and
-small enough to live in git.
+A LoRA patch is under a megabyte. A growth patch is not: it carries whole new
+experts, so against the 15.7M model it is 19MB at half precision and gets
+larger as the model does. Patch binaries are therefore kept out of git -
+committing one per version is unbounded - while `versions.json`, the record of
+what was learned and how much the model grew, is small and does live there.
+The distributable artifact is the exported current model in `models/`.
 
 A patch is a delta against *particular* weights, so the manifest records a
 fingerprint of the base checkpoint it was built on. Loading a lineage whose
@@ -121,7 +521,7 @@ MotherBrain speaks the two protocols editors already support, so no editor
 needs a MotherBrain-specific plugin — you point it at a base URL.
 
 ```bash
-python -m motherbrain.cli serve --host 0.0.0.0 --port 8000
+mb serve --host 0.0.0.0 --port 8000
 ```
 
 | Protocol | Base URL | Endpoints |
@@ -187,8 +587,8 @@ crosses the network in the clear — including the API key — so use HTTPS for
 anything that leaves the machine.
 
 ```bash
-python -m motherbrain.cli cert --host your-hostname-or-ip
-python -m motherbrain.cli serve --host 0.0.0.0 \
+mb cert --host your-hostname-or-ip
+mb serve --host 0.0.0.0 \
   --tls-cert certs/server.crt --tls-key certs/server.key \
   --api-key "$(python -c 'import secrets;print(secrets.token_urlsafe(32))')" \
   --allow-path ./corpus
@@ -231,10 +631,11 @@ ingestion is disabled by default and confined to an allowlist when enabled.
 
 What is still on you:
 
-* **Trust the weights you load.** `torch.load` on a base checkpoint uses
-  Python pickle and can execute code. Patches load with `weights_only=True`;
-  checkpoints do not, because they carry config objects. Only load checkpoints
-  you produced or trust.
+* **Trust the weights you load.** `torch.load` on a base *checkpoint* uses
+  Python pickle and can execute code, because checkpoints carry config
+  objects. Patches and `mb export` files both load with `weights_only=True`
+  and are safe to accept from elsewhere; raw checkpoints are not, so only
+  load ones you produced or trust.
 * **Anything you feed can come back out.** Do not feed secrets to a model that
   other people may prompt.
 * **A self-signed certificate is not identity.** Pin the fingerprint, or use a
@@ -244,6 +645,35 @@ What is still on you:
   secret, or run with `--no-auto-patch` and patch deliberately.
 * Rate limiting is per process and in memory; it is not a substitute for a
   real gateway if you are genuinely exposed to the internet.
+
+## Running it on Windows 11
+
+Install Python from python.org (tick **Add python.exe to PATH**), then in
+PowerShell:
+
+```powershell
+git clone -b claude/massive-parameter-llm-mcs613 https://github.com/samus0123/MotherBrain
+cd MotherBrain
+powershell -ExecutionPolicy Bypass -File scripts\start.ps1
+```
+
+`start.ps1` is the Windows twin of `start.sh`: it checks out the branch if the
+code is missing, creates `.venv`, installs, and launches — stopping at whichever
+step fails and naming it.
+
+By hand, if you prefer:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\pip install -e .
+.venv\Scripts\mb console
+```
+
+Note `\Scripts\` rather than `/bin/` — that is the only path difference from
+Linux. PyTorch's default Windows wheel is CPU-only, so there is no 2.5GB CUDA
+download to avoid here.
+
+WSL works too, and there the Linux instructions apply unchanged.
 
 ## Running it on Termux (Android)
 
@@ -255,10 +685,28 @@ pkg install proot-distro
 proot-distro install debian
 proot-distro login debian
 
-apt update && apt install -y python3 python3-pip git
+apt update && apt install -y python3 python3-pip python3-venv git
 git clone <this-repo> && cd MotherBrain
-pip install -r requirements.txt
-python -m motherbrain.cli serve --host 0.0.0.0 --port 8000
+scripts/install.sh
+.venv/bin/mb console
+```
+
+`python3-venv` matters: Debian's proot image marks its Python as externally
+managed, so installing without a virtual environment fails with
+`externally-managed-environment`. The script creates one.
+
+The clone already contains a trained model, so there is nothing to train
+before it will answer:
+
+```bash
+.venv/bin/mb chat --model models/motherbrain.pt --prompt "def softmax(x):"
+```
+
+For voice, serve it and open the page in Chrome on the phone — Android Chrome
+supports the Web Speech API, while the Termux terminal has no speech backends:
+
+```bash
+.venv/bin/mb serve --host 0.0.0.0
 ```
 
 Then reach it at `http://localhost:8000` from the phone's browser, or from
@@ -290,7 +738,7 @@ count grow without per-token compute growing with it. Total parameters scale
 with the expert count; only `n_experts_per_token` of them run for any token.
 
 ```
-$ python -m motherbrain.cli scale --preset mother
+$ mb scale --preset mother
   total parameters     1157T  (1,156,907,161,374,720)
   active per token     6.93T  (0.599% of total)
 ```
@@ -306,6 +754,12 @@ $ python -m motherbrain.cli scale --preset mother
 | `leviathan` | 137T | 2.7T | |
 | `mother` | 1157T | 6.9T | larger than any model ever trained |
 
+`configs/mother.json` is the committed definition of that model. The shape is
+not just arithmetic: one attention block at mother's true width instantiates
+here as 922,746,880 real parameters and runs a real forward pass, matching the
+analytic prediction exactly (`tests/` asserts both). What needs a datacenter is
+assembling 160 layers of them alongside 2048 experts apiece.
+
 `mb scale` prints the arithmetic honestly, including what it would actually
 take:
 
@@ -319,6 +773,25 @@ So: the architecture and the accounting are real and the counts are exact —
 `tests/` verifies the analytic formula against actually-instantiated models.
 Training the largest presets is a datacenter procurement problem, not a
 software one. Everything up to `medium` trains on hardware you have.
+
+For the practical inverse — the largest model your actual hardware can hold —
+ask it directly:
+
+```bash
+mb scale --fit-gpus 8              # largest config that fits on 8 x 80GB
+mb scale --fit-gpus 1 --gpu-gb 24  # ...or on one 24GB card
+```
+
+It grows the expert count until the weights plus optimizer state stop fitting,
+steps down to a smaller shape when the requested one cannot fit at all, and
+says plainly when nothing fits rather than returning a configuration that does
+not.
+
+```
+              1 x 24GB   medium-fit-1x24gb        1.321B
+              8 x 80GB   large-fit-8x80gb         42.73B
+           1024 x 80GB   titan-fit-1024x80gb       5.62T
+```
 
 ## Architecture
 
@@ -342,22 +815,66 @@ motherbrain/
   model.py       the transformer
   data.py        ingestion, corpus on disk, memory-mapped token streams
   train.py       training loop, checkpoints, resume
-  patches.py     LoRA patches, replay, sequential versions
+  patches.py     patches, replay, sequential versions
+  growth.py      adding experts so each version is larger than the last
   server.py      HTTP API, auto-patcher, web UI
   api_compat.py  OpenAI and Ollama protocol surfaces
   security.py    path confinement, auth, rate limiting, exposure checks
+  commands.py    parsing what you tell it to do
+  voice.py       speech backends for the terminal, and what to say without one
   cli.py         the mb command line
+configs/         mother.json, and the model actually being trained
 tests/           49 tests
 .github/workflows/apply-information.yml   the automatic learning pipeline
 ```
 
+## The trained model
+
+`models/motherbrain.pt` is a real trained model, committed to this repository.
+A clone can run it immediately:
+
+```bash
+mb chat --model models/motherbrain.pt --prompt "def softmax(x, axis=-1):"
+```
+
+It is v1: a 15.7M-parameter base trained for 4,000 steps (24.6M tokens) on a
+53.2M-token corpus of Python source, grown to 25.18M parameters by one growth
+patch. 56.8MB of fp16 weights against a 181MB training checkpoint, loaded with
+`weights_only=True` so opening it executes no code.
+
+```
+step   200   val loss 5.94   perplexity 381
+step  1000   val loss 4.48   perplexity  89
+step  2000   val loss 3.29   perplexity  27
+step  3600   val loss 2.80   perplexity  16.4   <- best
+step  4000   val loss 2.82   perplexity  16.7
+```
+
+A 23x improvement in validation perplexity, on a held-out split. What it
+writes:
+
+```python
+    if not isinstance(x, np.ndarray):
+        return x.shape[0]
+    return x
+
+
+def _to_int(
+```
+
+Syntactically valid, idiomatic Python: a type guard, correct returns, correct
+spacing before a new definition. What it does not write is *correct* code, and
+at this size it will not. It is a real language model that has learned the
+shape of Python from 53M tokens; it is not a coding assistant. Scale and
+corpus are the only cure, and `mb train` is how you apply them.
+
 ## Honest limits
 
-* The checkpoint in this repository is a `micro` model: 5.5M parameters, 400
-  steps, 4.8MB of Python source. It has learned the shape of the language and
-  the facts it was patched with; it is not a chatbot and will not answer
-  general questions well. Scale and corpus are the only cure, and both are
-  yours to choose.
+* The committed model is 25.18M parameters (a 15.7M base plus one growth
+  patch), trained on CPU for under one epoch.
+  It writes plausible Python structure, not working programs, and it is not a
+  chatbot - it will not answer general questions. Scale and corpus are the only
+  cure, and both are yours to choose.
 * Chat formatting uses `<user>`/`<assistant>` markers. A base model trained on
   raw text follows them loosely; feed it transcripts in that shape and it
   learns to.

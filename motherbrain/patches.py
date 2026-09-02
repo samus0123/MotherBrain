@@ -47,6 +47,10 @@ FFN_TARGETS = ("gate", "up", "down")
 
 @dataclass
 class PatchConfig:
+    # "grow" appends experts, so the model gains parameters with every version.
+    # "lora" learns a low-rank delta and leaves the size unchanged.
+    mode: str = "grow"
+    grow_experts: int = 1
     rank: int = 8
     alpha: float = 16.0
     steps: int = 100
@@ -104,6 +108,10 @@ class Version:
     sources: list[str] = field(default_factory=list)
     note: str = ""
     base_fingerprint: str = ""
+    mode: str = "lora"
+    grow_experts: int = 0
+    params_before: int = 0
+    params_after: int = 0
 
     @property
     def filename(self) -> str:
@@ -193,22 +201,32 @@ def merge_all(model: nn.Module) -> int:
 
 
 def apply_patch(model: nn.Module, payload: dict, cfg: PatchConfig) -> int:
-    """Load a saved patch into `model` and merge it in permanently."""
+    """Load a saved patch into `model`, growing it first if that is its kind."""
+    if cfg.mode == "grow":
+        from motherbrain.growth import grow
+
+        grow(model, cfg.grow_experts)
+        result = model.load_state_dict(payload, strict=False)
+        if result.unexpected_keys:
+            raise ValueError(
+                f"patch does not fit this model: {result.unexpected_keys[:3]}")
+        return cfg.grow_experts
+
     inject_lora(model, cfg)
-    missing = model.load_state_dict(payload, strict=False)
-    unexpected = [k for k in missing.unexpected_keys]
-    if unexpected:
-        raise ValueError(f"patch does not fit this model: {unexpected[:3]}")
+    result = model.load_state_dict(payload, strict=False)
+    if result.unexpected_keys:
+        raise ValueError(f"patch does not fit this model: {result.unexpected_keys[:3]}")
     return merge_all(model)
 
 
 class PatchStore:
     """The lineage on disk: base checkpoint, patch files, version manifest."""
 
-    def __init__(self, run_dir: str | Path) -> None:
+    def __init__(self, run_dir: str | Path, create: bool = True) -> None:
         self.run = Path(run_dir)
         self.dir = self.run / "patches"
-        self.dir.mkdir(parents=True, exist_ok=True)
+        if create:
+            self.dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def manifest_path(self) -> Path:
@@ -221,6 +239,7 @@ class PatchStore:
         return {"current": 0, "head": 0, "base_docs": 0, "versions": []}
 
     def write(self, manifest: dict) -> None:
+        self.run.mkdir(parents=True, exist_ok=True)
         with open(self.manifest_path, "w") as fh:
             json.dump(manifest, fh, indent=2)
 
@@ -285,7 +304,14 @@ class PatchStore:
         return dropped
 
     def record(self, v: Version, payload: dict) -> None:
-        torch.save(payload, self.dir / v.filename)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        # Stored at half precision. A growth patch carries whole new experts
+        # rather than a small delta, so this is the difference between a
+        # lineage that fits in a repository and one that does not; fp16 is
+        # ample for weights that are about to be added to fp32 ones.
+        half = {k: (t.to(torch.float16) if t.is_floating_point() else t)
+                for k, t in payload.items()}
+        torch.save(half, self.dir / v.filename)
         m = self.manifest()
         m["versions"] = [x for x in m["versions"] if x["version"] != v.version]
         m["versions"].append(asdict(v))
@@ -302,7 +328,10 @@ class PatchStore:
         self.write(m)
 
     def load_payload(self, v: Version) -> dict:
-        return torch.load(self.dir / v.filename, map_location="cpu", weights_only=True)
+        payload = torch.load(self.dir / v.filename, map_location="cpu",
+                             weights_only=True)
+        return {k: (t.float() if t.is_floating_point() else t)
+                for k, t in payload.items()}
 
 
 def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
@@ -316,7 +345,11 @@ def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
     target = store.current if target is None else target
     model, tok, dev, meta = load_runtime(str(run_dir), device if device != "cpu" else "auto")
 
-    expected = store.base_fingerprint
+    # The guard exists to stop a patch being applied to weights it was not
+    # trained against. With no patches there is nothing to misapply, and
+    # checking would only force the manifest to track weights that move at
+    # every checkpoint - so it is skipped.
+    expected = store.base_fingerprint if store.versions() else ""
     if expected:
         actual = weights_fingerprint(model)
         if actual != expected:
@@ -330,7 +363,8 @@ def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
     for v in store.versions():
         if v.version > target:
             break
-        cfg = PatchConfig(rank=v.rank, include_ffn=True)
+        cfg = PatchConfig(mode=v.mode, grow_experts=v.grow_experts,
+                          rank=v.rank, include_ffn=True)
         apply_patch(model, store.load_payload(v), cfg)
     model.eval()
     return model, tok, target
@@ -430,11 +464,29 @@ def create_patch(run_dir: str | Path, corpus_dir: str | Path,
     probe = _PatchBatcher(new_tokens, Path(corpus.tokens_path), seq_len, 0.0, cfg.seed)
 
     loss_before = _mean_loss(model, probe, cfg.batch_size, dev)
+    params_before = model.n_params()
 
-    # Freeze everything, then add the trainable low-rank delta.
+    # Freeze everything the model already knows, then add what will learn.
     for p in model.parameters():
         p.requires_grad_(False)
-    wrapped = inject_lora(model, cfg)
+
+    if cfg.mode == "grow":
+        # Growth mode: the model gets bigger with every patch. New experts are
+        # appended to every feed-forward layer and only they are trained, so
+        # the parameter count rises with each version while the existing
+        # weights - and everything they encode - are left exactly as they were.
+        from motherbrain.growth import grow, release
+
+        _, trainable = grow(model, cfg.grow_experts)
+        release(model, cfg.grow_experts)  # held-out experts get no gradient
+        for p in trainable:
+            p.requires_grad_(True)
+    else:
+        wrapped = inject_lora(model, cfg)
+        for p in model.parameters():
+            p.requires_grad_(p.dim() and any(
+                p is w.A or p is w.B for w in wrapped))
+
     model.to(dev)
     trainable = [p for p in model.parameters() if p.requires_grad]
     n_trainable = sum(p.numel() for p in trainable)
@@ -455,8 +507,16 @@ def create_patch(run_dir: str | Path, corpus_dir: str | Path,
             progress_cb({"step": step + 1, "total": cfg.steps, "loss": loss.item()})
 
     loss_after = _mean_loss(model, probe, cfg.batch_size, dev)
+    params_after = model.n_params()
 
-    payload = lora_state(model)
+    if cfg.mode == "grow":
+        # Save exactly the tensors this patch trained, by name, so replaying
+        # the growth and loading them reproduces this version precisely.
+        trained = {id(p) for p in trainable}
+        payload = {name: p.detach().cpu().clone()
+                   for name, p in model.named_parameters() if id(p) in trained}
+    else:
+        payload = lora_state(model)
     version = Version(
         version=store.head + 1,
         patch_id=uuid.uuid4().hex[:8],
@@ -475,6 +535,10 @@ def create_patch(run_dir: str | Path, corpus_dir: str | Path,
         sources=sorted({d.get("source", "?") for d in new_docs})[:20],
         note=note,
         base_fingerprint=store.base_fingerprint,
+        mode=cfg.mode,
+        grow_experts=cfg.grow_experts if cfg.mode == "grow" else 0,
+        params_before=params_before,
+        params_after=params_after,
     )
     store.record(version, payload)
     return version

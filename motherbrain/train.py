@@ -169,8 +169,35 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
     autocast = (torch.amp.autocast("cuda", dtype=torch.bfloat16)
                 if use_amp else torch.amp.autocast("cpu", enabled=False))
 
+    from motherbrain.patches import PatchStore, weights_fingerprint
+
+    store = PatchStore(out)
+    stamped = False
+
+    def stamp_base(base_model, final: bool = False) -> None:
+        """Adopt these weights as the base.
+
+        A run with patches from an older base must drop them at the first
+        checkpoint, or every intermediate checkpoint is unloadable - the
+        manifest would still describe weights that no longer exist. Once the
+        lineage is empty there is nothing to invalidate, so the fingerprint is
+        only rewritten at the end, when the weights stop moving. Restamping at
+        every save would otherwise rewrite the manifest every few minutes for
+        the length of a run.
+        """
+        nonlocal stamped
+        if stamped and not final and not store.versions():
+            return
+        dropped = store.set_base(weights_fingerprint(base_model), corpus.n_documents)
+        if dropped and not stamped:
+            print(f"note: dropped {len(dropped)} patch(es) trained against the "
+                  f"previous base checkpoint: {', '.join(dropped)}", flush=True)
+        stamped = True
+
     t0 = time.time()
     last_loss = float("nan")
+    best_val = min((h["val_loss"] for h in history), default=float("inf"))
+    best_path = out / "best.pt"
 
     for step in range(start_step, tc.steps):
         lr = lr_at(step, tc)
@@ -213,7 +240,17 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
             ppl = math.exp(min(val, 20))
             history.append({"step": done, "train_loss": accum_loss,
                             "val_loss": val, "perplexity": ppl})
-            print(f"           eval  val_loss {val:.4f}  perplexity {ppl:.2f}", flush=True)
+            marker = ""
+            if val < best_val:
+                # Validation loss turns back up once a run starts overfitting,
+                # and the rolling checkpoint would overwrite the best weights
+                # with worse ones. Keep the best separately.
+                best_val = val
+                base = model._orig_mod if hasattr(model, "_orig_mod") else model
+                save_checkpoint(best_path, base, opt, done, cfg, tc, history)
+                marker = "  <- best"
+            print(f"           eval  val_loss {val:.4f}  perplexity {ppl:.2f}"
+                  f"{marker}", flush=True)
 
         if progress_cb is not None:
             progress_cb({"step": done, "total": tc.steps, "loss": accum_loss, "lr": lr})
@@ -221,24 +258,23 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
         if done % tc.save_every == 0 or done == tc.steps:
             base = model._orig_mod if hasattr(model, "_orig_mod") else model
             save_checkpoint(ckpt_path, base, opt, done, cfg, tc, history)
+            tok.save(str(out / "tokenizer.json"))
+            stamp_base(base)  # keep every saved checkpoint loadable
 
     base = model._orig_mod if hasattr(model, "_orig_mod") else model
     save_checkpoint(ckpt_path, base, opt, tc.steps, cfg, tc, history)
     tok.save(str(out / "tokenizer.json"))
-
     # Everything in the corpus right now lives in these weights, so later
     # patches start from here rather than relearning the whole corpus.
-    from motherbrain.patches import PatchStore, weights_fingerprint
+    stamp_base(base, final=True)
 
-    store = PatchStore(out)
-    dropped = store.set_base(weights_fingerprint(base), corpus.n_documents)
-    if dropped:
-        print(f"note: dropped {len(dropped)} patch(es) trained against the previous "
-              f"base checkpoint: {', '.join(dropped)}")
+    if best_path.exists() and best_val < float("inf"):
+        print(f"best validation loss {best_val:.4f} kept at {best_path}")
 
     summary = {
         "steps": tc.steps,
         "final_loss": last_loss,
+        "best_val_loss": best_val if best_val < float("inf") else None,
         "params": base.n_params(),
         "checkpoint": str(ckpt_path),
         "history": history,

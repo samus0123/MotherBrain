@@ -1,5 +1,7 @@
 """Tests for the parts that are easy to get quietly wrong."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 import torch
@@ -37,6 +39,61 @@ def test_roundtrip_is_exact():
     tok = Tokenizer.train(SAMPLE, vocab_size=400)
     for text in SAMPLE + ["unseen text with_underscores 🧠", "x_1 = y_2"]:
         assert tok.decode(tok.encode(text)) == text
+
+
+def _naive_bpe(texts, vocab_size):
+    """The obvious O(merges x corpus) implementation, as ground truth."""
+    from collections import Counter
+
+    from motherbrain.tokenizer import SPECIAL_TOKENS, SPLIT_PATTERN
+
+    ns = len(SPECIAL_TOKENS)
+    n_merges = max(0, vocab_size - ns - 256)
+    freqs_by_word = Counter()
+    for t in texts:
+        freqs_by_word.update(SPLIT_PATTERN.findall(t))
+    words = [[ns + b for b in w.encode()] for w in freqs_by_word]
+    freqs = list(freqs_by_word.values())
+
+    merges, next_id = [], ns + 256
+    for _ in range(n_merges):
+        counts = Counter()
+        for seq, f in zip(words, freqs):
+            for pair in zip(seq, seq[1:]):
+                counts[pair] += f
+        best, best_count = None, 1
+        for pair, c in counts.items():
+            if c > best_count or (c == best_count and best is not None and pair < best):
+                best, best_count = pair, c
+        if best is None:
+            break
+        merges.append(best)
+        a, b = best
+        for i, seq in enumerate(words):
+            out, j = [], 0
+            while j < len(seq):
+                if j < len(seq) - 1 and seq[j] == a and seq[j + 1] == b:
+                    out.append(next_id)
+                    j += 2
+                else:
+                    out.append(seq[j])
+                    j += 1
+            words[i] = out
+        next_id += 1
+    return merges
+
+
+def test_fast_bpe_matches_the_naive_implementation():
+    """The trainer is incremental and heap-driven for speed.
+
+    Both optimisations are easy to get subtly wrong, and a wrong merge table
+    is not an error - it is a slightly worse tokenizer nobody notices. So the
+    fast path is checked against the obvious implementation.
+    """
+    corpus = SAMPLE + ["def f(x_1): return x_1 + 1 " * 20, "aaa bbb aaa ccc " * 30]
+    tok = Tokenizer.train(corpus, vocab_size=500)
+    fast = [p for p, _ in sorted(tok.merges.items(), key=lambda kv: kv[1])]
+    assert fast == _naive_bpe(corpus, 500)
 
 
 def test_training_is_deterministic():
@@ -491,3 +548,851 @@ def test_retraining_the_base_drops_the_stale_lineage(tmp_path):
     assert dropped == ["v1 (p1)"]
     assert store.versions() == [] and store.current == 0
     assert not (store.dir / "0001-p1.pt").exists()
+
+
+# ---- loading --------------------------------------------------------------
+
+
+def test_status_reports_a_fresh_clone_as_not_loadable(tmp_path, capsys):
+    """A clone has patches and a manifest but no weights, because the base
+    checkpoint is too large to commit. Saying so is the whole point."""
+    from motherbrain.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(tmp_path / "corpus"), "--run", str(tmp_path / "run")])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "NOT LOADABLE" in out
+    assert "mb bootstrap" in out
+
+
+def test_status_reports_a_trained_run_as_ready(served, capsys):
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(corpus), "--run", str(run)])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "READY" in out
+    assert "mb chat" in out
+
+
+def test_project_root_is_found_from_a_subdirectory(tmp_path, monkeypatch):
+    """`mb` is installed globally but the corpus and weights live somewhere.
+
+    Resolving them against the cwd alone made `mb status` report "no weights"
+    while standing inside a workspace that has them.
+    """
+    from motherbrain.cli import project_root
+
+    workspace = tmp_path / "workspace"
+    (workspace / "runs" / "default").mkdir(parents=True)
+    deep = workspace / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+
+    monkeypatch.chdir(deep)
+    assert project_root() == workspace.resolve()
+
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    monkeypatch.chdir(outside)
+    assert project_root() == outside.resolve()
+
+
+def test_console_script_entry_point_is_declared():
+    """The README tells people to run `mb`; that has to be a real command."""
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    with open(root / "pyproject.toml", "rb") as fh:
+        pyproject = tomllib.load(fh)
+    assert pyproject["project"]["scripts"]["mb"] == "motherbrain.cli:main"
+
+
+def test_status_does_not_create_a_workspace(tmp_path, capsys):
+    """Looking at a workspace must not bring one into existence.
+
+    `mb status` used to create the corpus directory as a side effect, which
+    made an empty directory look like a MotherBrain workspace to the project
+    root search that runs on the next invocation.
+    """
+    from motherbrain.cli import build_parser
+
+    corpus = tmp_path / "data" / "corpus"
+    run = tmp_path / "runs" / "default"
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(corpus), "--run", str(run)])
+    args.func(args)
+
+    assert not corpus.exists()
+    assert not run.exists()
+
+
+# ---- fitting a model to real hardware -------------------------------------
+
+
+@pytest.mark.parametrize("n_gpus,gpu_gb", [
+    (1, 8), (1, 24), (1, 80), (8, 80), (64, 80), (1024, 80), (202459, 80),
+])
+def test_fit_to_hardware_returns_something_that_actually_fits(n_gpus, gpu_gb):
+    """A configuration that does not fit is worse than an honest refusal.
+
+    The first version of this returned the smallest shape it had tried even
+    when that shape exceeded the budget, so it claimed 100B parameters fit on
+    eight GPUs and then reported needing eighteen.
+    """
+    from motherbrain.cli import fit_to_hardware
+
+    cfg, _ = fit_to_hardware(n_gpus, gpu_gb)
+    assert cfg is not None
+    assert cfg.memory_bytes(optimizer=True) <= n_gpus * gpu_gb * 1e9
+    assert cfg.n_experts >= 1
+    assert cfg.n_experts_per_token <= cfg.n_experts
+
+
+def test_fit_to_hardware_grows_with_the_cluster():
+    from motherbrain.cli import fit_to_hardware
+
+    small, _ = fit_to_hardware(8, 80)
+    large, _ = fit_to_hardware(1024, 80)
+    assert large.n_params > small.n_params
+
+
+def test_fit_to_hardware_admits_when_nothing_fits():
+    from motherbrain.cli import fit_to_hardware
+
+    cfg, note = fit_to_hardware(1, 0.001)
+    assert cfg is None
+    assert "micro" in note
+
+
+def test_mother_config_artifact_matches_the_preset():
+    """configs/mother.json is the committed definition of the largest model."""
+    from motherbrain.config import PRESETS, ModelConfig
+
+    root = Path(__file__).resolve().parent.parent
+    cfg = ModelConfig.load(str(root / "configs" / "mother.json"))
+    assert cfg.n_params == PRESETS["mother"].n_params
+    assert cfg.n_params > 1e15
+
+
+def test_attention_materialises_at_mother_width():
+    """The largest preset is arithmetic unless its real modules can be built.
+
+    One attention block at mother's true width is ~0.9B parameters, which is
+    small enough to instantiate here and large enough to prove the shape is
+    real rather than a number in a table.
+    """
+    from motherbrain.config import PRESETS
+    from motherbrain.model import Attention
+
+    cfg = PRESETS["mother"]
+    attn = Attention(cfg)
+    built = sum(p.numel() for p in attn.parameters())
+    assert built == cfg.attn_params_per_layer
+
+    x = torch.randn(1, 2, cfg.d_model)
+    cos = torch.randn(2, cfg.head_dim // 2)
+    sin = torch.randn(2, cfg.head_dim // 2)
+    with torch.no_grad():
+        assert attn(x, cos, sin).shape == (1, 2, cfg.d_model)
+
+
+def test_chat_output_is_visibly_delimited(served, capsys, monkeypatch):
+    """An undertrained model emits mostly whitespace.
+
+    A blank screen is indistinguishable from a command that silently failed,
+    so chat frames its output and reports a token count.
+    """
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    args = build_parser().parse_args(
+        ["chat", "--prompt", "hello", "--max-tokens", "5",
+         "--corpus", str(corpus), "--run", str(run)])
+    assert args.func(args) == 0
+
+    out = capsys.readouterr().out
+    assert "MotherBrain v" in out
+    assert "─" * 10 in out          # the output is framed
+    assert "tokens in" in out       # and counted
+
+
+# ---- exported models ------------------------------------------------------
+
+
+def test_export_roundtrips_and_loads_without_pickle(served, tmp_path, capsys):
+    """An exported model is meant to be shared, so it must load safely.
+
+    Training checkpoints carry optimizer state and load through pickle. An
+    export carries fp16 weights plus config and tokenizer as JSON strings, so
+    torch.load(weights_only=True) can read it - no code execution on load.
+    """
+    import torch
+
+    from motherbrain.cli import build_parser, load_exported
+
+    run, corpus = served
+    out = tmp_path / "model.pt"
+    args = build_parser().parse_args(
+        ["export", "--out", str(out), "--corpus", str(corpus), "--run", str(run)])
+    assert args.func(args) == 0
+    assert out.exists()
+
+    # The safety property: readable with weights_only, i.e. no pickled objects.
+    payload = torch.load(out, map_location="cpu", weights_only=True)
+    assert payload["format"] == "motherbrain-model-v1"
+
+    model, tok, device, version, steps = load_exported(str(out), device="cpu")
+    ids = tok.encode("hello world")
+    assert tok.decode(ids) == "hello world"
+    with torch.no_grad():
+        logits, _ = model(torch.tensor([ids[:4] or [1]]), None)
+    assert torch.isfinite(logits).all()
+
+
+def test_export_is_smaller_than_the_checkpoint(served, tmp_path):
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    out = tmp_path / "model.pt"
+    args = build_parser().parse_args(
+        ["export", "--out", str(out), "--corpus", str(corpus), "--run", str(run)])
+    args.func(args)
+    assert out.stat().st_size < (run / "checkpoint.pt").stat().st_size
+
+
+def test_export_rejects_a_foreign_file(tmp_path):
+    import torch
+
+    from motherbrain.cli import load_exported
+
+    bogus = tmp_path / "not-a-model.pt"
+    torch.save({"weights": {}}, bogus)
+    with pytest.raises(ValueError, match="not a MotherBrain model export"):
+        load_exported(str(bogus))
+
+
+def test_every_saved_checkpoint_is_immediately_loadable(tmp_path):
+    """Training stamps the base identity as it saves, not only at the end.
+
+    Stamping only on completion left every intermediate checkpoint unloadable:
+    the manifest still described the previous base, so the lineage guard
+    refused the new weights. A long run that got interrupted produced a large
+    checkpoint nobody could open.
+    """
+    from motherbrain.config import ModelConfig
+    from motherbrain.data import Corpus
+    from motherbrain.patches import build_version
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns " * 200, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    # save_every < steps, so a checkpoint exists well before the run ends
+    tc = TrainConfig(steps=4, batch_size=2, seq_len=16, warmup=1, save_every=2,
+                     eval_every=100, log_every=100, eval_batches=1)
+    train(str(tmp_path / "corpus"), str(run), cfg, tc)
+
+    model, _, version = build_version(str(run))   # must not raise
+    assert version == 0
+    assert model.n_params() > 0
+
+
+def test_repetition_penalty_is_applied_by_chat(served, capsys):
+    """Small models fall into loops at low temperature.
+
+    generate() has always supported a repetition penalty and the HTTP API
+    exposed it, but `mb chat` did not, so the CLI had no way out of a loop.
+    """
+    from motherbrain.cli import build_parser
+
+    run, corpus = served
+    parser = build_parser()
+    args = parser.parse_args(["chat", "--prompt", "x", "--max-tokens", "3",
+                              "--corpus", str(corpus), "--run", str(run)])
+    assert args.repetition_penalty == 1.1     # on by default
+    assert args.func(args) == 0
+
+    args = parser.parse_args(["chat", "--prompt", "x", "--max-tokens", "3",
+                              "--repetition-penalty", "1.0",
+                              "--corpus", str(corpus), "--run", str(run)])
+    assert args.repetition_penalty == 1.0
+    assert args.func(args) == 0
+
+
+def test_training_keeps_the_best_checkpoint(tmp_path):
+    """Validation loss turns back up once a run overfits.
+
+    The rolling checkpoint is overwritten every save_every steps, so without a
+    separate copy the best weights are lost to later, worse ones - which is
+    exactly what a long run does after it passes its optimum.
+    """
+    import json
+
+    from motherbrain.data import Corpus
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns " * 300, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    tc = TrainConfig(steps=6, batch_size=2, seq_len=16, warmup=1, save_every=6,
+                     eval_every=2, log_every=100, eval_batches=1)
+    summary = train(str(tmp_path / "corpus"), str(run), cfg, tc)
+
+    assert (run / "best.pt").exists()
+    assert summary["best_val_loss"] is not None
+    evals = [h["val_loss"] for h in summary["history"]]
+    assert summary["best_val_loss"] == pytest.approx(min(evals))
+
+
+# ---- growth ---------------------------------------------------------------
+
+
+def test_growth_preserves_behaviour_exactly():
+    """A grown model must compute what it computed before, to the bit.
+
+    New experts start with a zeroed output projection and a -1e9 router bias,
+    so they cannot be selected and contribute nothing. Anything else would mean
+    learning one new fact silently damaged everything already known.
+    """
+    from motherbrain.growth import grow, release
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny()).eval()
+    x = torch.randint(0, 300, (2, 8))
+    before, _ = model(x, None)
+
+    grow(model, 2)                       # dense -> MoE
+    after, _ = model(x, None)
+    assert torch.allclose(before, after, atol=1e-6)
+
+    release(model, 2)                    # routable, but still silent
+    assert torch.allclose(before, model(x, None)[0], atol=1e-6)
+
+    grow(model, 3)                       # MoE -> larger MoE
+    assert torch.allclose(before, model(x, None)[0], atol=1e-6)
+
+
+def test_growth_adds_parameters_and_keeps_compute_flat():
+    """The point of growing through experts: size rises, per-token cost does not."""
+    from motherbrain.growth import grow
+
+    model = MotherBrain(tiny())
+    before = model.n_params()
+    active_before = model.cfg.n_active_params
+
+    cfg, trainable = grow(model, 4)
+    assert model.n_params() > before
+    assert model.n_params() == cfg.n_params        # analytic accounting holds
+    assert trainable and sum(p.numel() for p in trainable) > 0
+
+    # Only n_experts_per_token experts run, so activation stays near the dense cost.
+    assert cfg.n_active_params < cfg.n_params
+    assert cfg.n_active_params < active_before * 3
+
+
+def test_growth_rejects_nonsense():
+    from motherbrain.growth import grow
+
+    with pytest.raises(ValueError):
+        grow(MotherBrain(tiny()), 0)
+
+
+def test_every_patch_grows_the_model_and_replays_exactly(tmp_path):
+    """The end-to-end promise: information in, parameters up, version up.
+
+    Each patch must also replay from the base, or the lineage is decorative.
+    """
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchConfig, build_version, create_patch
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns and grows " * 200, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    train(str(tmp_path / "corpus"), str(run),
+          cfg, TrainConfig(steps=2, batch_size=2, seq_len=16, warmup=1,
+                           save_every=2, eval_every=2, log_every=100,
+                           eval_batches=1))
+
+    sizes = []
+    for i in range(3):
+        corpus.add_text(f"fact number {i} about the growing mother brain", f"f{i}")
+        v = create_patch(str(run), str(tmp_path / "corpus"),
+                         PatchConfig(mode="grow", grow_experts=1, steps=3,
+                                     batch_size=2, seq_len=16))
+        assert v is not None
+        assert v.version == i + 1                      # sequential versions
+        assert v.params_after > v.params_before        # and it grew
+        assert v.mode == "grow"
+        sizes.append(v.params_after)
+
+    assert sizes == sorted(sizes)                      # monotonically larger
+
+    for target, expected in enumerate(sizes, start=1):
+        model, _, version = build_version(str(run), target=target)
+        assert version == target
+        assert model.n_params() == expected           # replays exactly
+
+
+# ---- the console ----------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("/help", "help"),
+    ("/status", "status"),
+    ("how big are you", "status"),
+    ("what version are you", "version"),
+    ("list versions", "versions"),
+    ("/versions", "versions"),
+    ("/learn the key rotates on Fridays", "learn"),
+    ("learn that the key rotates", "learn"),
+    ("remember: port 6543", "learn"),
+    ("/grow", "grow"),
+    ("grow yourself", "grow"),
+    ("/checkout v3", "checkout"),
+    ("roll back to 1", "checkout"),
+    ("/train 500", "train"),
+    ("/scale mother", "scale"),
+    ("def softmax(x):", "generate"),
+    ("the quick brown fox", "generate"),
+    ("", "noop"),
+])
+def test_console_parses_commands_and_prompts(text, expected):
+    from motherbrain.commands import parse
+
+    assert parse(text).name == expected
+
+
+def test_console_extracts_arguments():
+    from motherbrain.commands import parse
+
+    assert parse("/checkout v3").args["version"] == 3
+    assert parse("roll back to 1").args["version"] == 1
+    assert parse("/grow 4").args["experts"] == 4
+    assert parse("/grow").args["experts"] == 1          # sensible default
+    assert parse("/train 500").args["steps"] == 500
+    assert parse("/scale titan").args["preset"] == "titan"
+    assert parse("/learn a fact").text == "a fact"
+    assert parse("remember: port 6543").text == "port 6543"
+
+
+def test_console_refuses_ambiguity_instead_of_guessing():
+    """A parser that guesses is worse than one that says it did not understand."""
+    from motherbrain.commands import parse
+
+    assert parse("/checkout").name == "error"          # which version?
+    assert parse("learn").name == "error"              # learn what?
+    assert parse("/nonsense").name == "unknown"
+
+
+def test_a_prompt_that_looks_like_a_command_is_still_a_prompt():
+    """`learning rates` starts with an alias but is not an instruction."""
+    from motherbrain.commands import parse
+
+    assert parse("learning rates matter").name == "generate"
+    assert parse("versions of numpy differ").name == "generate"
+
+
+def test_command_endpoint_drives_the_system(served):
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+
+    def send(text, **kw):
+        return client.post("/command", json={"text": text, **kw}).json()
+
+    assert "MotherBrain console" in send("/help")["text"]
+    assert send("what version are you")["kind"] == "info"
+    assert send("how big are you")["kind"] == "status"
+    assert send("list versions")["kind"] == "versions"
+
+    learned = send("learn that the deploy key rotates on Fridays")
+    assert learned["kind"] == "learned"
+    assert learned["data"]["pending"] >= 1
+
+    assert send("/checkout v9")["kind"] == "error"      # no such version
+    assert send("/nonsense")["kind"] == "error"
+
+    generated = send("def f(", max_tokens=4)
+    assert generated["kind"] == "generated"
+    assert generated["data"]["tokens"] > 0
+
+
+def test_console_page_is_served(served):
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "<title>MotherBrain</title>" in page.text
+    assert "What would you like to do?" in page.text               # the menu
+    assert 'id="log"' in page.text                                 # the transcript
+
+
+# ---- text or voice --------------------------------------------------------
+
+
+def test_voice_capability_detection_is_honest():
+    """Speech is optional and machine-dependent, so it is detected, not assumed."""
+    from motherbrain.voice import detect
+
+    cap = detect()
+    assert isinstance(cap.any, bool)
+    if not cap.any:
+        # An unavailable capability must explain itself rather than fail silently.
+        assert cap.reason
+        assert "install" in cap.reason or "pip" in cap.reason
+
+
+def test_speaking_without_a_backend_reports_failure(monkeypatch):
+    from motherbrain.voice import Capability, speak
+
+    assert speak("hello", Capability()) is False          # no backend
+    assert speak("", Capability(speak="espeak")) is False  # nothing to say
+
+
+def test_listening_without_a_backend_returns_nothing():
+    from motherbrain.voice import Capability, listen
+
+    assert listen(Capability()) is None
+
+
+def test_choose_mode_falls_back_to_text_when_voice_is_impossible(monkeypatch, capsys):
+    """Offering a choice the machine cannot honour would be worse than saying so."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability(reason="no engine"))
+    mode, cap = voice.choose_mode()
+    assert mode == "text"
+    assert "unavailable" in capsys.readouterr().out
+
+
+def test_choose_mode_asks_when_voice_is_possible(monkeypatch):
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_mode()[0] == "voice"
+
+    monkeypatch.setattr("builtins.input", lambda _: "")
+    assert voice.choose_mode()[0] == "text"          # default
+
+    monkeypatch.setattr("builtins.input", lambda _: "t")
+    assert voice.choose_mode()[0] == "text"
+
+
+def test_console_offers_both_modes_in_the_browser():
+    """The page asks before it starts, and detects the two halves separately."""
+    from motherbrain.server import UI_HTML
+
+    assert "What would you like to do?" in UI_HTML
+    assert 'data-mode="text"' in UI_HTML
+    assert 'data-mode="program-voice"' in UI_HTML
+    # recognition and synthesis are detected apart: Firefox has one, not both
+    assert "webkitSpeechRecognition" in UI_HTML
+    assert "speechSynthesis" in UI_HTML
+    assert "not supported by this browser" in UI_HTML
+
+
+def test_console_mode_flag_skips_the_question():
+    from motherbrain.cli import build_parser
+
+    assert build_parser().parse_args(["console"]).mode == "ask"
+    assert build_parser().parse_args(["console", "--mode", "text"]).mode == "text"
+    assert build_parser().parse_args(["console", "--mode", "voice"]).mode == "voice"
+
+
+def test_startup_offers_feeding_as_a_third_choice(monkeypatch):
+    """Feeding is the first thing most sessions want, so it is offered up front."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    for answer, expected in [("f", "feed"), ("feed", "feed"),
+                             ("v", "voice"), ("", "text"), ("t", "text")]:
+        monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
+        assert voice.choose_mode()[0] == expected
+
+
+def test_feeding_is_offered_even_without_voice(monkeypatch, capsys):
+    """A machine with no speech still gets the feed option, just not voice."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability(reason="none"))
+    monkeypatch.setattr("builtins.input", lambda _: "feed")
+    assert voice.choose_mode()[0] == "feed"
+
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_mode()[0] == "text"      # voice cannot be honoured here
+
+
+def test_startup_question_survives_no_terminal(monkeypatch):
+    """Piped input, cron, a daemon: `input` raises OSError, not EOFError.
+
+    Defaulting is right there; crashing on a question nobody can answer is not.
+    """
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+
+    def no_terminal(_):
+        raise OSError("reading from stdin while output is captured")
+
+    monkeypatch.setattr("builtins.input", no_terminal)
+    assert voice.choose_mode()[0] == "text"
+
+
+def test_opening_menu_lists_the_four_things_you_can_do(monkeypatch):
+    """The program opens on a menu of tasks, not a question about typing."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    for answer, expected in [("1", "program"), ("2", "program-voice"),
+                             ("3", "feed"), ("4", "console"),
+                             ("", "console"), ("write", "program"),
+                             ("teach", "feed"), ("9", "console")]:
+        monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
+        assert voice.choose_start()[0] == expected
+
+
+def test_menu_downgrades_voice_when_it_cannot_be_honoured(monkeypatch, capsys):
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability(reason="none"))
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    assert voice.choose_start()[0] == "program"        # by text instead
+    assert "unavailable" in capsys.readouterr().out
+
+
+def test_menu_survives_no_terminal(monkeypatch):
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect", lambda: voice.Capability())
+
+    def no_terminal(_):
+        raise OSError("no stdin")
+
+    monkeypatch.setattr("builtins.input", no_terminal)
+    assert voice.choose_start()[0] == "console"
+
+
+def test_web_menu_matches_the_terminal_menu():
+    from motherbrain.server import UI_HTML
+
+    assert "What would you like to do?" in UI_HTML
+    for mode in ("program", "program-voice", "feed", "text"):
+        assert f'data-mode="{mode}"' in UI_HTML
+    # the page must not overstate what a model this size can do
+    assert "cannot be told what to write" in UI_HTML
+
+
+def test_console_page_offers_feeding_first():
+    from motherbrain.server import UI_HTML
+
+    assert 'data-mode="feed"' in UI_HTML
+    assert "Teach it" in UI_HTML
+    # the distinction people miss: storing text is not the same as learning it
+    assert "learning is what puts it in the weights" in UI_HTML
+    assert "learn it now (grows the model)" in UI_HTML
+
+
+def test_console_mode_flag_accepts_feed():
+    from motherbrain.cli import build_parser
+
+    assert build_parser().parse_args(["console", "--mode", "feed"]).mode == "feed"
+
+
+def test_a_fresh_clone_runs_without_training(tmp_path, monkeypatch):
+    """A clone ships models/motherbrain.pt but no training checkpoint.
+
+    Checkpoints are far too large for a repository, so without a fallback
+    every command insisted there was no model while one sat in models/ - the
+    least helpful thing it could say to someone who had just cloned it.
+    """
+    import motherbrain.cli as cli
+    from motherbrain.config import ModelConfig
+    from motherbrain.data import Corpus
+    from motherbrain.model import MotherBrain
+
+    workspace = tmp_path / "clone"
+    (workspace / "runs" / "default").mkdir(parents=True)
+    (workspace / "models").mkdir()
+
+    corpus = Corpus(workspace / "data" / "corpus")
+    corpus.add_text("the mother brain awakens " * 60, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    model = MotherBrain(cfg)
+    tok.save(str(workspace / "runs" / "default" / "tokenizer.json"))
+
+    # write an export exactly as `mb export` does
+    import json as _json
+
+    import torch as _torch
+
+    _torch.save({
+        "format": "motherbrain-model-v1",
+        "config_json": _json.dumps(cfg.to_dict()),
+        "tokenizer_json": (workspace / "runs" / "default" / "tokenizer.json").read_text(),
+        "weights": {k: v.to(_torch.float16) for k, v in model.state_dict().items()},
+        "version": 1, "steps": 100, "base_fingerprint": "",
+    }, workspace / "models" / "motherbrain.pt")
+
+    assert not (workspace / "runs" / "default" / "checkpoint.pt").exists()
+    monkeypatch.chdir(workspace)
+
+    loaded, loaded_tok, _device, version = cli.load_current(
+        str(workspace / "runs" / "default"))
+    assert version == 1
+    assert loaded.n_params() == model.n_params()
+    assert loaded_tok.vocab_size == tok.vocab_size
+
+
+def test_cli_does_not_need_a_web_framework(monkeypatch):
+    """`mb console` failed on a phone that had torch but no fastapi.
+
+    cli.py imported motherbrain.security at module scope, which imported
+    fastapi, so a chat session dragged in an HTTP stack it never touches.
+    Only serving needs a web framework.
+    """
+    import importlib
+    import sys
+
+    blocked = ("fastapi", "starlette", "uvicorn")
+
+    class Blocker:
+        def find_module(self, name, path=None):
+            return self if name.split(".")[0] in blocked else None
+
+        def load_module(self, name):
+            raise ImportError(f"No module named {name!r}")
+
+    for name in list(sys.modules):
+        if name.split(".")[0] in blocked:
+            monkeypatch.delitem(sys.modules, name, raising=False)
+    for name in ("motherbrain.cli", "motherbrain.security"):
+        monkeypatch.delitem(sys.modules, name, raising=False)
+
+    monkeypatch.setattr(sys, "meta_path", [Blocker(), *sys.meta_path])
+
+    security = importlib.import_module("motherbrain.security")
+    cli = importlib.import_module("motherbrain.cli")
+
+    assert security.check_exposure("127.0.0.1", None, tls=False, insecure=False) == []
+    assert cli.build_parser().parse_args(["console"]).mode == "ask"
+
+
+# ---- actions --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("text,name", [
+    ("/make a script that renames files", "make"),
+    ("write a program that sorts a list", "make"),
+    ("/run script.py", "run"),
+    ("/ls", "ls"),
+    ("/cat setup.py", "cat"),
+])
+def test_action_commands_parse(text, name):
+    from motherbrain.commands import parse
+
+    assert parse(text).name == name
+
+
+def test_make_accepts_a_destination():
+    from motherbrain.commands import parse
+
+    cmd = parse("make a csv reader -> tools/csv.py")
+    assert cmd.name == "make"
+    assert cmd.args["path"] == "tools/csv.py"
+    assert cmd.text == "a csv reader"
+    assert parse("/make a csv reader").args["path"] is None
+
+
+def test_actions_without_arguments_are_errors():
+    from motherbrain.commands import parse
+
+    assert parse("/make").name == "error"
+    assert parse("/run").name == "error"
+    assert parse("/cat").name == "error"
+
+
+def test_actions_are_refused_over_http(served):
+    """/make, /run, /ls and /cat write files and execute code.
+
+    In a terminal that is no more than the shell already allows. Over HTTP it
+    is remote code execution against whoever is serving the model, so there is
+    no configuration of it that is safe to expose.
+    """
+    from fastapi.testclient import TestClient
+
+    from motherbrain.commands import LOCAL_ONLY
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+
+    for text in ("/run /etc/passwd", "/make a thing", "/ls /", "/cat /etc/passwd"):
+        result = client.post("/command", json={"text": text}).json()
+        assert result["kind"] == "error"
+        assert "never over the network" in result["text"]
+
+    assert LOCAL_ONLY == {"make", "run", "ls", "cat"}
+
+
+def test_no_fingerprint_check_without_patches(tmp_path):
+    """The guard stops a patch reaching weights it was not trained against.
+
+    With no patches there is nothing to misapply, so checking would only force
+    the manifest to track weights that move at every checkpoint - which
+    rewrote it every few minutes for the length of a run.
+    """
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchStore, build_version
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns " * 200, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    train(str(tmp_path / "corpus"), str(run),
+          cfg, TrainConfig(steps=4, batch_size=2, seq_len=16, warmup=1,
+                           save_every=2, eval_every=2, log_every=100,
+                           eval_batches=1))
+
+    # A stale fingerprint must not block loading while the lineage is empty.
+    store = PatchStore(str(run))
+    manifest = store.manifest()
+    manifest["base_fingerprint"] = "stale-from-an-older-run"
+    store.write(manifest)
+    assert store.versions() == []
+
+    model, _, version = build_version(str(run))   # must not raise
+    assert version == 0
+    assert model.n_params() > 0
