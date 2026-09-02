@@ -174,15 +174,20 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
     store = PatchStore(out)
     stamped = False
 
-    def stamp_base(base_model) -> None:
-        """Adopt these weights as the base as soon as they are written.
+    def stamp_base(base_model, final: bool = False) -> None:
+        """Adopt these weights as the base.
 
-        Doing this only at the end of training would leave every intermediate
-        checkpoint unloadable: the manifest would still describe the previous
-        base, and the lineage guard would refuse the new weights. An
-        interrupted run would produce a checkpoint nobody could open.
+        A run with patches from an older base must drop them at the first
+        checkpoint, or every intermediate checkpoint is unloadable - the
+        manifest would still describe weights that no longer exist. Once the
+        lineage is empty there is nothing to invalidate, so the fingerprint is
+        only rewritten at the end, when the weights stop moving. Restamping at
+        every save would otherwise rewrite the manifest every few minutes for
+        the length of a run.
         """
         nonlocal stamped
+        if stamped and not final and not store.versions():
+            return
         dropped = store.set_base(weights_fingerprint(base_model), corpus.n_documents)
         if dropped and not stamped:
             print(f"note: dropped {len(dropped)} patch(es) trained against the "
@@ -261,7 +266,7 @@ def train(corpus_dir: str, out_dir: str, cfg: ModelConfig, tc: TrainConfig,
     tok.save(str(out / "tokenizer.json"))
     # Everything in the corpus right now lives in these weights, so later
     # patches start from here rather than relearning the whole corpus.
-    stamp_base(base)
+    stamp_base(base, final=True)
 
     if best_path.exists() and best_val < float("inf"):
         print(f"best validation loss {best_val:.4f} kept at {best_path}")

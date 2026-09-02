@@ -1362,3 +1362,37 @@ def test_actions_are_refused_over_http(served):
         assert "never over the network" in result["text"]
 
     assert LOCAL_ONLY == {"make", "run", "ls", "cat"}
+
+
+def test_no_fingerprint_check_without_patches(tmp_path):
+    """The guard stops a patch reaching weights it was not trained against.
+
+    With no patches there is nothing to misapply, so checking would only force
+    the manifest to track weights that move at every checkpoint - which
+    rewrote it every few minutes for the length of a run.
+    """
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchStore, build_version
+    from motherbrain.train import TrainConfig, train
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns " * 200, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+
+    run = tmp_path / "run"
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    train(str(tmp_path / "corpus"), str(run),
+          cfg, TrainConfig(steps=4, batch_size=2, seq_len=16, warmup=1,
+                           save_every=2, eval_every=2, log_every=100,
+                           eval_batches=1))
+
+    # A stale fingerprint must not block loading while the lineage is empty.
+    store = PatchStore(str(run))
+    manifest = store.manifest()
+    manifest["base_fingerprint"] = "stale-from-an-older-run"
+    store.write(manifest)
+    assert store.versions() == []
+
+    model, _, version = build_version(str(run))   # must not raise
+    assert version == 0
+    assert model.n_params() > 0

@@ -345,7 +345,11 @@ def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
     target = store.current if target is None else target
     model, tok, dev, meta = load_runtime(str(run_dir), device if device != "cpu" else "auto")
 
-    expected = store.base_fingerprint
+    # The guard exists to stop a patch being applied to weights it was not
+    # trained against. With no patches there is nothing to misapply, and
+    # checking would only force the manifest to track weights that move at
+    # every checkpoint - so it is skipped.
+    expected = store.base_fingerprint if store.versions() else ""
     if expected:
         actual = weights_fingerprint(model)
         if actual != expected:
