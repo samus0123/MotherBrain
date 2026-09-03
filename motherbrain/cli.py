@@ -328,6 +328,10 @@ def cmd_chat(args) -> int:
 
     from motherbrain.tokenizer import EOS_ID
 
+    image = None
+    if getattr(args, "image", None):
+        from motherbrain.vision import load_image
+
     if args.model:
         model, tok, device, version, steps = load_exported(args.model, args.device)
     else:
@@ -355,13 +359,20 @@ def cmd_chat(args) -> int:
 
     for prompt in prompts:
         ids = torch.tensor([tok.encode(prompt, bos=True)], device=device)
+        if getattr(args, "image", None) and image is None:
+            if model.vision is None:
+                print("this model has no vision tower; ignoring --image",
+                      file=sys.stderr)
+            else:
+                image = load_image(args.image, model.cfg.image_size).to(device)
         print(rule)
         t0 = _time.time()
         n = 0
         for token in model.generate(ids, max_new_tokens=args.max_tokens,
                                     temperature=args.temperature, top_k=args.top_k,
                                     top_p=args.top_p, eos_id=EOS_ID,
-                                    repetition_penalty=args.repetition_penalty):
+                                    repetition_penalty=args.repetition_penalty,
+                                    images=image):
             print(tok.decode([token]), end="", flush=True)
             n += 1
         elapsed = _time.time() - t0
@@ -643,6 +654,42 @@ def cmd_console(args) -> int:
         else:
             print()
 
+    def do_see(path: str, prompt: str) -> None:
+        """Look at an image and continue from it."""
+        import torch
+
+        from motherbrain.tokenizer import EOS_ID
+        from motherbrain.vision import load_image
+
+        if model.vision is None:
+            print("this model has no vision tower — it was trained text-only.")
+            print("build one with vision_layers > 0 and train it before "
+                  "asking it to look at anything.\n")
+            return
+
+        target = Path(path).expanduser()
+        if not target.is_file():
+            print(f"no such image: {target}\n")
+            return
+        try:
+            image = load_image(str(target), model.cfg.image_size).to(device)
+        except Exception as exc:
+            print(f"could not read {target}: {exc}\n")
+            return
+
+        print(f"looking at {target} "
+              f"({model.cfg.n_image_tokens} patches) ...")
+        ids = torch.tensor([tok.encode(prompt, bos=True)], device=device)
+        rule = "─" * 60
+        print(rule)
+        for token in model.generate(ids, max_new_tokens=args.max_tokens,
+                                    temperature=args.temperature,
+                                    top_k=args.top_k, top_p=args.top_p,
+                                    repetition_penalty=args.repetition_penalty,
+                                    eos_id=EOS_ID, images=image):
+            print(tok.decode([token]), end="", flush=True)
+        print(f"\n{rule}\n")
+
     def do_run(path: str) -> None:
         """Run a python file and show what it did."""
         import subprocess
@@ -777,9 +824,26 @@ def cmd_console(args) -> int:
               f"(+{v.params_after - v.params_before:,} parameters)")
         print(f"  loss       {v.loss_before:.3f} -> {v.loss_after:.3f} "
               f"on the new material")
-        print(f"  in effect  the model now serving is v{v.version}\n")
-        say(f"applied. now version {v.version}, {human(v.params_after)} parameters")
+        print(f"  in effect  the model now serving is v{v.version}")
         load()
+
+        # The grown model lives in runs/, which is gitignored and does not
+        # survive a fresh clone or a wiped machine. Exporting here is what
+        # makes the ascent durable: models/motherbrain.pt is the committed
+        # artifact, and without this step every applied patch is temporary.
+        target = Path(args.export or shipped_model(args.run)
+                      or (project_root() / "models" / "motherbrain.pt"))
+        try:
+            written = export_model(args.run, target, device=args.device)
+        except Exception as exc:
+            print(f"\n  warning: could not export to {target}: {exc}")
+            print("  the patch is applied but only in runs/, which is not "
+                  "committed.\n")
+        else:
+            print(f"  exported   {target} ({written / 1e6:,.1f} MB)")
+            print(f"             commit it to keep v{v.version}: "
+                  f"git add {target} && git commit\n")
+        say(f"applied. now version {v.version}, {human(v.params_after)} parameters")
 
     def feed_at_startup() -> None:
         """Take information first, then offer to learn it before continuing.
@@ -937,6 +1001,8 @@ def cmd_console(args) -> int:
                 load()
         elif cmd.name == "make":
             do_make(cmd.text, cmd.args.get("path"))
+        elif cmd.name == "see":
+            do_see(cmd.args["path"], cmd.args.get("prompt", ""))
         elif cmd.name == "run":
             do_run(cmd.args["path"])
         elif cmd.name == "ls":
@@ -981,14 +1047,15 @@ def cmd_console(args) -> int:
 # export / import
 
 
-def cmd_export(args) -> int:
+def export_model(run_dir: str, out: "Path | str", fp16: bool = True,
+                 device: str = "cpu", corpus_dir: str | None = None) -> int:
     """Write a compact, self-contained, inference-only model file.
 
-    A training checkpoint carries optimizer state and loads through pickle.
-    An exported model carries fp16 weights, the config and the tokenizer as
-    plain JSON strings, so it is roughly a sixth the size and loads with
+    A training checkpoint carries optimizer state and loads through pickle. An
+    export carries fp16 weights with the config and tokenizer as plain JSON
+    strings, so it is roughly a sixth the size and loads with
     `weights_only=True` - no code execution on load, which matters for a file
-    meant to be shared.
+    meant to be shared. Returns the bytes written.
     """
     import json as _json
 
@@ -996,38 +1063,55 @@ def cmd_export(args) -> int:
 
     from motherbrain.patches import PatchStore
 
-    model, tok, device, version = load_current(args.run, "cpu")
-    store = PatchStore(args.run, create=False)
+    model, tok, _device, version = load_current(run_dir, device)
+    store = PatchStore(run_dir, create=False)
 
     steps = 0
     try:
-        ckpt = torch.load(Path(args.run) / "checkpoint.pt", map_location="cpu",
+        ckpt = torch.load(Path(run_dir) / "checkpoint.pt", map_location="cpu",
                           weights_only=False)
         steps = ckpt.get("step", 0)
     except Exception:
         pass
 
-    weights = {k: v.detach().to(torch.float16 if args.fp16 else torch.float32)
-               for k, v in model.state_dict().items()}
+    tok_path = Path(run_dir) / "tokenizer.json"
+    if not tok_path.exists() and corpus_dir:
+        tok_path = Path(corpus_dir) / "tokenizer.json"
+    if not tok_path.exists():
+        tok_path = Path(DEFAULT_CORPUS) / "tokenizer.json"
+
     payload = {
         "format": "motherbrain-model-v1",
         "config_json": _json.dumps(model.cfg.to_dict()),
-        "tokenizer_json": Path(args.run if (Path(args.run) / "tokenizer.json").exists()
-                               else args.corpus).joinpath("tokenizer.json").read_text(),
-        "weights": weights,
+        "tokenizer_json": tok_path.read_text(),
+        "weights": {k: v.detach().to(torch.float16 if fp16 else torch.float32)
+                    for k, v in model.state_dict().items()},
         "version": int(version),
         "steps": int(steps),
         "base_fingerprint": store.base_fingerprint,
     }
 
-    out = Path(args.out)
+    out = Path(out)
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(payload, out)
-    size = out.stat().st_size / 1e6
-    print(f"exported v{version} ({human(model.n_params())} params, {steps:,} steps)")
-    print(f"  {out}  {size:,.1f} MB  "
+    return out.stat().st_size
+
+
+def cmd_export(args) -> int:
+    """Write the current version out as a shareable model file."""
+    from motherbrain.patches import PatchStore
+
+    model, _tok, _dev, version = load_current(args.run, "cpu")
+    params = model.n_params()
+    del model
+
+    size = export_model(args.run, args.out, fp16=args.fp16,
+                        corpus_dir=args.corpus)
+    steps = PatchStore(args.run, create=False).manifest().get("base_docs", 0)
+    print(f"exported v{version} ({human(params)} params)")
+    print(f"  {args.out}  {size / 1e6:,.1f} MB  "
           f"{'fp16' if args.fp16 else 'fp32'}, inference only")
-    print(f"  load it with:  mb chat --model {out}")
+    print(f"  load it with:  mb chat --model {args.out}")
     return 0
 
 
@@ -1453,6 +1537,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="divide the logits of tokens already seen; small models "
                         "loop without this (1.0 disables)")
     s.add_argument("--model", help="run an exported model file instead of a run dir")
+    s.add_argument("--image", help="an image to look at (needs a vision tower)")
     s.set_defaults(func=cmd_chat)
 
     s = common(sub.add_parser("status", help="what is on disk, and what to run next"))
@@ -1483,6 +1568,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="training steps used by /grow and by updating")
     s.add_argument("--grow", type=int, default=1,
                    help="experts added per layer when updating")
+    s.add_argument("--export",
+                   help="where applying a patch writes the model "
+                        "(default: models/motherbrain.pt)")
     s.add_argument("--mode",
                    choices=["ask", "text", "voice", "feed", "update"],
                    default="ask",

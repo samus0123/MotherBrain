@@ -58,6 +58,15 @@ class ModelConfig:
     tie_embeddings: bool = True
     init_std: float = 0.02
 
+    # Sight. vision_layers == 0 means text only, and the model then behaves
+    # exactly as it did before any of this existed.
+    vision_layers: int = 0
+    vision_width: int = 256
+    vision_heads: int = 4
+    image_size: int = 128
+    patch_size: int = 16
+    vision_mlp_ratio: float = 4.0
+
     # Bookkeeping
     name: str = "micro"
 
@@ -130,6 +139,34 @@ class ModelConfig:
         return 2 * self.d_model  # pre-attention and pre-FFN RMSNorm weights
 
     @property
+    def sees(self) -> bool:
+        return self.vision_layers > 0
+
+    @property
+    def n_image_tokens(self) -> int:
+        """Sequence positions one image occupies."""
+        if not self.sees:
+            return 0
+        return (self.image_size // self.patch_size) ** 2
+
+    @property
+    def vision_params(self) -> int:
+        """The vision tower, counted exactly.
+
+        Patch projection, learned positions, `vision_layers` blocks of
+        attention and MLP, a final norm, and the projection into d_model.
+        """
+        if not self.sees:
+            return 0
+        w = self.vision_width
+        patch = 3 * self.patch_size * self.patch_size * w + w   # conv has a bias
+        positions = self.n_image_tokens * w
+        hidden = int(w * self.vision_mlp_ratio)
+        per_block = (3 * w * w) + (w * w) + (2 * w) + (w * hidden) + (hidden * w)
+        return (patch + positions + self.vision_layers * per_block
+                + w + w * self.d_model)
+
+    @property
     def embedding_params(self) -> int:
         return self.vocab_size * self.d_model
 
@@ -143,7 +180,7 @@ class ModelConfig:
         total += self.n_layers * (self.attn_params_per_layer + self.norm_params_per_layer)
         total += self.n_dense_layers * self.dense_ffn_params_per_layer
         total += self.n_moe_layers * self.moe_ffn_params_per_layer
-        return total
+        return total + self.vision_params
 
     @property
     def n_active_params(self) -> int:
@@ -162,7 +199,8 @@ class ModelConfig:
             router = self.d_model * self.n_experts + self.n_experts
             live = (self.n_experts_per_token + self.n_shared_experts) * self.expert_params
             total += self.n_moe_layers * (router + live)
-        return total
+        # Every parameter of the vision tower runs for every image.
+        return total + self.vision_params
 
     @property
     def n_non_embedding_params(self) -> int:
@@ -199,6 +237,10 @@ class ModelConfig:
                 else " (dense FFN)"
             ),
             f"  vocab / context      {self.vocab_size} / {self.max_seq_len}",
+            (f"  sight                {self.vision_layers} layers x "
+             f"{self.vision_width}, {self.image_size}px in "
+             f"{self.n_image_tokens} patches ({human(self.vision_params)} params)"
+             if self.sees else "  sight                none (text only)"),
             f"  weights (bf16)       {self.memory_bytes() / 1e9:,.1f} GB",
             f"  training footprint   {self.memory_bytes(optimizer=True) / 1e9:,.1f} GB",
         ]
@@ -274,6 +316,18 @@ PRESETS: dict[str, ModelConfig] = {
         n_heads=160, n_kv_heads=16, d_ff=57344,
         n_experts=2048, n_experts_per_token=8, n_shared_experts=4,
         tie_embeddings=False,
+        # Sight, at a scale to match: 448px in 784 patches through a 48-layer
+        # tower. Every parameter of it runs for every image, so unlike the
+        # experts this is not free.
+        vision_layers=48, vision_width=4096, vision_heads=32,
+        image_size=448, patch_size=16,
+    ),
+    # A shape small enough to train here, with sight included from the start.
+    "micro-vision": _preset(
+        "micro-vision", vocab_size=4096, max_seq_len=512, d_model=256, n_layers=6,
+        n_heads=8, n_kv_heads=4, d_ff=704,
+        vision_layers=4, vision_width=256, vision_heads=4,
+        image_size=128, patch_size=16,
     ),
 }
 

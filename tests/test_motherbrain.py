@@ -1364,12 +1364,13 @@ def test_actions_are_refused_over_http(served):
     client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
                                    auto_patch=False))
 
-    for text in ("/run /etc/passwd", "/make a thing", "/ls /", "/cat /etc/passwd"):
+    for text in ("/run /etc/passwd", "/make a thing", "/ls /", "/cat /etc/passwd",
+                 "/see /etc/passwd"):
         result = client.post("/command", json={"text": text}).json()
         assert result["kind"] == "error"
         assert "never over the network" in result["text"]
 
-    assert LOCAL_ONLY == {"make", "run", "ls", "cat"}
+    assert LOCAL_ONLY == {"make", "run", "ls", "cat", "see"}
 
 
 def test_no_fingerprint_check_without_patches(tmp_path):
@@ -1571,3 +1572,137 @@ def test_the_cli_asks_stdout_for_utf8():
 
     source = inspect.getsource(cli.main)
     assert "reconfigure" in source and "utf-8" in source
+
+
+def test_applying_a_patch_exports_the_model(served, tmp_path):
+    """A grown model lives in runs/, which is gitignored.
+
+    Without exporting, every applied patch is temporary: it survives on the
+    machine that made it and vanishes from a fresh clone. The export is what
+    turns an ascent into something committable.
+    """
+    import inspect
+
+    from motherbrain import cli
+
+    # the console's apply flow must call the shared exporter
+    source = inspect.getsource(cli.cmd_console)
+    assert "export_model(" in source, "applying a patch does not export"
+    assert "models" in source and "motherbrain.pt" in source
+
+    # and the exporter has to be one function, not a copy per caller
+    assert callable(cli.export_model)
+    assert "export_model(" in inspect.getsource(cli.cmd_export)
+
+
+def test_export_round_trips_through_the_shared_function(served, tmp_path):
+    from motherbrain.cli import export_model, load_exported
+
+    run, corpus = served
+    out = tmp_path / "exported.pt"
+    size = export_model(str(run), out, corpus_dir=str(corpus))
+    assert size > 0 and out.is_file()
+
+    model, tok, _device, version, steps = load_exported(str(out), "cpu")
+    assert model.n_params() > 0
+    assert tok.vocab_size > 0
+    assert isinstance(version, int) and isinstance(steps, int)
+
+
+# ---- sight ----------------------------------------------------------------
+
+
+def seeing(**kw) -> "ModelConfig":
+    from motherbrain.config import ModelConfig
+
+    base = dict(vocab_size=300, max_seq_len=64, d_model=64, n_layers=2,
+                n_heads=4, n_kv_heads=2, d_ff=128, vision_layers=2,
+                vision_width=64, vision_heads=4, image_size=32, patch_size=8)
+    base.update(kw)
+    return ModelConfig(**base)
+
+
+def test_vision_parameters_are_counted_exactly():
+    """`mb scale` prices configurations too large to build, sight included."""
+    cfg = seeing()
+    model = MotherBrain(cfg)
+    assert model.n_params() == cfg.n_params
+    assert cfg.vision_params > 0
+    assert cfg.n_image_tokens == (32 // 8) ** 2
+
+
+def test_a_text_only_model_is_untouched_by_any_of_this():
+    """Sight is additive. With vision_layers == 0 nothing changes at all."""
+    cfg = seeing(vision_layers=0)
+    model = MotherBrain(cfg)
+    assert model.vision is None
+    assert cfg.vision_params == 0
+    assert cfg.n_image_tokens == 0
+    assert model.n_params() == cfg.n_params
+
+    x = torch.randint(0, 300, (2, 8))
+    logits, loss = model(x, x)
+    assert logits.shape == (2, 8, 300)
+    assert torch.isfinite(loss)
+
+
+def test_an_image_becomes_tokens_the_transformer_reads():
+    cfg = seeing()
+    model = MotherBrain(cfg).eval()
+    x = torch.randint(0, 300, (2, 10))
+    images = torch.randn(2, 3, 32, 32)
+
+    with_image, loss = model(x, x, images=images)
+    without, _ = model(x, x)
+
+    # Visual positions are context, not predictions: the output still lines up
+    # with the text tokens, not text plus patches.
+    assert with_image.shape == without.shape == (2, 10, 300)
+    assert torch.isfinite(loss)
+    assert not torch.allclose(with_image, without)   # the image changed something
+
+
+def test_asking_a_blind_model_to_look_is_an_error():
+    model = MotherBrain(seeing(vision_layers=0))
+    with pytest.raises(ValueError, match="no vision tower"):
+        model(torch.randint(0, 300, (1, 4)), images=torch.randn(1, 3, 32, 32))
+
+
+def test_generation_from_an_image_stays_in_the_vocabulary():
+    torch.manual_seed(0)
+    model = MotherBrain(seeing()).eval()
+    out = list(model.generate(torch.tensor([[1, 2]]), max_new_tokens=6,
+                              images=torch.randn(1, 3, 32, 32), top_k=5))
+    assert len(out) == 6
+    assert all(0 <= t < 300 for t in out)
+
+
+def test_an_image_file_becomes_the_tensor_the_tower_wants(tmp_path):
+    from PIL import Image
+
+    from motherbrain.vision import load_image
+
+    path = tmp_path / "square.png"
+    Image.new("RGB", (61, 47), (30, 60, 200)).save(path)   # deliberately not square
+
+    x = load_image(str(path), 32)
+    assert x.shape == (1, 3, 32, 32)          # resized to what the tower expects
+    assert -1.05 <= x.min() <= x.max() <= 1.05
+
+
+def test_the_patch_grid_must_divide_the_image():
+    from motherbrain.vision import PatchEmbed
+
+    with pytest.raises(ValueError, match="divisible"):
+        PatchEmbed(image_size=30, patch_size=8, width=32)
+
+
+def test_the_largest_preset_can_see():
+    from motherbrain.config import PRESETS
+
+    mother = PRESETS["mother"]
+    assert mother.sees
+    assert mother.vision_params > 1e9
+    assert mother.n_params > 1e15
+    # sight is not free the way experts are: all of it runs for every image
+    assert mother.vision_params < mother.n_active_params

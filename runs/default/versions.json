@@ -1,6 +1,6 @@
 {
-  "current": 2,
-  "head": 2,
+  "current": 3,
+  "head": 3,
   "base_docs": 23904,
   "versions": [
     {
@@ -52,6 +52,31 @@
       "grow_experts": 1,
       "params_before": 28321160,
       "params_after": 37761424
+    },
+    {
+      "version": 3,
+      "patch_id": "c1dce65e",
+      "parent": 2,
+      "created_at": 1788469986.1628335,
+      "doc_start": 23906,
+      "doc_end": 23908,
+      "n_documents": 2,
+      "n_chars": 148,
+      "n_tokens": 38,
+      "steps": 40,
+      "rank": 8,
+      "trainable_params": 9446424,
+      "loss_before": 3.953,
+      "loss_after": 0.3694,
+      "sources": [
+        "console"
+      ],
+      "note": "applied",
+      "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3",
+      "mode": "grow",
+      "grow_experts": 1,
+      "params_before": 37761424,
+      "params_after": 47201688
     }
   ],
   "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3"

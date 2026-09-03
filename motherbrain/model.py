@@ -223,6 +223,14 @@ class MotherBrain(nn.Module):
         if cfg.tie_embeddings:
             self.lm_head.weight = self.embed.weight
 
+        # Sight is optional and additive: with vision_layers == 0 there is no
+        # tower, no extra parameters, and the forward pass is what it was.
+        self.vision = None
+        if cfg.vision_layers > 0:
+            from motherbrain.vision import VisionTower
+
+            self.vision = VisionTower(cfg)
+
         self.apply(self._init_weights)
         # Scale down the residual-path projections so activations don't grow
         # with depth (the GPT-2 initialisation trick).
@@ -270,14 +278,38 @@ class MotherBrain(nn.Module):
     # ---- forward -----------------------------------------------------------
 
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None,
-                caches: list | None = None, offset: int = 0):
+                caches: list | None = None, offset: int = 0,
+                images: torch.Tensor | None = None):
+        """Run the model. `images` prepends visual tokens to the sequence.
+
+        Once an image has been through the vision tower it is a run of vectors
+        in the model's own dimensions, indistinguishable from word embeddings,
+        and the transformer treats it as text that happens to come first.
+        """
         b, t = idx.shape
         x = self.embed(idx)
-        cos, sin = self._rope(t, offset, x.device, torch.float32)
+
+        n_visual = 0
+        if images is not None:
+            if self.vision is None:
+                raise ValueError(
+                    "this model has no vision tower; build it with "
+                    "vision_layers > 0")
+            visual = self.vision(images.to(x.dtype))
+            if visual.shape[0] != b:
+                visual = visual.expand(b, -1, -1)
+            n_visual = visual.shape[1]
+            x = torch.cat([visual, x], dim=1)
+
+        cos, sin = self._rope(x.shape[1], offset, x.device, torch.float32)
 
         for i, block in enumerate(self.blocks):
             x = block(x, cos, sin, caches[i] if caches is not None else None)
         x = self.norm(x)
+
+        # The visual positions were context, not something to predict.
+        if n_visual:
+            x = x[:, n_visual:, :]
 
         if targets is None:
             # Only the last position matters when sampling.
@@ -330,9 +362,15 @@ class MotherBrain(nn.Module):
     def generate(self, idx: torch.Tensor, max_new_tokens: int = 128,
                  temperature: float = 0.8, top_k: int | None = 40,
                  top_p: float | None = 0.95, repetition_penalty: float = 1.0,
-                 eos_id: int | None = None, use_cache: bool = True):
-        """Autoregressive sampling. Yields one token id at a time."""
+                 eos_id: int | None = None, use_cache: bool = True,
+                 images: torch.Tensor | None = None):
+        """Autoregressive sampling. Yields one token id at a time.
+
+        An image is encoded once, on the first pass, and lives in the KV cache
+        from then on - re-encoding it for every token would be wasted work.
+        """
         self.eval()
+        # Caching and images interact, and the first pass must carry both.
         caches = [{} for _ in self.blocks] if use_cache else None
         offset = 0
         cur = idx
@@ -342,8 +380,11 @@ class MotherBrain(nn.Module):
                 else cur[:, -self.cfg.max_seq_len:]
             if caches is not None and offset > 0:
                 window = cur[:, -1:]
-            logits, _ = self(window, caches=caches, offset=offset)
-            offset += window.shape[1]
+            first = offset == 0
+            logits, _ = self(window, caches=caches, offset=offset,
+                             images=images if first else None)
+            offset += window.shape[1] + (
+                self.vision.n_tokens if (first and images is not None) else 0)
             logits = logits[:, -1, :].float()
 
             if repetition_penalty != 1.0:
