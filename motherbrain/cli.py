@@ -328,6 +328,10 @@ def cmd_chat(args) -> int:
 
     from motherbrain.tokenizer import EOS_ID
 
+    image = None
+    if getattr(args, "image", None):
+        from motherbrain.vision import load_image
+
     if args.model:
         model, tok, device, version, steps = load_exported(args.model, args.device)
     else:
@@ -355,13 +359,20 @@ def cmd_chat(args) -> int:
 
     for prompt in prompts:
         ids = torch.tensor([tok.encode(prompt, bos=True)], device=device)
+        if getattr(args, "image", None) and image is None:
+            if model.vision is None:
+                print("this model has no vision tower; ignoring --image",
+                      file=sys.stderr)
+            else:
+                image = load_image(args.image, model.cfg.image_size).to(device)
         print(rule)
         t0 = _time.time()
         n = 0
         for token in model.generate(ids, max_new_tokens=args.max_tokens,
                                     temperature=args.temperature, top_k=args.top_k,
                                     top_p=args.top_p, eos_id=EOS_ID,
-                                    repetition_penalty=args.repetition_penalty):
+                                    repetition_penalty=args.repetition_penalty,
+                                    images=image):
             print(tok.decode([token]), end="", flush=True)
             n += 1
         elapsed = _time.time() - t0
@@ -642,6 +653,42 @@ def cmd_console(args) -> int:
             do_run(str(target))
         else:
             print()
+
+    def do_see(path: str, prompt: str) -> None:
+        """Look at an image and continue from it."""
+        import torch
+
+        from motherbrain.tokenizer import EOS_ID
+        from motherbrain.vision import load_image
+
+        if model.vision is None:
+            print("this model has no vision tower — it was trained text-only.")
+            print("build one with vision_layers > 0 and train it before "
+                  "asking it to look at anything.\n")
+            return
+
+        target = Path(path).expanduser()
+        if not target.is_file():
+            print(f"no such image: {target}\n")
+            return
+        try:
+            image = load_image(str(target), model.cfg.image_size).to(device)
+        except Exception as exc:
+            print(f"could not read {target}: {exc}\n")
+            return
+
+        print(f"looking at {target} "
+              f"({model.cfg.n_image_tokens} patches) ...")
+        ids = torch.tensor([tok.encode(prompt, bos=True)], device=device)
+        rule = "─" * 60
+        print(rule)
+        for token in model.generate(ids, max_new_tokens=args.max_tokens,
+                                    temperature=args.temperature,
+                                    top_k=args.top_k, top_p=args.top_p,
+                                    repetition_penalty=args.repetition_penalty,
+                                    eos_id=EOS_ID, images=image):
+            print(tok.decode([token]), end="", flush=True)
+        print(f"\n{rule}\n")
 
     def do_run(path: str) -> None:
         """Run a python file and show what it did."""
@@ -954,6 +1001,8 @@ def cmd_console(args) -> int:
                 load()
         elif cmd.name == "make":
             do_make(cmd.text, cmd.args.get("path"))
+        elif cmd.name == "see":
+            do_see(cmd.args["path"], cmd.args.get("prompt", ""))
         elif cmd.name == "run":
             do_run(cmd.args["path"])
         elif cmd.name == "ls":
@@ -1488,6 +1537,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="divide the logits of tokens already seen; small models "
                         "loop without this (1.0 disables)")
     s.add_argument("--model", help="run an exported model file instead of a run dir")
+    s.add_argument("--image", help="an image to look at (needs a vision tower)")
     s.set_defaults(func=cmd_chat)
 
     s = common(sub.add_parser("status", help="what is on disk, and what to run next"))

@@ -433,6 +433,52 @@ see below.
 Feeding stores text. *Training* is what absorbs it; with auto-patch on, the
 second follows the first by itself.
 
+## Sight
+
+MotherBrain reads images as well as text. The transformer consumes a sequence
+of vectors: text becomes vectors by looking words up in a table, and an image
+becomes vectors by cutting it into square patches and projecting each one.
+After that the model cannot tell them apart — one sequence, two sources.
+
+```bash
+mb chat --image photo.png --prompt "the picture shows"
+```
+
+or in the console:
+
+```
+> /see photo.png what is in it
+looking at photo.png (64 patches) ...
+```
+
+The encoder is its own small vision transformer rather than extra layers of
+the language model, so an image is understood before it is handed over. Its
+parameters are counted exactly, like everything else:
+
+```
+  sight                48 layers x 4096, 448px in 784 patches (9.754B params)
+```
+
+Two properties worth stating:
+
+* **Sight is additive.** With `vision_layers = 0` there is no tower, no extra
+  parameters, and the forward pass is exactly what it was. A text-only model is
+  untouched by any of this, and a test asserts it.
+* **Sight is not free the way experts are.** Only `n_experts_per_token` experts
+  run for a token, but *every* parameter of the vision tower runs for every
+  image. Growing the experts costs nothing per token; growing the eyes costs
+  the full amount.
+
+The `mother` preset now sees at a matching scale — 448px in 784 patches through
+a 48-layer tower, 9.75B parameters of sight inside 1157T total. `micro-vision`
+is the same idea small enough to train here.
+
+**The honest gap:** the architecture is built and tested, and the committed
+model has no vision tower because training one needs image-text pairs, which
+this project has none of. `mb chat --image` against a text-only model says so
+rather than pretending. Feeding it paired data and training the tower is real
+work that has not been done.
+
 ## Growing as it learns
 
 By default every patch makes the model **larger**. New experts are appended to
@@ -857,6 +903,7 @@ motherbrain/
   security.py    path confinement, auth, rate limiting, exposure checks
   commands.py    parsing what you tell it to do
   voice.py       speech backends for the terminal, and what to say without one
+  vision.py      the image encoder, and how a picture becomes tokens
   cli.py         the mb command line
 configs/         mother.json, and the model actually being trained
 tests/           49 tests

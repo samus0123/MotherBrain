@@ -50,16 +50,17 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "run": ("run", "execute"),
     "ls": ("ls", "list files", "what files"),
     "cat": ("cat", "show", "show me", "open"),
+    "see": ("see", "look at", "describe", "what is this"),
 }
 
 # Actions that touch the filesystem or run code. They are available in the
 # terminal, where you already have a shell, and refused over HTTP, where they
 # would be remote code execution against whoever is serving the model.
-LOCAL_ONLY = {"make", "run", "ls", "cat"}
+LOCAL_ONLY = {"make", "run", "ls", "cat", "see"}
 
 # Commands that consume the rest of the line as their payload.
 TAKES_TEXT = {"learn", "checkout", "train", "grow", "export", "scale",
-              "make", "run", "cat"}
+              "make", "run", "cat", "see"}
 
 
 def _match_alias(lowered: str) -> tuple[str, str] | None:
@@ -151,6 +152,16 @@ def _with_args(name: str, rest: str, raw: str) -> Command:
             rest, target = rest.strip(), target.strip()
         args["path"] = target
 
+    elif name == "see":
+        if not rest:
+            return Command("error", raw,
+                           {"message": "see needs an image, e.g. "
+                                       "/see photo.png what is in it"})
+        # "/see photo.png a picture of" - the file, then an optional prompt.
+        head, _, tail = rest.partition(" ")
+        args["path"] = head.strip()
+        args["prompt"] = tail.strip()
+
     elif name in ("run", "cat"):
         if not rest:
             return Command("error", raw,
@@ -181,6 +192,7 @@ Actions — terminal only, never over the network:
   /run <file>            run a python file and show its output
   /ls [dir]              list files
   /cat <file>            show a file
+  /see <image> [prompt]  look at an image and continue from it
 
 Plain English works for the same things: "learn that ...", "grow", "how big
 are you", "what version are you", "list versions". The parsing is a fixed

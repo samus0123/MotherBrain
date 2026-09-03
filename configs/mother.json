@@ -18,5 +18,11 @@
   "rope_theta": 10000.0,
   "tie_embeddings": false,
   "init_std": 0.02,
+  "vision_layers": 48,
+  "vision_width": 4096,
+  "vision_heads": 32,
+  "image_size": 448,
+  "patch_size": 16,
+  "vision_mlp_ratio": 4.0,
   "name": "mother"
 }
