@@ -1571,3 +1571,38 @@ def test_the_cli_asks_stdout_for_utf8():
 
     source = inspect.getsource(cli.main)
     assert "reconfigure" in source and "utf-8" in source
+
+
+def test_applying_a_patch_exports_the_model(served, tmp_path):
+    """A grown model lives in runs/, which is gitignored.
+
+    Without exporting, every applied patch is temporary: it survives on the
+    machine that made it and vanishes from a fresh clone. The export is what
+    turns an ascent into something committable.
+    """
+    import inspect
+
+    from motherbrain import cli
+
+    # the console's apply flow must call the shared exporter
+    source = inspect.getsource(cli.cmd_console)
+    assert "export_model(" in source, "applying a patch does not export"
+    assert "models" in source and "motherbrain.pt" in source
+
+    # and the exporter has to be one function, not a copy per caller
+    assert callable(cli.export_model)
+    assert "export_model(" in inspect.getsource(cli.cmd_export)
+
+
+def test_export_round_trips_through_the_shared_function(served, tmp_path):
+    from motherbrain.cli import export_model, load_exported
+
+    run, corpus = served
+    out = tmp_path / "exported.pt"
+    size = export_model(str(run), out, corpus_dir=str(corpus))
+    assert size > 0 and out.is_file()
+
+    model, tok, _device, version, steps = load_exported(str(out), "cpu")
+    assert model.n_params() > 0
+    assert tok.vocab_size > 0
+    assert isinstance(version, int) and isinstance(steps, int)

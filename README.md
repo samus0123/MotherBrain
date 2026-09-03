@@ -176,6 +176,20 @@ v1 -> v2
 
 Learning and applying are separate steps because they are separate things.
 
+Applying also **exports the model**, because a grown model otherwise lives only
+in `runs/`, which is gitignored and absent from a fresh clone. The export is
+what makes an ascent durable:
+
+```
+  in effect  the model now serving is v3
+  exported   models/motherbrain.pt (88.4 MB)
+             commit it to keep v3: git add models/motherbrain.pt && git commit
+```
+
+If the export fails it says so and notes that the patch exists only in `runs/`,
+rather than leaving the impression it was saved. `--export <path>` chooses a
+different destination.
+
 ## Text, voice, or teach it something
 
 Both consoles ask how you want to start: **text**, **voice**, or **teach it**
