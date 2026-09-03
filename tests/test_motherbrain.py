@@ -1171,27 +1171,27 @@ def test_opening_menu_lists_the_four_things_you_can_do(monkeypatch):
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(speak="espeak", listen="sr"))
-    for answer, expected in [("1", "tell"), ("2", "feed"), ("3", "update"),
-                             ("", "tell"), ("tell", "tell"), ("teach", "feed"),
-                             ("update", "update"), ("9", "tell")]:
+    for answer, expected in [("1", "text"), ("2", "voice"), ("3", "learn"),
+                             ("4", "apply"), ("", "text"), ("teach", "learn"),
+                             ("patch", "apply"), ("9", "text")]:
         monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
         assert voice.choose_start()[0] == expected
 
 
-def test_voice_is_only_offered_when_it_can_be_honoured(monkeypatch, capsys):
-    """Only option 1 involves talking, so only it asks how."""
+def test_voice_falls_back_when_it_cannot_be_honoured(monkeypatch, capsys):
+    """Choosing option 2 on a machine with no speech has to say so."""
     import motherbrain.voice as voice
 
-    cap = voice.Capability(reason="no engine")
-    monkeypatch.setattr("builtins.input", lambda _: "voice")
-    assert voice.choose_input(cap) == "text"           # cannot be honoured
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(reason="no engine"))
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    assert voice.choose_start()[0] == "text"
     assert "unavailable" in capsys.readouterr().out
 
-    able = voice.Capability(speak="espeak", listen="sr")
-    monkeypatch.setattr("builtins.input", lambda _: "voice")
-    assert voice.choose_input(able) == "voice"
-    monkeypatch.setattr("builtins.input", lambda _: "")
-    assert voice.choose_input(able) == "text"          # default
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    monkeypatch.setattr("builtins.input", lambda _: "2")
+    assert voice.choose_start()[0] == "voice"
 
 
 def test_menu_survives_no_terminal(monkeypatch):
@@ -1203,7 +1203,7 @@ def test_menu_survives_no_terminal(monkeypatch):
         raise OSError("no stdin")
 
     monkeypatch.setattr("builtins.input", no_terminal)
-    assert voice.choose_start()[0] == "tell"
+    assert voice.choose_start()[0] == "text"
 
 
 def test_web_menu_matches_the_terminal_menu():
@@ -1212,8 +1212,8 @@ def test_web_menu_matches_the_terminal_menu():
     assert "What would you like to do?" in UI_HTML
     for mode in ("text", "voice", "feed", "update"):
         assert f'data-mode="{mode}"' in UI_HTML
-    for label in ("Tell MotherBrain what to do", "Feed it new information",
-                  "Update MotherBrain"):
+    for label in ("Tell me what to do", "Learn new information",
+                  "Apply it as a patch"):
         assert label in UI_HTML
 
 
@@ -1221,7 +1221,7 @@ def test_console_page_offers_feeding_first():
     from motherbrain.server import UI_HTML
 
     assert 'data-mode="feed"' in UI_HTML
-    assert "Feed it new information" in UI_HTML
+    assert "Learn new information" in UI_HTML
     # the distinction people miss: storing text is not the same as learning it
     assert "learning is what puts it in the weights" in UI_HTML
     assert "learn it now (grows the model)" in UI_HTML

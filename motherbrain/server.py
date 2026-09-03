@@ -709,15 +709,14 @@ UI_HTML = """<!doctype html>
   <h2>What would you like to do?</h2>
   <div class="choices">
     <button class="choice" data-mode="text">
-      <b>1 · Tell MotherBrain what to do</b><span>by text</span></button>
+      <b>1 · Tell me what to do</b><span>by text</span></button>
     <button class="choice" id="voice-choice" data-mode="voice">
-      <b>1 · Tell MotherBrain what to do</b>
-      <span id="voice-note">by voice</span></button>
+      <b>2 · Tell me what to do</b><span id="voice-note">by voice</span></button>
     <button class="choice" data-mode="feed">
-      <b>2 · Feed it new information</b><span>stored until you update</span></button>
+      <b>3 · Learn new information</b><span>stored, not yet in the model</span></button>
     <button class="choice" data-mode="update">
-      <b>3 · Update MotherBrain</b>
-      <span>learn what was fed, ascend a version, grow</span></button>
+      <b>4 · Apply it as a patch</b>
+      <span>ascend to the next version, and grow</span></button>
   </div>
   <div class="why" id="voice-why"></div>
 
@@ -1071,7 +1070,8 @@ $('progwrite').onclick = async () => {
 // information is in the weights rather than only on disk.
 async function doUpdate() {
   setMode('text');
-  add('Updating: learning what has been fed, and ascending a version.', 'muted');
+  add('Applying what was learned as a patch: this grows the model and '
+      + 'ascends to the next version.', 'muted');
   try {
     const r = await fetch('/command', {method:'POST', headers:H(),
                                        body: JSON.stringify({text:'/grow'})});

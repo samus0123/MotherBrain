@@ -140,45 +140,41 @@ mb serve            # 127.0.0.1 by default
 
 ## The opening menu
 
-Starting MotherBrain shows three things to do:
-
 ```
 What would you like to do?
 
-  1  Tell MotherBrain what to do — by voice or by text
-  2  Feed MotherBrain new information
-  3  Update MotherBrain
+  1  Tell me what to do by text
+  2  Tell me what to do by voice
+  3  Learn new information
+  4  Apply the learned information as a patch (ascend to the next version)
 
-choose [1-3, default 1]
+choose [1-4, default 1]
 ```
 
-The browser console at `/` opens on the same three.
+The browser console at `/` opens on the same four.
 
-**1 — Tell it what to do.** Asks voice or text, then drops you at the prompt
-where you can write prompts for it to continue, or run commands like `/make`,
-`/run`, `/versions`. Voice is only offered when the machine can provide it.
+**1 and 2 — tell it what to do**, typed or spoken. Both land at the same
+prompt: write text for the model to continue, or run commands like `/make`,
+`/run`, `/versions`. Option 2 falls back to text, with the reason, on a machine
+that cannot speak or listen.
 
-**2 — Feed it new information.** Type, paste, or give a path. This *stores*
-the text; it changes nothing about the model yet.
+**3 — Learn new information.** Type, paste, or give a path. This *stores* it.
+The model is unchanged, and the console says so rather than leaving the
+impression that feeding was enough.
 
-**3 — Update MotherBrain.** Puts what was fed into effect: trains it into new
-experts, grows the model, and ascends to the next version.
+**4 — Apply it as a patch.** This is where text on disk becomes part of the
+model: new experts are trained on it, the parameter count grows, and the
+version ascends.
 
 ```
-1 document(s) fed but not yet learned.
-Learning them grows the model from 18.88M and ascends to v1.
-go ahead? [Y/n] y
-
-v0 -> v1
-  learned    1 document(s), 22 tokens
-  grew       18.88M -> 28.32M (+9,440,264 parameters)
-  loss       3.225 -> 0.083 on the new material
-  in effect  the model now serving is v1
+v1 -> v2
+  applied    1 document(s), 20 tokens
+  grew       28.32M -> 37.76M (+9,440,264 parameters)
+  loss       3.685 -> 0.090 on the new material
+  in effect  the model now serving is v2
 ```
 
-Feeding and updating are deliberately separate, because they are different
-things: text on disk, and text in the weights. Option 3 is what moves it from
-one to the other.
+Learning and applying are separate steps because they are separate things.
 
 ## Text, voice, or teach it something
 

@@ -117,66 +117,50 @@ def listen(cap: Capability | None = None, timeout: float = 10.0) -> str | None:
 
 MENU = """What would you like to do?
 
-  1  Tell MotherBrain what to do — by voice or by text
-  2  Feed MotherBrain new information
-  3  Update MotherBrain
+  1  Tell me what to do by text
+  2  Tell me what to do by voice
+  3  Learn new information
+  4  Apply the learned information as a patch (ascend to the next version)
 """
 
 
-def choose_start(default: str = "tell") -> tuple[str, Capability]:
+def choose_start(default: str = "text") -> tuple[str, Capability]:
     """Show the opening menu and return the chosen action.
 
-    Returns "tell", "feed" or "update", with the detected speech capability.
-    Choosing to tell it something asks voice or text next, and only offers
-    voice when this machine can actually provide it - presenting a choice that
-    cannot be honoured is worse than explaining why it is missing.
+    Returns "text", "voice", "learn" or "apply", with the detected speech
+    capability. Choosing voice on a machine that cannot speak or listen falls
+    back to text and says why: honouring the choice matters more than
+    pretending to.
     """
     cap = detect()
     print(MENU)
 
     try:
-        answer = input("choose [1-3, default 1] ").strip().lower()
+        answer = input("choose [1-4, default 1] ").strip().lower()
     except (EOFError, KeyboardInterrupt, OSError):
         # Not interactive - piped input, a scheduled run, no terminal at all.
         print()
         return default, cap
 
     choice = {
-        "1": "tell", "2": "feed", "3": "update",
-        "tell": "tell", "talk": "tell", "say": "tell",
-        "feed": "feed", "teach": "feed", "learn": "feed",
-        "update": "update", "upgrade": "update", "grow": "update",
+        "1": "text", "2": "voice", "3": "learn", "4": "apply",
+        "text": "text", "type": "text",
+        "voice": "voice", "speak": "voice", "talk": "voice",
+        "learn": "learn", "feed": "learn", "teach": "learn",
+        "apply": "apply", "patch": "apply", "grow": "apply",
+        "update": "apply", "ascend": "apply",
         "": default,
     }.get(answer, default)
+
+    if choice == "voice" and not cap.any:
+        print(f"voice is unavailable here: {cap.reason}")
+        print("using text instead.")
+        choice = "text"
+    elif choice == "voice" and not cap.listen:
+        print(f"speech out only ({cap.speak}); no dictation here, so replies "
+              f"are read aloud while you type.")
     print()
     return choice, cap
-
-
-def choose_input(cap: Capability, default: str = "text") -> str:
-    """Voice or text, asked only when voice is actually available."""
-    if not cap.any:
-        print(f"voice is unavailable here: {cap.reason}")
-        print("using text.\n")
-        return "text"
-
-    parts = []
-    if cap.listen:
-        parts.append(f"speech in ({cap.listen})")
-    if cap.speak:
-        parts.append(f"speech out ({cap.speak})")
-    print(f"voice available: {', '.join(parts)}")
-    if not cap.listen:
-        print("  (no dictation here, so voice reads replies aloud "
-              "while you type)")
-
-    try:
-        answer = input(f"voice or text? [{default}] ").strip().lower()
-    except (EOFError, KeyboardInterrupt, OSError):
-        print()
-        return default
-    mode = "voice" if answer.startswith("v") else "text"
-    print(f"using {mode}.\n")
-    return mode
 
 
 def choose_mode(default: str = "text") -> tuple[str, Capability]:
