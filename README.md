@@ -644,22 +644,24 @@ What is still on you:
 * Rate limiting is per process and in memory; it is not a substitute for a
   real gateway if you are genuinely exposed to the internet.
 
-## Running it on Windows 11
+## Running it on Windows
 
-Install Python from python.org (tick **Add python.exe to PATH**), then in
-PowerShell:
+Windows 10 and 11 both work; nothing here is version-specific. Install Python
+from python.org (tick **Add python.exe to PATH**), then in PowerShell:
 
 ```powershell
-git clone -b claude/massive-parameter-llm-mcs613 https://github.com/samus0123/MotherBrain
+git clone https://github.com/samus0123/MotherBrain
 cd MotherBrain
 powershell -ExecutionPolicy Bypass -File scripts\start.ps1
 ```
 
-`start.ps1` is the Windows twin of `start.sh`: it checks out the branch if the
-code is missing, creates `.venv`, installs, and launches — stopping at whichever
-step fails and naming it.
+`start.ps1` is the Windows twin of `start.sh`: it fetches the code if missing,
+finds a Python (`py -3`, `python`, `python3`), creates `.venv`, installs, and
+launches — stopping at whichever step fails and naming it. If it will not
+start, `scripts\doctor.ps1` reports the branch, files, Python, virtual
+environment and dependencies in one go.
 
-By hand, if you prefer:
+By hand:
 
 ```powershell
 python -m venv .venv
@@ -667,11 +669,32 @@ python -m venv .venv
 .venv\Scripts\mb console
 ```
 
-Note `\Scripts\` rather than `/bin/` — that is the only path difference from
-Linux. PyTorch's default Windows wheel is CPU-only, so there is no 2.5GB CUDA
-download to avoid here.
+`\Scripts\` rather than `/bin/` is the only path difference from Linux.
 
-WSL works too, and there the Linux instructions apply unchanged.
+**Voice works with nothing installed.** Windows ships System.Speech, which
+MotherBrain reaches through PowerShell, so option 2 reads replies aloud out of
+the box. Dictation still needs `pip install SpeechRecognition PyAudio`; the
+browser console at `/` has both through Chrome or Edge and needs neither.
+
+**Use Windows Terminal** rather than the old `cmd.exe` window. The console asks
+for UTF-8 so it will not crash on the legacy code page, but box-drawing
+characters may render as `?` there.
+
+**PyTorch's default Windows wheel is CPU-only**, about 200MB, so the 2.5GB
+CUDA download that Linux x86_64 pulls is not a concern and no `MB_CPU_ONLY`
+flag is needed.
+
+**`mb cert` needs openssl**, which Windows does not ship. Either
+`winget install ShiningLight.OpenSSL`, or use Git Bash which includes it, or
+supply your own certificate. The command says so rather than failing opaquely.
+Note also that the private key it writes cannot be locked down with `chmod` on
+Windows — its permissions are whatever the folder grants.
+
+**WSL** works too, and there the Linux instructions apply unchanged.
+
+I have no Windows machine, so unlike the Linux path these are not verified end
+to end: the encoding fix and the speech detection are covered by tests, and the
+PowerShell scripts are written carefully but untested on real Windows.
 
 ## Running it on Termux (Android)
 

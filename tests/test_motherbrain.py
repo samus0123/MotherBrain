@@ -1511,3 +1511,63 @@ def test_record_separates_trained_from_configured(capsys):
     out = capsys.readouterr().out
     assert "trained" in out and "specified" in out
     assert "nobody has trained it" in out
+
+
+# ---- windows --------------------------------------------------------------
+
+
+def test_windows_gets_speech_without_installing_anything(monkeypatch):
+    """Windows ships System.Speech, so voice should work there out of the box.
+
+    Unix has no equivalent guarantee, which is why the other backends are
+    looked for rather than assumed.
+    """
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice.sys, "platform", "win32")
+    monkeypatch.setattr(voice.shutil, "which",
+                        lambda name: "C:\\\\powershell" if name == "powershell" else None)
+    monkeypatch.setattr(voice, "_module", lambda name: False)
+    assert voice.detect().speak == "powershell"
+
+    # and when it is somehow absent, the reason names the right thing
+    monkeypatch.setattr(voice.shutil, "which", lambda name: None)
+    cap = voice.detect()
+    assert cap.speak is None
+    assert "powershell" in cap.reason
+
+
+def test_unix_speech_detection_is_unchanged(monkeypatch):
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice.sys, "platform", "linux")
+    monkeypatch.setattr(voice.shutil, "which",
+                        lambda name: "/usr/bin/espeak-ng"
+                        if name == "espeak-ng" else None)
+    monkeypatch.setattr(voice, "_module", lambda name: False)
+    assert voice.detect().speak == "espeak-ng"
+
+
+def test_windows_launcher_and_doctor_exist():
+    """The setup scripts are POSIX shell; Windows needs its own."""
+    root = Path(__file__).resolve().parent.parent
+    for name in ("start.ps1", "doctor.ps1", "start.sh", "doctor.sh"):
+        assert (root / "scripts" / name).is_file(), f"scripts/{name} is missing"
+
+    launcher = (root / "scripts" / "start.ps1").read_text()
+    assert ".venv\\Scripts" in launcher      # not /bin/, which does not exist there
+    assert "motherbrain.cli" in launcher     # falls back to the module
+
+
+def test_the_cli_asks_stdout_for_utf8():
+    """A Windows console cannot encode the rules this CLI prints.
+
+    Without this it raises UnicodeEncodeError partway through a reply, dying
+    mid-sentence rather than anywhere diagnosable.
+    """
+    import inspect
+
+    from motherbrain import cli
+
+    source = inspect.getsource(cli.main)
+    assert "reconfigure" in source and "utf-8" in source
