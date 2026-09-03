@@ -1296,21 +1296,36 @@ def cmd_cert(args) -> int:
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True)
     except FileNotFoundError:
-        print("error: openssl not found; install it or supply your own "
-              "certificate to `mb serve --tls-cert/--tls-key`", file=sys.stderr)
+        print("error: openssl not found.", file=sys.stderr)
+        if sys.platform == "win32":
+            print("  Windows does not ship it. Options:\n"
+                  "    winget install ShiningLight.OpenSSL\n"
+                  "    or use Git Bash, which includes openssl\n"
+                  "    or supply your own certificate to "
+                  "`mb serve --tls-cert/--tls-key`", file=sys.stderr)
+        else:
+            print("  install it, or supply your own certificate to "
+                  "`mb serve --tls-cert/--tls-key`", file=sys.stderr)
         return 1
     if proc.returncode != 0:
         print(f"error: openssl failed:\n{proc.stderr.strip()}", file=sys.stderr)
         return 1
 
-    key_path.chmod(0o600)  # a private key readable by others is not private
+    # A private key readable by others is not private. chmod is a no-op on
+    # Windows, where NTFS permissions are inherited instead, so say so rather
+    # than implying the file is locked down when it is not.
+    key_path.chmod(0o600)
     fp = subprocess.run(
         ["openssl", "x509", "-in", str(cert_path), "-noout", "-fingerprint", "-sha256"],
         capture_output=True, text=True,
     ).stdout.strip()
 
     print(f"certificate  {cert_path}")
-    print(f"private key  {key_path}  (mode 600, never commit this)")
+    if sys.platform == "win32":
+        print(f"private key  {key_path}  (never commit this; on Windows its "
+              f"permissions are whatever the folder grants)")
+    else:
+        print(f"private key  {key_path}  (mode 600, never commit this)")
     print(f"valid for    {args.days} days")
     print(f"names        {', '.join(names)}")
     print(f"{fp.lower()}")

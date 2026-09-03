@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 
 
@@ -41,14 +42,22 @@ class Capability:
 
 
 def detect() -> Capability:
-    """Find a speech backend without installing anything."""
+    """Find a speech backend without installing anything.
+
+    Windows ships one: System.Speech, reachable through PowerShell, so voice
+    works there with nothing installed. Unix has no such guarantee, which is
+    why the others are looked for rather than assumed.
+    """
     cap = Capability()
 
-    for binary, name in (("say", "say"), ("espeak-ng", "espeak-ng"),
-                         ("espeak", "espeak"), ("spd-say", "spd-say")):
-        if shutil.which(binary):
-            cap.speak = name
-            break
+    if sys.platform == "win32" and shutil.which("powershell"):
+        cap.speak = "powershell"
+    if cap.speak is None:
+        for binary, name in (("say", "say"), ("espeak-ng", "espeak-ng"),
+                             ("espeak", "espeak"), ("spd-say", "spd-say")):
+            if shutil.which(binary):
+                cap.speak = name
+                break
     if cap.speak is None and _module("pyttsx3"):
         cap.speak = "pyttsx3"
 
@@ -57,7 +66,9 @@ def detect() -> Capability:
 
     missing = []
     if cap.speak is None:
-        missing.append("no speech synthesis (install espeak-ng, or pyttsx3)")
+        missing.append("no speech synthesis (install espeak-ng, or pyttsx3)"
+                       if sys.platform != "win32" else
+                       "no speech synthesis (powershell not found)")
     if cap.listen is None:
         missing.append("no speech recognition "
                        "(pip install SpeechRecognition PyAudio)")
@@ -80,6 +91,17 @@ def speak(text: str, cap: Capability | None = None) -> bool:
             engine.say(trimmed)
             engine.runAndWait()
             return True
+        if cap.speak == "powershell":
+            # System.Speech is part of Windows; the text is passed on stdin
+            # rather than the command line so quotes in it cannot break out.
+            script = ("Add-Type -AssemblyName System.Speech; "
+                      "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
+                      "$s.Speak([Console]::In.ReadToEnd())")
+            subprocess.run(["powershell", "-NoProfile", "-Command", script],
+                           input=trimmed, text=True, check=False,
+                           capture_output=True, timeout=60)
+            return True
+
         args = {
             "say": ["say", trimmed],
             "espeak-ng": ["espeak-ng", trimmed],
