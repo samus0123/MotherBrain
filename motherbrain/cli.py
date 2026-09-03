@@ -530,8 +530,7 @@ def cmd_console(args) -> int:
     from motherbrain.patches import PatchConfig, PatchStore, create_patch
     from motherbrain.tokenizer import EOS_ID
 
-    from motherbrain.voice import (Capability, choose_input, choose_start,
-                                   detect, speak)
+    from motherbrain.voice import Capability, choose_start, detect, speak
 
     model = tok = device = None
     version = 0
@@ -555,8 +554,7 @@ def cmd_console(args) -> int:
 
     if args.mode == "ask":
         action, cap = choose_start()
-        # Only the first option involves talking, so only it asks how.
-        mode = choose_input(cap) if action == "tell" else "text"
+        mode = "voice" if action == "voice" else "text"
     else:
         action = "console"
         action = args.mode if args.mode in ("feed", "update") else "console"
@@ -692,50 +690,95 @@ def cmd_console(args) -> int:
         print(f"\nwriting ({args.max_tokens} tokens)...\n")
         do_make(want, None)
 
-    def update_motherbrain() -> None:
-        """Put fed information into effect: learn it, and ascend a version.
+    def learn_new_information() -> None:
+        """Option 3: take information in. It is stored, not yet in effect.
 
-        Feeding stores text; it changes nothing about the model until this
-        runs. Updating trains the pending documents into new experts, which
-        makes the model larger and mints the next version - the information is
-        in the weights afterwards, not merely on disk.
+        Storing changes nothing about the model. Applying it (option 4) is
+        what trains it into the weights, and this says so rather than leaving
+        the impression that feeding was enough.
+        """
+        print("What should MotherBrain learn?")
+        print("Type or paste it. A file or directory path works too.")
+        print("Blank line when you are done.\n")
+
+        collected: list[str] = []
+        while True:
+            try:
+                entry = read_line() if mode == "voice" else input("  ")
+            except (EOFError, KeyboardInterrupt, OSError):
+                print()
+                break
+            if not entry.strip():
+                break
+            collected.append(entry)
+
+        chars = added = 0
+        for entry in collected:
+            path = Path(entry.strip()).expanduser()
+            if path.exists():
+                files, count = corpus.add_path(path)
+                added += files
+                chars += count
+                print(f"  {path}: {files} file(s), {count:,} characters")
+            else:
+                chars += corpus.add_text(entry, source="console")
+                added += 1
+
+        if not added:
+            print("nothing learned.\n")
+            return
+
+        corpus.write_meta()
+        pending = corpus.n_documents - store.consumed_docs()
+        print(f"\ntook {added} document(s), {chars:,} characters.")
+        print(f"{pending} document(s) now waiting to be applied.")
+        print("It is stored, not yet in the model. Choose option 4 to apply it "
+              "as a patch\nand ascend to the next version.\n")
+        say(f"learned {added} documents. {pending} waiting to be applied.")
+
+    def apply_as_patch() -> None:
+        """Option 4: train what was learned into the weights, ascend a version.
+
+        This is where information stops being text on disk and becomes part of
+        the model: new experts are trained on it, which grows the parameter
+        count and mints the next version.
         """
         pending = corpus.n_documents - store.consumed_docs()
-        print(f"{pending} document(s) fed but not yet learned.")
         if pending <= 0:
-            print("Nothing to put into effect. Feed it something first "
-                  "(option 2).\n")
+            print("Nothing waiting to be applied. Learn something first "
+                  "(option 3).\n")
             return
 
         current = model.n_params()
-        print(f"Learning them grows the model from {human(current)} and "
+        print(f"{pending} document(s) waiting.")
+        print(f"Applying them grows the model from {human(current)} and "
               f"ascends to v{store.current + 1}.")
         try:
-            answer = input("go ahead? [Y/n] ").strip().lower()
+            answer = input("apply now? [Y/n] ").strip().lower()
         except (EOFError, KeyboardInterrupt, OSError):
             print()
             return
         if answer.startswith("n"):
-            print("left unlearned; run option 3 again whenever you want it.\n")
+            print("left unapplied; choose option 4 whenever you want it.\n")
             return
 
-        print("\nlearning ...")
+        print("\napplying ...")
         v = create_patch(args.run, args.corpus,
                          PatchConfig(mode="grow", grow_experts=args.grow,
                                      steps=args.steps),
-                         note="update", device=args.device)
+                         note="applied", device=args.device)
         if v is None:
-            print("nothing to learn.\n")
+            print("nothing to apply.\n")
             return
 
         print(f"\nv{v.parent} -> v{v.version}")
-        print(f"  learned    {v.n_documents} document(s), {v.n_tokens:,} tokens")
+        print(f"  applied    {v.n_documents} document(s), {v.n_tokens:,} tokens")
         print(f"  grew       {human(v.params_before)} -> {human(v.params_after)} "
               f"(+{v.params_after - v.params_before:,} parameters)")
         print(f"  loss       {v.loss_before:.3f} -> {v.loss_after:.3f} "
               f"on the new material")
         print(f"  in effect  the model now serving is v{v.version}\n")
-        say(f"updated to version {v.version}, {human(v.params_after)} parameters")
+        say(f"applied. now version {v.version}, {human(v.params_after)} parameters")
         load()
 
     def feed_at_startup() -> None:
@@ -813,10 +856,11 @@ def cmd_console(args) -> int:
                 return heard
         return input("> ")
 
-    if action == "update":
-        update_motherbrain()
-    elif action == "feed" or mode == "feed":
-        feed_at_startup()
+    if action == "learn" or args.mode == "feed":
+        learn_new_information()
+        mode = "text"
+    elif action == "apply" or args.mode == "update":
+        apply_as_patch()
         mode = "text"
 
     print("/help for commands, empty line or ctrl-c to leave.\n")
