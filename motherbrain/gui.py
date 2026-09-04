@@ -163,8 +163,134 @@ class App:
                                relief="sunken", fg="#444444")
         self.status.pack(fill="x", side="bottom")
 
+        self.build_menus()
         self.choose(1)
         threading.Thread(target=self._load, daemon=True).start()
+
+    # ---- menus ------------------------------------------------------------
+
+    def build_menus(self) -> None:
+        """A menu bar reaching everything the other two consoles can reach.
+
+        The four buttons are the front door, but a window with no menus leaves
+        `mb`'s other commands - checking out an old version, exporting, pricing
+        a configuration - reachable only by typing them into option 2, which
+        nobody discovers. Every entry here calls the same method the buttons
+        and the typed commands do, so there is one implementation per action.
+        """
+        tk = self.tk
+        bar = tk.Menu(self.root)
+
+        model = tk.Menu(bar, tearoff=0)
+        model.add_command(label="Status", accelerator="Ctrl+I",
+                          command=lambda: self.dispatch("/status"))
+        model.add_command(label="Versions", accelerator="Ctrl+L",
+                          command=lambda: self.dispatch("/versions"))
+        model.add_separator()
+        model.add_command(label="Apply new knowledge as a patch…",
+                          accelerator="Ctrl+U", command=self.apply_patch)
+        model.add_command(label="Give it sight…", command=self.add_sight)
+        model.add_command(label="Check out an earlier version…",
+                          command=self.checkout_version)
+        model.add_separator()
+        model.add_command(label="Export the model…", accelerator="Ctrl+E",
+                          command=self.export_model)
+        model.add_command(label="Copy a workspace to a drive…",
+                          command=self.copy_workspace)
+        model.add_separator()
+        model.add_command(label="Quit", accelerator="Ctrl+Q",
+                          command=self.root.destroy)
+        bar.add_cascade(label="Model", menu=model)
+
+        do = tk.Menu(bar, tearoff=0)
+        for i, (label, _hint) in enumerate(OPTIONS):
+            do.add_command(label=label, accelerator=f"Ctrl+{i + 1}",
+                           command=lambda n=i: self.choose(n))
+        bar.add_cascade(label="Do", menu=do)
+
+        view = tk.Menu(bar, tearoff=0)
+        view.add_command(label="Refresh stats", accelerator="Ctrl+R",
+                         command=self.refresh_stats)
+        view.add_command(label="Clear transcript", accelerator="Ctrl+K",
+                         command=self._clear_view)
+        view.add_separator()
+        view.add_command(label="Look at an image…", command=self.pick_image)
+        view.add_command(label="Forget the image",
+                         command=self.forget_image)
+        bar.add_cascade(label="View", menu=view)
+
+        tools = tk.Menu(bar, tearoff=0)
+        tools.add_command(label="Price a configuration…",
+                          command=self.scale_dialog)
+        tools.add_command(label="Run a shell command…",
+                          command=lambda: self.prompt_then("Shell command:",
+                                                           "sh "))
+        tools.add_command(label="Search these files…",
+                          command=lambda: self.prompt_then("Search for:",
+                                                           "find "))
+        bar.add_cascade(label="Tools", menu=tools)
+
+        helpmenu = tk.Menu(bar, tearoff=0)
+        helpmenu.add_command(label="What can I say?", accelerator="F1",
+                             command=lambda: self.dispatch("/help"))
+        helpmenu.add_command(label="About MotherBrain", command=self.about)
+        bar.add_cascade(label="Help", menu=helpmenu)
+
+        self.root.config(menu=bar)
+        self.menubar = bar
+
+        for key, fn in (
+                ("<Control-i>", lambda e: self.dispatch("/status")),
+                ("<Control-l>", lambda e: self.dispatch("/versions")),
+                ("<Control-u>", lambda e: self.apply_patch()),
+                ("<Control-e>", lambda e: self.export_model()),
+                ("<Control-r>", lambda e: self.refresh_stats()),
+                ("<Control-k>", lambda e: self._clear_view()),
+                ("<Control-q>", lambda e: self.root.destroy()),
+                ("<F1>", lambda e: self.dispatch("/help")),
+                ("<Control-Key-1>", lambda e: self.choose(0)),
+                ("<Control-Key-2>", lambda e: self.choose(1)),
+                ("<Control-Key-3>", lambda e: self.choose(2)),
+                ("<Control-Key-4>", lambda e: self.choose(3)),
+        ):
+            self.root.bind_all(key, fn)
+
+    def dispatch(self, text: str) -> None:
+        """Run a command exactly as if it had been typed into option 2.
+
+        Menu entries go through the same parser as typing, so a menu can never
+        drift from what the command does.
+        """
+        if self.busy or self.model is None:
+            return
+        self.write(f"\n> {text}\n", "you")
+        self.run_worker(self._do, text)
+
+    def prompt_then(self, question: str, prefix: str) -> None:
+        """Ask for one line, then run it as a command."""
+        from tkinter import simpledialog
+
+        answer = simpledialog.askstring("MotherBrain", question, parent=self.root)
+        if answer:
+            self.dispatch(prefix + answer)
+
+    def about(self) -> None:
+        from tkinter import messagebox
+
+        from motherbrain.cli import human
+
+        if self.model is None:
+            messagebox.showinfo("MotherBrain", "No model is loaded.")
+            return
+        sight = ("sees images" if getattr(self.model, "vision", None) is not None
+                 else "text only")
+        messagebox.showinfo(
+            "About MotherBrain",
+            f"MotherBrain v{self.version}\n"
+            f"{self.model.n_params():,} parameters ({human(self.model.n_params())})\n"
+            f"{sight}, running on {self.dev}\n\n"
+            f"run   {self.run_dir}\n"
+            f"corpus {self.corpus_dir}")
 
     # ---- loading ----------------------------------------------------------
 
@@ -484,6 +610,42 @@ class App:
         if name in ("grow", "train"):
             self._apply()
             return
+        if name == "checkout":
+            from motherbrain.cli import load_current
+            from motherbrain.patches import PatchStore
+
+            wanted = cmd.args.get("version")
+            store = PatchStore(self.run_dir, create=False)
+            store.set_current(wanted)
+            model, tok, dev, current = load_current(self.run_dir, self.device)
+            self.bridge.post(self._adopt, model, tok, dev, current)
+            self._emit(f"now at v{current} (v{store.head} is still the newest; "
+                       f"nothing was lost)\n", "note")
+            return
+        if name == "export":
+            from motherbrain.cli import export_model as write_export
+
+            target = arg or f"models/motherbrain-v{self.version}.pt"
+            written = write_export(self.run_dir, target, device=self.device,
+                                   corpus_dir=self.corpus_dir)
+            self._emit(f"wrote {target} ({written / 1e6:,.1f} MB)\n", "note")
+            return
+        if name == "scale":
+            from motherbrain.cli import build_parser
+            import contextlib
+            import io
+
+            preset = arg.strip() or "mother"
+            buffer = io.StringIO()
+            try:
+                args = build_parser().parse_args(["scale", "--preset", preset])
+                with contextlib.redirect_stdout(buffer):
+                    args.func(args)
+            except SystemExit:
+                self._emit(f"no such preset: {preset}\n", "bad")
+                return
+            self._emit(buffer.getvalue())
+            return
         if name in ("status", "version", "versions"):
             from motherbrain.cli import human
             from motherbrain.patches import PatchStore
@@ -626,6 +788,141 @@ class App:
             text=f"MotherBrain v{version} · {human(model.n_params())} parameters "
                  f"· {dev} · {sight}")
         self.refresh_stats()
+
+    # ---- the rest of the lineage -----------------------------------------
+
+    def checkout_version(self) -> None:
+        """Move the current version to an earlier one, without losing later ones."""
+        from tkinter import simpledialog
+
+        from motherbrain.patches import PatchStore
+
+        store = PatchStore(self.run_dir, create=False)
+        head = store.head
+        if not head:
+            self.say_note("there is only the base; nothing to check out.\n")
+            return
+        answer = simpledialog.askstring(
+            "Check out a version",
+            f"Which version? 0 is the base, {head} is the newest.\n"
+            f"Later versions are kept either way.",
+            initialvalue=str(store.current), parent=self.root)
+        if answer is None:
+            return
+        self.dispatch(f"/checkout {answer.strip()}")
+
+    def export_model(self) -> None:
+        """Write the current version out as one self-contained file."""
+        from tkinter import filedialog
+
+        if self.model is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export the model", defaultextension=".pt",
+            initialfile=f"motherbrain-v{self.version}.pt",
+            filetypes=[("MotherBrain model", "*.pt"), ("All files", "*.*")])
+        if not path:
+            return
+        self.write(f"\n> export {path}\n", "you")
+        self.run_worker(self._export_to, path)
+
+    def _export_to(self, path: str) -> None:
+        from motherbrain.cli import export_model as write_export
+
+        written = write_export(self.run_dir, path, device=self.device,
+                               corpus_dir=self.corpus_dir)
+        self._emit(f"wrote {path} ({written / 1e6:,.1f} MB)\n", "note")
+        self._emit("it carries the weights, config and tokenizer, and loads "
+                   "with no code execution.\n", "note")
+
+    def copy_workspace(self) -> None:
+        """Copy a complete, runnable MotherBrain onto another disk."""
+        from tkinter import filedialog
+
+        target = filedialog.askdirectory(
+            title="Copy MotherBrain to… (choose a folder)")
+        if not target:
+            return
+        self.write(f"\n> copy a workspace to {target}\n", "you")
+        self.run_worker(self._copy_workspace, target)
+
+    def _copy_workspace(self, target: str) -> None:
+        from motherbrain.cli import build_parser
+
+        args = build_parser().parse_args(
+            ["workspace", target, "--run", self.run_dir,
+             "--corpus", self.corpus_dir])
+        import contextlib
+        import io
+
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            args.func(args)
+        self._emit(buffer.getvalue(), "note")
+
+    def add_sight(self) -> None:
+        """Attach and train a vision tower, as the next version."""
+        from tkinter import messagebox
+
+        if self.model is None or self.busy:
+            return
+        if getattr(self.model, "vision", None) is not None:
+            self.say_note("this version can already see.\n")
+            return
+        if not messagebox.askyesno(
+                "Give it sight?",
+                "This trains a vision tower and ascends to the next version.\n\n"
+                "It takes a while — tens of minutes on a CPU — and the window "
+                "stays usable while it runs.\n\nStart now?"):
+            return
+        self.write("\n> give MotherBrain sight\n", "you")
+        self.run_worker(self._add_sight)
+
+    def _add_sight(self) -> None:
+        from motherbrain.sight import create_sight_patch
+
+        def progress(info):
+            if info["step"] % 50 == 0 or info["step"] == info["total"]:
+                self._emit(f"  step {info['step']}/{info['total']}  "
+                           f"loss {info['loss']:.4f}\n", "note")
+
+        self._emit("training a vision tower — this is the slow one.\n", "note")
+        version, result = create_sight_patch(
+            self.run_dir, device=self.device, progress_cb=progress)
+
+        above = result["accuracy_after"] > result["chance"] * 2
+        self._emit(f"\nv{version.parent} -> v{version.version}: "
+                   f"{version.params_before:,} -> {version.params_after:,} "
+                   f"parameters\n")
+        self._emit(f"names {result['accuracy_after']:.1%} of held-out images "
+                   f"(chance {result['chance']:.1%})\n",
+                   "mb" if above else "bad")
+        if not above:
+            self._emit("that is not meaningfully above chance: the tower is "
+                       "attached but has not learned to see.\n", "bad")
+
+        from motherbrain.cli import load_current
+
+        model, tok, dev, current = load_current(self.run_dir, self.device)
+        self.bridge.post(self._adopt, model, tok, dev, current)
+
+    def scale_dialog(self) -> None:
+        """Price a configuration: what a given size would cost to run."""
+        from tkinter import simpledialog
+
+        from motherbrain.config import PRESETS
+
+        answer = simpledialog.askstring(
+            "Price a configuration",
+            "Which preset?\n" + ", ".join(PRESETS),
+            initialvalue="mother", parent=self.root)
+        if answer:
+            self.dispatch(f"/scale {answer.strip()}")
+
+    def forget_image(self) -> None:
+        self.image_path = None
+        self.image_btn.config(text="🖼 Image")
+        self.say_note("no longer looking at an image.\n")
 
     # ---- voice and images -------------------------------------------------
 

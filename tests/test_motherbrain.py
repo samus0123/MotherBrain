@@ -1462,6 +1462,85 @@ def test_a_blind_model_ignores_an_image_rather_than_failing(served):
     assert "content" in reply.json()["choices"][0]["message"]
 
 
+def test_every_command_is_reachable_from_the_window():
+    """A command the parser knows but the window drops is a silent dead end.
+
+    Typing it into the window would parse, match nothing, and fall through to
+    "the model continues it" — so the instruction would be answered with
+    generated prose instead of being carried out, with nothing to say it had
+    been misunderstood.
+    """
+    import inspect
+
+    from motherbrain.commands import ALIASES
+    from motherbrain.gui import App
+
+    handled = inspect.getsource(App._do)
+    missing = [name for name in sorted(ALIASES)
+               if f'"{name}"' not in handled and f"'{name}'" not in handled]
+    assert not missing, f"the window cannot reach: {missing}"
+
+
+def test_the_window_menus_are_all_connected():
+    """Every menu entry must call something. A dead entry looks identical."""
+    tk = pytest.importorskip("tkinter")
+
+    from motherbrain import gui
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+
+    class Cfg:
+        image_size = 128
+        n_layers = n_heads = n_kv_heads = n_experts = n_experts_per_token = 1
+        d_model = max_seq_len = vocab_size = 8
+        vision_layers = 0
+        name = "test"
+        n_active_params = 1
+
+    class Model:
+        vision = None
+        cfg = Cfg()
+
+        def n_params(self):
+            return 1
+
+    gui.App._load = lambda self: self.bridge.post(
+        self._loaded, Model(), object(), "cpu", 3,
+        __import__("motherbrain.voice", fromlist=["x"]).Capability())
+
+    try:
+        app = gui.App(root, "runs/default", "data/corpus", "cpu", 8, 2, 1)
+        root.update()
+
+        bar = app.menubar
+        entries, dead = 0, []
+        for i in range(bar.index("end") + 1):
+            if bar.type(i) != "cascade":
+                continue
+            menu_name = bar.entrycget(i, "label")
+            sub = root.nametowidget(bar.entrycget(i, "menu"))
+            for j in range(sub.index("end") + 1):
+                if sub.type(j) == "separator":
+                    continue
+                entries += 1
+                if not sub.entrycget(j, "command"):
+                    dead.append(f"{menu_name} > {sub.entrycget(j, 'label')}")
+
+        assert entries >= 15, f"only {entries} menu entries"
+        assert not dead, f"menu entries with no command: {dead}"
+
+        # The four options appear as menu entries as well as buttons, and both
+        # go through the same method.
+        app.choose(3)
+        root.update()
+        assert app.extra.winfo_children(), "the apply option armed nothing"
+    finally:
+        root.destroy()
+
+
 def test_stats_report_what_the_model_actually_is(served):
     """The number on the console has to come from the model, not a guess."""
     from motherbrain.cli import load_current
