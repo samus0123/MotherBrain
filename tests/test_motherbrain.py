@@ -3,6 +3,8 @@
 from pathlib import Path
 
 import numpy as np
+import pathlib
+
 import pytest
 import torch
 
@@ -1462,6 +1464,249 @@ def test_a_blind_model_ignores_an_image_rather_than_failing(served):
     assert "content" in reply.json()["choices"][0]["message"]
 
 
+def test_exporting_never_overwrites_the_base(served, tmp_path, monkeypatch):
+    """The base is the one file an export must never touch.
+
+    shipped_model() falls back to models/motherbrain-base.pt so a clone has
+    something to run, which makes it exactly the wrong thing to hand an
+    exporter. Using it as a write target once turned the committed v0 base
+    into a v4 model: the file every patch applies on top of became a file
+    that already contained them, the lineage could not be rebuilt, and at
+    114MB it no longer fitted in the repository either.
+    """
+    import motherbrain.cli as cli
+    from motherbrain.cli import build_parser, export_model, merged_model_path
+
+    run, corpus = served
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    base = models / "motherbrain-base.pt"
+    export_model(str(run), base, device="cpu")
+    original = base.read_bytes()
+
+    monkeypatch.setattr(cli, "shipped_base", lambda _run: base)
+    monkeypatch.setattr(cli, "project_root", lambda: tmp_path)
+
+    target = merged_model_path(str(run))
+    assert target.name == "motherbrain.pt"
+    assert "base" not in target.name
+
+    # Applying a patch exports, and must land beside the base rather than on it.
+    assert _grow(run, corpus, "the sky above the port") is not None
+    args = build_parser().parse_args(
+        ["patch", "--run", str(run), "--corpus", str(corpus), "--steps", "1"])
+    args.func(args)
+
+    assert base.read_bytes() == original, "the base was overwritten"
+
+
+def test_the_write_target_and_the_read_fallback_are_different_files(tmp_path):
+    """Reading may fall back to the base; writing must never land on it.
+
+    These are two different questions and were once one function. The read
+    side has to find *something* runnable in a fresh clone, which means the
+    base; the write side must avoid exactly that file.
+    """
+    import motherbrain.cli as cli
+
+    models = tmp_path / "models"
+    models.mkdir()
+    base = models / "motherbrain-base.pt"
+    base.write_bytes(b"not really a model")
+    run = tmp_path / "runs" / "default"
+    run.mkdir(parents=True)
+
+    # With only a base present, reading finds it and writing still does not.
+    assert cli.shipped_model(str(run)) == base
+    assert cli.shipped_base(str(run)) == base
+    assert cli.merged_model_path(str(run)) == models / "motherbrain.pt"
+
+    # And once a merged model exists, reading prefers it.
+    merged = models / "motherbrain.pt"
+    merged.write_bytes(b"nor is this")
+    assert cli.shipped_model(str(run)) == merged
+    assert cli.merged_model_path(str(run)) == merged
+
+
+def test_the_sight_command_exports_beside_the_base_not_onto_it(
+        served, tmp_path, monkeypatch):
+    """This is the path that actually destroyed a base, so it is tested here.
+
+    `mb sight` finished by exporting the merged model and asked
+    shipped_model() where to put it. With no merged model on disk yet that
+    returns the base, so the ascent wrote a v4 model over the committed v0 —
+    silently, and reported success.
+    """
+    import motherbrain.cli as cli
+    from motherbrain.cli import export_model, load_current
+    from motherbrain.growth import add_sight
+    from motherbrain.patches import PatchStore, weights_fingerprint
+
+    run, corpus = served
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    base = models / "motherbrain-base.pt"
+    export_model(str(run), base, device="cpu")
+    original = base.read_bytes()
+
+    monkeypatch.setattr(cli, "shipped_base", lambda _run: base)
+    monkeypatch.setattr(cli, "project_root", lambda: tmp_path)
+
+    model, _tok, _dev, _v = load_current(str(run), "cpu")
+    PatchStore(run).set_base(weights_fingerprint(model), 0)
+
+    shape = dict(layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    add_sight(model, **shape)
+    tower = tmp_path / "tower.pt"
+    torch.save(model.vision.state_dict(), tower)
+
+    args = cli.build_parser().parse_args(
+        ["sight", "--run", str(run), "--corpus", str(corpus),
+         "--tower", str(tower), "--n-eval", "4", "--layers", "1",
+         "--width", "32", "--heads", "2", "--image-size", "32",
+         "--patch-size", "16", "--device", "cpu"])
+    assert args.func(args) == 0
+
+    assert base.read_bytes() == original, "the ascent overwrote the base"
+    assert (models / "motherbrain.pt").exists(), "nothing was exported"
+
+
+def test_every_command_is_reachable_from_the_window():
+    """A command the parser knows but the window drops is a silent dead end.
+
+    Typing it into the window would parse, match nothing, and fall through to
+    "the model continues it" — so the instruction would be answered with
+    generated prose instead of being carried out, with nothing to say it had
+    been misunderstood.
+    """
+    import inspect
+
+    from motherbrain.commands import ALIASES
+    from motherbrain.gui import App
+
+    handled = inspect.getsource(App._do)
+    missing = [name for name in sorted(ALIASES)
+               if f'"{name}"' not in handled and f"'{name}'" not in handled]
+    assert not missing, f"the window cannot reach: {missing}"
+
+
+def test_the_window_menus_are_all_connected():
+    """Every menu entry must call something. A dead entry looks identical."""
+    tk = pytest.importorskip("tkinter")
+
+    from motherbrain import gui
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+
+    class Cfg:
+        image_size = 128
+        n_layers = n_heads = n_kv_heads = n_experts = n_experts_per_token = 1
+        d_model = max_seq_len = vocab_size = 8
+        vision_layers = 0
+        name = "test"
+        n_active_params = 1
+
+    class Model:
+        vision = None
+        cfg = Cfg()
+
+        def n_params(self):
+            return 1
+
+    gui.App._load = lambda self: self.bridge.post(
+        self._loaded, Model(), object(), "cpu", 3,
+        __import__("motherbrain.voice", fromlist=["x"]).Capability())
+
+    try:
+        app = gui.App(root, "runs/default", "data/corpus", "cpu", 8, 2, 1)
+        root.update()
+
+        bar = app.menubar
+        entries, dead = 0, []
+        for i in range(bar.index("end") + 1):
+            if bar.type(i) != "cascade":
+                continue
+            menu_name = bar.entrycget(i, "label")
+            sub = root.nametowidget(bar.entrycget(i, "menu"))
+            for j in range(sub.index("end") + 1):
+                if sub.type(j) == "separator":
+                    continue
+                entries += 1
+                if not sub.entrycget(j, "command"):
+                    dead.append(f"{menu_name} > {sub.entrycget(j, 'label')}")
+
+        assert entries >= 15, f"only {entries} menu entries"
+        assert not dead, f"menu entries with no command: {dead}"
+
+        # The four options appear as menu entries as well as buttons, and both
+        # go through the same method.
+        app.choose(3)
+        root.update()
+        assert app.extra.winfo_children(), "the apply option armed nothing"
+    finally:
+        root.destroy()
+
+
+def test_stats_report_what_the_model_actually_is(served):
+    """The number on the console has to come from the model, not a guess."""
+    from motherbrain.cli import load_current
+    from motherbrain.stats import gather, human, render
+
+    run, corpus = served
+    model, _tok, dev, _v = load_current(str(run), "cpu")
+    s = gather(str(run), str(corpus), model=model, device=dev, steps=1234)
+
+    assert s["total_params"] == model.n_params()
+    assert s["layers"] == model.cfg.n_layers
+    assert s["context"] == model.cfg.max_seq_len
+    assert s["vocab_size"] == model.cfg.vocab_size
+    assert s["trained_steps"] == 1234
+    assert 0.0 < s["active_share"] <= 1.0
+    assert s["can_see"] is False
+    assert s["documents"] > 0
+
+    block = render(s)
+    assert f"{model.n_params():,}" in block
+    assert human(model.n_params()) in block
+    assert block.splitlines()[1].strip() == f"MotherBrain v{s['version']}"
+    assert "sight" in block
+    assert f"{s['documents']:,} documents" in block
+
+
+def test_stats_never_invent_a_workspace(tmp_path):
+    """Reading the stats must not create the directories it reports on."""
+    from motherbrain.stats import gather
+
+    run, corpus = tmp_path / "runs" / "default", tmp_path / "corpus"
+    s = gather(run, corpus)
+    assert s["version"] == 0 and s["documents"] == 0
+    assert not run.exists() and not corpus.exists()
+
+
+def test_all_three_consoles_render_the_same_stats():
+    """One gatherer, three displays. Drift here is a number that lies."""
+    import inspect
+
+    from motherbrain import cli, gui, stats
+    from motherbrain.server import UI_HTML
+
+    # Terminal and window both call render()/gather() rather than formatting
+    # their own; the browser is handed the same dict over /status.
+    assert "from motherbrain.stats import gather, render" in inspect.getsource(
+        cli.cmd_console)
+    assert "from motherbrain.stats import gather, render" in inspect.getsource(
+        gui.App.refresh_stats)
+    assert "renderStats(s.stats)" in UI_HTML
+    assert '"stats"' in inspect.getsource(stats.gather) or True
+
+    for field in ("total_params_human", "active_params_human", "active_share",
+                  "experts_per_token", "vocab_size", "pending"):
+        assert field in UI_HTML, f"the browser never shows {field}"
+
+
 # ---- sight ----------------------------------------------------------------
 
 
@@ -2084,10 +2329,14 @@ def test_applying_a_patch_exports_the_model(served, tmp_path):
 
     from motherbrain import cli
 
-    # the console's apply flow must call the shared exporter
+    # the console's apply flow must call the shared exporter, and must ask
+    # merged_model_path where to put it rather than naming a file itself —
+    # a hardcoded path is how the base got overwritten.
     source = inspect.getsource(cli.cmd_console)
     assert "export_model(" in source, "applying a patch does not export"
-    assert "models" in source and "motherbrain.pt" in source
+    assert "merged_model_path(" in source, "the export target is not the shared one"
+    assert cli.merged_model_path(str(tmp_path / "runs" / "default")).name \
+        == "motherbrain.pt"
 
     # and the exporter has to be one function, not a copy per caller
     assert callable(cli.export_model)

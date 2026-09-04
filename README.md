@@ -25,8 +25,28 @@ mb serve      expose it to every IDE you own
 ## Install
 
 ```bash
-scripts/install.sh          # handles the usual install failures
+sh scripts/install.sh       # handles the usual install failures
 ```
+
+It installs the **CPU build of PyTorch by default** and only reaches for the
+CUDA one when it finds a working NVIDIA GPU. That matters more than it sounds:
+on x86_64 Linux, PyPI's `torch` depends on the whole CUDA runtime, which is
+about **5.5GB installed** and useless without the card. It is the most common
+reason an install fails — the disk fills, or the download never finishes.
+
+The script checks free disk before downloading anything rather than after, and
+names what went wrong when something does:
+
+| variable | effect |
+| --- | --- |
+| `MB_CUDA=1` | force the CUDA build (needs ~6.5GB free) |
+| `MB_CPU_ONLY=1` | force the CPU build (~1.5GB) |
+| `PYTHON=python3.12` | use a specific interpreter |
+| `VENV=/path/to/env` | put the environment somewhere else |
+
+If your network blocks `download.pytorch.org`, where the CPU wheels live, the
+script says so instead of quietly installing the 5.5GB build. Install torch
+however you can and re-run it — it sees torch is present and skips that step.
 
 or, if your Python is not externally managed:
 
