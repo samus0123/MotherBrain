@@ -139,50 +139,89 @@ def listen(cap: Capability | None = None, timeout: float = 10.0) -> str | None:
 
 MENU = """What would you like to do?
 
-  1  Tell me what to do by text
-  2  Tell me what to do by voice
-  3  Learn new information
-  4  Apply the learned information as a patch (ascend to the next version)
+  1  Tell MotherBrain what kind of program to make    (text or voice)
+  2  Tell MotherBrain what to do                      (text or voice)
+  3  Teach MotherBrain something new
+  4  Apply new knowledge as a patch (update)
 """
 
+# What each answer means. Digits are the documented way in; the words exist
+# because people type the thing they want rather than its number.
+_CHOICES = {
+    "1": "make", "make": "make", "program": "make", "code": "make",
+    "write a program": "make", "build": "make",
 
-def choose_start(default: str = "text") -> tuple[str, Capability]:
-    """Show the opening menu and return the chosen action.
+    "2": "do", "do": "do", "tell": "do", "command": "do",
+    "text": "do", "type": "do", "voice": "do", "speak": "do", "talk": "do",
 
-    Returns "text", "voice", "learn" or "apply", with the detected speech
-    capability. Choosing voice on a machine that cannot speak or listen falls
-    back to text and says why: honouring the choice matters more than
-    pretending to.
+    "3": "learn", "learn": "learn", "teach": "learn", "feed": "learn",
+    "new": "learn", "information": "learn",
+
+    "4": "apply", "apply": "apply", "patch": "apply", "update": "apply",
+    "grow": "apply", "ascend": "apply", "version": "apply",
+}
+
+# Two answers name a way of talking as well as a task, and mean it.
+_IMPLIED_MODE = {"voice": "voice", "speak": "voice", "talk": "voice",
+                 "text": "text", "type": "text"}
+
+
+def choose_start(default: str = "do") -> tuple[str, str, Capability]:
+    """Show the opening menu and return (action, mode, capability).
+
+    The action is "make", "do", "learn" or "apply" - the four options, in
+    order. The mode is "text" or "voice", and only options 1 and 2 ask for it,
+    because teaching and patching are not conversations.
+
+    Choosing voice on a machine that cannot hear falls back to text and says
+    why. Honouring the choice matters more than pretending to.
     """
     cap = detect()
     print(MENU)
 
     try:
-        answer = input("choose [1-4, default 1] ").strip().lower()
+        answer = input("choose [1-4, default 2] ").strip().lower()
     except (EOFError, KeyboardInterrupt, OSError):
         # Not interactive - piped input, a scheduled run, no terminal at all.
         print()
-        return default, cap
+        return default, "text", cap
 
-    choice = {
-        "1": "text", "2": "voice", "3": "learn", "4": "apply",
-        "text": "text", "type": "text",
-        "voice": "voice", "speak": "voice", "talk": "voice",
-        "learn": "learn", "feed": "learn", "teach": "learn",
-        "apply": "apply", "patch": "apply", "grow": "apply",
-        "update": "apply", "ascend": "apply",
-        "": default,
-    }.get(answer, default)
+    action = _CHOICES.get(answer, default if answer else default)
+    mode = _IMPLIED_MODE.get(answer, "")
 
-    if choice == "voice" and not cap.any:
+    if action in ("make", "do") and not mode:
+        mode = _ask_mode(cap)
+    elif not mode:
+        mode = "text"
+
+    if mode == "voice":
+        mode = _honour_voice(cap)
+    print()
+    return action, mode, cap
+
+
+def _ask_mode(cap: Capability) -> str:
+    """Text or voice, asked only when voice is actually possible."""
+    if not cap.any:
+        return "text"
+    try:
+        answer = input("text or voice? [text] ").strip().lower()
+    except (EOFError, KeyboardInterrupt, OSError):
+        print()
+        return "text"
+    return "voice" if answer.startswith(("v", "s", "t a")) else "text"
+
+
+def _honour_voice(cap: Capability) -> str:
+    """Downgrade to text when this machine cannot do voice, and say so."""
+    if not cap.any:
         print(f"voice is unavailable here: {cap.reason}")
         print("using text instead.")
-        choice = "text"
-    elif choice == "voice" and not cap.listen:
+        return "text"
+    if not cap.listen:
         print(f"speech out only ({cap.speak}); no dictation here, so replies "
               f"are read aloud while you type.")
-    print()
-    return choice, cap
+    return "voice"
 
 
 def choose_mode(default: str = "text") -> tuple[str, Capability]:

@@ -666,17 +666,41 @@ def test_retraining_the_base_drops_the_stale_lineage(tmp_path):
 # ---- loading --------------------------------------------------------------
 
 
-def test_status_reports_a_fresh_clone_as_not_loadable(tmp_path, capsys):
-    """A clone has patches and a manifest but no weights, because the base
-    checkpoint is too large to commit. Saying so is the whole point."""
-    from motherbrain.cli import build_parser
+def test_status_reports_a_workspace_with_no_weights_as_not_loadable(
+        tmp_path, capsys, monkeypatch):
+    """With no committed base anywhere, say so and name the way out.
 
-    args = build_parser().parse_args(
+    A real clone now carries models/motherbrain-base.pt and is loadable, so
+    the base has to be hidden to reach this branch at all.
+    """
+    import motherbrain.cli as cli
+
+    monkeypatch.setattr(cli, "shipped_base", lambda _run: None)
+    args = cli.build_parser().parse_args(
         ["status", "--corpus", str(tmp_path / "corpus"), "--run", str(tmp_path / "run")])
     assert args.func(args) == 0
     out = capsys.readouterr().out
     assert "NOT LOADABLE" in out
     assert "mb bootstrap" in out
+
+
+def test_status_reports_a_clone_carrying_the_base_as_ready(tmp_path, capsys):
+    """The committed base plus the committed patches is a loadable model.
+
+    This is the payoff for committing patches: a clone that has never trained
+    anything is ready, at the current version, with no download.
+    """
+    from motherbrain.cli import build_parser, shipped_base
+
+    if shipped_base(str(tmp_path)) is None:
+        pytest.skip("no committed base in this checkout")
+
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(tmp_path / "corpus"), "--run", "runs/default"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "READY" in out
+    assert "base weights" in out
 
 
 def test_status_reports_a_trained_run_as_ready(served, capsys):
@@ -688,7 +712,8 @@ def test_status_reports_a_trained_run_as_ready(served, capsys):
     assert args.func(args) == 0
     out = capsys.readouterr().out
     assert "READY" in out
-    assert "mb chat" in out
+    for way in ("mb gui", "mb console", "mb serve"):
+        assert way in out, way
 
 
 def test_project_root_is_found_from_a_subdirectory(tmp_path, monkeypatch):
@@ -1216,12 +1241,16 @@ def test_choose_mode_asks_when_voice_is_possible(monkeypatch):
 
 
 def test_console_offers_both_modes_in_the_browser():
-    """The page asks before it starts, and detects the two halves separately."""
+    """Voice is a way of using option 2, not an option of its own.
+
+    The page still has to detect the two halves separately: Firefox has
+    synthesis without recognition, and claiming both would leave a dead mic.
+    """
     from motherbrain.server import UI_HTML
 
     assert "What would you like to do?" in UI_HTML
     assert 'data-mode="text"' in UI_HTML
-    assert 'data-mode="voice"' in UI_HTML
+    assert "by text or voice" in UI_HTML
     # recognition and synthesis are detected apart: Firefox has one, not both
     assert "webkitSpeechRecognition" in UI_HTML
     assert "speechSynthesis" in UI_HTML
@@ -1284,27 +1313,52 @@ def test_opening_menu_lists_the_four_things_you_can_do(monkeypatch):
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(speak="espeak", listen="sr"))
-    for answer, expected in [("1", "text"), ("2", "voice"), ("3", "learn"),
-                             ("4", "apply"), ("", "text"), ("teach", "learn"),
-                             ("patch", "apply"), ("9", "text")]:
+    for answer, expected in [("1", "make"), ("2", "do"), ("3", "learn"),
+                             ("4", "apply"), ("", "do"), ("teach", "learn"),
+                             ("patch", "apply"), ("program", "make"),
+                             ("update", "apply"), ("9", "do")]:
         monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
-        assert voice.choose_start()[0] == expected
+        assert voice.choose_start()[0] == expected, answer
+
+
+def test_only_the_conversational_options_ask_about_voice(monkeypatch):
+    """Teaching and patching are not conversations, so they never ask."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    asked = []
+
+    def record(prompt):
+        asked.append(prompt)
+        return "voice"
+
+    monkeypatch.setattr("builtins.input", record)
+    voice.choose_start()                       # answers "voice" -> option 2
+    assert len(asked) == 1, "an implied mode must not be asked for twice"
+
+    for answer in ("3", "4"):
+        asked.clear()
+        monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
+        action, mode, _cap = voice.choose_start()
+        assert action in ("learn", "apply") and mode == "text"
 
 
 def test_voice_falls_back_when_it_cannot_be_honoured(monkeypatch, capsys):
-    """Choosing option 2 on a machine with no speech has to say so."""
+    """Asking to speak on a machine with no speech has to say so."""
     import motherbrain.voice as voice
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(reason="no engine"))
-    monkeypatch.setattr("builtins.input", lambda _: "2")
-    assert voice.choose_start()[0] == "text"
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    action, mode, _cap = voice.choose_start()
+    assert (action, mode) == ("do", "text")
     assert "unavailable" in capsys.readouterr().out
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(speak="espeak", listen="sr"))
-    monkeypatch.setattr("builtins.input", lambda _: "2")
-    assert voice.choose_start()[0] == "voice"
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_start()[:2] == ("do", "voice")
 
 
 def test_menu_survives_no_terminal(monkeypatch):
@@ -1316,25 +1370,155 @@ def test_menu_survives_no_terminal(monkeypatch):
         raise OSError("no stdin")
 
     monkeypatch.setattr("builtins.input", no_terminal)
-    assert voice.choose_start()[0] == "text"
+    assert voice.choose_start()[:2] == ("do", "text")
 
 
-def test_web_menu_matches_the_terminal_menu():
+def test_every_surface_offers_the_same_four_options():
+    """The terminal, the browser and the window must not drift apart.
+
+    Three menus written three times is three chances to describe the same
+    button differently, so each option is checked against all of them by its
+    distinguishing words rather than its exact punctuation.
+    """
+    from motherbrain.gui import OPTIONS
+    from motherbrain.server import UI_HTML
+    from motherbrain.voice import MENU
+
+    wanted = [("what kind of program", "make"),
+              ("what to do", "do"),
+              ("something new", "teach"),
+              ("as a patch", "apply")]
+
+    gui_text = " ".join(label + " " + hint for label, hint in OPTIONS).lower()
+    for phrase, _ in wanted:
+        assert phrase in MENU.lower(), f"terminal menu is missing: {phrase}"
+        assert phrase in UI_HTML.lower(), f"browser menu is missing: {phrase}"
+        assert phrase in gui_text, f"window menu is missing: {phrase}"
+
+    assert len(OPTIONS) == 4
+
+
+def test_code_seed_becomes_a_named_function():
+    """A base model continues context; it cannot be told what to write.
+
+    So the request becomes a docstring and its own words become the function
+    name — the shape the model saw in training. Filler words make poor
+    identifiers and are dropped, and a request made entirely of them still has
+    to produce a valid one.
+    """
+    from motherbrain.actions import code_seed, default_filename
+
+    opener, head = code_seed("make a script that renames files")
+    assert opener == "def renames_files("
+    assert head.startswith('"""make a script that renames files"""')
+    assert head.endswith(opener)
+    assert default_filename("make a script that renames files") == "renames_files.py"
+
+    assert code_seed("the a of it")[0] == "def main("
+    assert default_filename("!!!") == "program.py"
+
+
+def test_stream_never_splits_a_character(monkeypatch):
+    """Decoding token by token can cut a multi-byte character in half.
+
+    Emitting the halves gives replacement characters mid-word in every
+    language that needs more than ASCII, so bytes are held back until they
+    decode.
+    """
+    from motherbrain.actions import stream
+
+    class Tok:
+        def encode(self, text, bos=False, eos=False):
+            return [1]
+
+        def decode(self, ids):
+            # One character split across two tokens: only both together decode.
+            return {(2,): "\ufffd", (2, 3): "é", (4,): "!"}.get(tuple(ids), "\ufffd")
+
+    class Model:
+        vision = None
+
+        def generate(self, ids, **kw):
+            yield from (2, 3, 4)
+
+    pieces = list(stream(Model(), Tok(), "cpu", "x"))
+    assert pieces == ["é", "!"]
+
+
+def test_gui_opens_and_wires_its_four_options():
+    """The window must build and dispatch without a model present.
+
+    Loading happens on a worker thread, so a failure there has to leave a
+    usable window rather than a frozen one — and every option has to be
+    reachable before any weights exist.
+    """
+    tk = pytest.importorskip("tkinter")
+
+    from motherbrain import gui
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+
+    class Cfg:
+        image_size = 128
+
+    class Model:
+        vision = None
+        cfg = Cfg()
+
+        def n_params(self):
+            return 47_201_688
+
+    gui.App._load = lambda self: self.bridge.post(
+        self._loaded, Model(), object(), "cpu", 3,
+        __import__("motherbrain.voice", fromlist=["x"]).Capability())
+
+    try:
+        app = gui.App(root, "runs/default", "data/corpus", "cpu", 8, 2, 1)
+        root.update()
+        assert len(app.buttons) == 4
+        assert "v3" in app.header.cget("text")
+        assert "47.2M" in app.header.cget("text")
+
+        app.choose(3)                            # option 4 needs no typing
+        assert app.extra.winfo_children(), "apply must offer a button"
+        app.choose(2)                            # option 3 offers a file picker
+        assert app.extra.winfo_children(), "teach must offer a picker"
+
+        app.choose(1)                            # option 2 runs a real command
+        app.entry.insert("1.0", "list files")
+        app.submit()
+        for _ in range(60):
+            root.update()
+            if not app.busy:
+                break
+        assert "> list files" in app.view.get("1.0", "end")
+    finally:
+        root.destroy()
+
+
+def test_web_menu_wires_every_option_to_a_handler():
+    """A button with no handler looks identical to one that works.
+
+    The browser console lost its handlers once already, to a stray newline in
+    a JS string literal, so each option's dispatch value is checked to exist
+    both on a button and in the click handler that acts on it.
+    """
     from motherbrain.server import UI_HTML
 
     assert "What would you like to do?" in UI_HTML
-    for mode in ("text", "voice", "feed", "update"):
-        assert f'data-mode="{mode}"' in UI_HTML
-    for label in ("Tell me what to do", "Learn new information",
-                  "Apply it as a patch"):
-        assert label in UI_HTML
-
+    for mode in ("make", "text", "feed", "update"):
+        assert f'data-mode="{mode}"' in UI_HTML, mode
+    for branch in ("'make'", "'feed'", "'update'"):
+        assert f"m === {branch}" in UI_HTML, branch
 
 def test_console_page_offers_feeding_first():
     from motherbrain.server import UI_HTML
 
     assert 'data-mode="feed"' in UI_HTML
-    assert "Learn new information" in UI_HTML
+    assert "Teach MotherBrain something new" in UI_HTML
     # the distinction people miss: storing text is not the same as learning it
     assert "learning is what puts it in the weights" in UI_HTML
     assert "learn it now (grows the model)" in UI_HTML

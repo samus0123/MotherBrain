@@ -420,6 +420,14 @@ def cmd_chat(args) -> int:
 # status and bootstrap
 
 
+def cmd_gui(args) -> int:
+    """Open the desktop window."""
+    from motherbrain.gui import run
+
+    return run(args.run, args.corpus, args.device, args.max_tokens,
+               args.steps, args.grow)
+
+
 def cmd_status(args) -> int:
     """Report exactly what is on disk and what to run next.
 
@@ -454,6 +462,8 @@ def cmd_status(args) -> int:
     print(f"  [{mark(has_tok)}] tokenizer      {corpus.tokenizer_path}")
     print(f"  [{mark(has_tokens)}] tokenized      {corpus.n_tokens:,} tokens")
 
+    base_export = shipped_base(args.run)
+
     print("weights")
     if has_ckpt:
         size = ckpt.stat().st_size / 1e6
@@ -466,8 +476,14 @@ def cmd_status(args) -> int:
             pass
     else:
         print(f"  [no ] base checkpoint  missing ({ckpt})")
-        print("        this file holds the weights and is too large to commit,")
-        print("        so a fresh clone never has one.")
+        print("        this file holds the optimizer state as well, which is far")
+        print("        too large to commit. You only need it to train.")
+    if base_export is not None:
+        size = base_export.stat().st_size / 1e6
+        print(f"  [yes] base weights     {base_export}  ({size:,.0f} MB)")
+        print("        committed, fp16, and enough to run and to patch.")
+    else:
+        print("  [no ] base weights     missing (models/motherbrain-base.pt)")
 
     versions = store.versions()
     print("lineage")
@@ -487,20 +503,22 @@ def cmd_status(args) -> int:
               f"(run `mb patch`)")
 
     print()
-    if has_ckpt:
-        loadable = True
+    # build_version opens a PatchStore, which creates the run directory. Asking
+    # what is on disk must never change what is on disk, so a run directory
+    # that does not exist yet is reported rather than conjured.
+    if (has_ckpt or base_export is not None) and run.exists():
         try:
             from motherbrain.patches import build_version
 
             _, _, version = build_version(args.run)
             print(f"READY — loaded v{version}.")
-        except ValueError as exc:
-            loadable = False
+            print("  start it with:  mb gui          (windowed)")
+            print("                  mb console      (terminal)")
+            print("                  mb serve        (HTTP, for IDEs and browsers)")
+            return 0
+        except (ValueError, FileNotFoundError) as exc:
             print(f"NOT LOADABLE — {exc}")
-        if loadable:
-            print("  load it with:  mb chat        (interactive)")
-            print("                 mb serve       (HTTP, for IDEs)")
-        return 0
+            return 0
 
     print("NOT LOADABLE — there are no weights yet.")
     if has_docs:
@@ -509,8 +527,6 @@ def cmd_status(args) -> int:
     else:
         print("  fastest path from here:")
         print("    mb bootstrap")
-    print("  or download the base checkpoint from the CI run's")
-    print("  'motherbrain-base-checkpoint' artifact into runs/default/.")
     return 0
 
 
@@ -599,12 +615,14 @@ def cmd_console(args) -> int:
     print()
 
     if args.mode == "ask":
-        action, cap = choose_start()
-        mode = "voice" if action == "voice" else "text"
+        action, mode, cap = choose_start()
     else:
-        action = "console"
-        action = args.mode if args.mode in ("feed", "update") else "console"
-        mode, cap = ("text" if args.mode == "feed" else args.mode), Capability()
+        # --mode names the same four things, plus the older text/voice spellings
+        # of option 2 that scripts already pass.
+        action = {"feed": "learn", "learn": "learn", "update": "apply",
+                  "apply": "apply", "make": "make"}.get(args.mode, "do")
+        mode = args.mode if args.mode in ("text", "voice") else "text"
+        cap = Capability()
         if mode == "voice":
             cap = detect()
             if not cap.any:
@@ -1069,25 +1087,34 @@ def cmd_console(args) -> int:
                   f"loss {v.loss_before:.3f} -> {v.loss_after:.3f}\n")
             load()
 
-    def read_line() -> str:
+    def read_line(prompt: str = "> ") -> str:
         """One line of input: spoken when that is possible, typed otherwise."""
         if mode == "voice" and cap.listen:
             from motherbrain.voice import listen
 
-            print("listening...", end="", flush=True)
+            print(prompt.rstrip() + " listening...", end="", flush=True)
             heard = listen(cap)
             print()
             if heard:
                 print(f"> {heard}")
                 return heard
-        return input("> ")
+        return input(prompt)
 
-    if action == "learn" or args.mode == "feed":
+    if action == "learn":
         learn_new_information()
         mode = "text"
-    elif action == "apply" or args.mode == "update":
+    elif action == "apply":
         apply_as_patch()
         mode = "text"
+    elif action == "make":
+        # Option 1 goes straight to the question it exists to ask.
+        try:
+            want = read_line("what kind of program? ").strip()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return 0
+        if want:
+            do_make(want, None)
 
     print("Tell me what to do. For example:\n")
     print("  make a script that renames files      write code, save it, run it")
@@ -1750,7 +1777,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="where applying a patch writes the model "
                         "(default: models/motherbrain.pt)")
     s.add_argument("--mode",
-                   choices=["ask", "text", "voice", "feed", "update"],
+                   choices=["ask", "make", "do", "learn", "apply",
+                            "text", "voice", "feed", "update"],
                    default="ask",
                    help="ask at startup (default), or go straight to one")
     s.add_argument("--device", default="auto")
@@ -1807,6 +1835,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--days", type=int, default=825)
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_cert)
+
+    s = common(sub.add_parser(
+        "gui", help="open MotherBrain in a window (the same four options)"))
+    s.add_argument("--max-tokens", type=int, default=120)
+    s.add_argument("--steps", type=int, default=100,
+                   help="training steps used when applying a patch")
+    s.add_argument("--grow", type=int, default=1,
+                   help="experts added per layer when applying a patch")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_gui)
 
     s = common(sub.add_parser("serve", help="expose the model over HTTP or HTTPS"))
     s.add_argument("--host", default="127.0.0.1",
