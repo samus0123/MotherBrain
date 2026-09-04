@@ -51,16 +51,21 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "ls": ("ls", "list files", "what files"),
     "cat": ("cat", "show", "show me", "open"),
     "see": ("see", "look at", "describe", "what is this"),
+    "write": ("write", "save", "create a file", "put"),
+    "sh": ("sh", "shell", "command", "execute"),
+    "find": ("find", "search", "search for", "grep"),
+    "delete": ("delete", "remove", "rm"),
 }
 
 # Actions that touch the filesystem or run code. They are available in the
 # terminal, where you already have a shell, and refused over HTTP, where they
 # would be remote code execution against whoever is serving the model.
-LOCAL_ONLY = {"make", "run", "ls", "cat", "see"}
+LOCAL_ONLY = {"make", "run", "ls", "cat", "see", "write", "sh", "find",
+              "delete"}
 
 # Commands that consume the rest of the line as their payload.
 TAKES_TEXT = {"learn", "checkout", "train", "grow", "export", "scale",
-              "make", "run", "cat", "see"}
+              "make", "run", "cat", "see", "write", "sh", "find", "delete"}
 
 
 def _match_alias(lowered: str) -> tuple[str, str] | None:
@@ -162,6 +167,28 @@ def _with_args(name: str, rest: str, raw: str) -> Command:
         args["path"] = head.strip()
         args["prompt"] = tail.strip()
 
+    elif name in ("write", "delete"):
+        if not rest:
+            return Command("error", raw,
+                           {"message": f"{name} needs a file, e.g. "
+                                       f"/{name} notes.txt"})
+        head, _, tail = rest.partition(" ")
+        args["path"] = head.strip()
+        args["content"] = tail          # may be empty: then it is asked for
+
+    elif name == "sh":
+        if not rest:
+            return Command("error", raw,
+                           {"message": "sh needs a command, e.g. /sh ls -la"})
+        args["command"] = rest.strip()
+
+    elif name == "find":
+        if not rest:
+            return Command("error", raw,
+                           {"message": "find needs something to look for, "
+                                       "e.g. /find TODO"})
+        args["pattern"] = rest.strip()
+
     elif name in ("run", "cat"):
         if not rest:
             return Command("error", raw,
@@ -193,6 +220,10 @@ Actions — terminal only, never over the network:
   /ls [dir]              list files
   /cat <file>            show a file
   /see <image> [prompt]  look at an image and continue from it
+  /write <file> [text]   write a file (asks for the text if not given)
+  /find <pattern>        search files here for a pattern
+  /sh <command>          run a shell command and show its output
+  /delete <file>         delete a file, after confirming
 
 Plain English works for the same things: "learn that ...", "grow", "how big
 are you", "what version are you", "list versions". The parsing is a fixed

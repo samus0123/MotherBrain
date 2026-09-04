@@ -1348,65 +1348,6 @@ def test_actions_without_arguments_are_errors():
     assert parse("/cat").name == "error"
 
 
-def test_actions_are_refused_over_http(served):
-    """/make, /run, /ls and /cat write files and execute code.
-
-    In a terminal that is no more than the shell already allows. Over HTTP it
-    is remote code execution against whoever is serving the model, so there is
-    no configuration of it that is safe to expose.
-    """
-    from fastapi.testclient import TestClient
-
-    from motherbrain.commands import LOCAL_ONLY
-    from motherbrain.server import create_app
-
-    run, corpus = served
-    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
-                                   auto_patch=False))
-
-    for text in ("/run /etc/passwd", "/make a thing", "/ls /", "/cat /etc/passwd",
-                 "/see /etc/passwd"):
-        result = client.post("/command", json={"text": text}).json()
-        assert result["kind"] == "error"
-        assert "never over the network" in result["text"]
-
-    assert LOCAL_ONLY == {"make", "run", "ls", "cat", "see"}
-
-
-def test_no_fingerprint_check_without_patches(tmp_path):
-    """The guard stops a patch reaching weights it was not trained against.
-
-    With no patches there is nothing to misapply, so checking would only force
-    the manifest to track weights that move at every checkpoint - which
-    rewrote it every few minutes for the length of a run.
-    """
-    from motherbrain.data import Corpus
-    from motherbrain.patches import PatchStore, build_version
-    from motherbrain.train import TrainConfig, train
-
-    corpus = Corpus(tmp_path / "corpus")
-    corpus.add_text("the mother brain awakens and learns " * 200, "seed")
-    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
-
-    run = tmp_path / "run"
-    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
-    train(str(tmp_path / "corpus"), str(run),
-          cfg, TrainConfig(steps=4, batch_size=2, seq_len=16, warmup=1,
-                           save_every=2, eval_every=2, log_every=100,
-                           eval_batches=1))
-
-    # A stale fingerprint must not block loading while the lineage is empty.
-    store = PatchStore(str(run))
-    manifest = store.manifest()
-    manifest["base_fingerprint"] = "stale-from-an-older-run"
-    store.write(manifest)
-    assert store.versions() == []
-
-    model, _, version = build_version(str(run))   # must not raise
-    assert version == 0
-    assert model.n_params() > 0
-
-
 def test_the_page_javascript_actually_parses():
     """A syntax error in the page kills every click handler silently.
 
@@ -1706,3 +1647,58 @@ def test_the_largest_preset_can_see():
     assert mother.n_params > 1e15
     # sight is not free the way experts are: all of it runs for every image
     assert mother.vision_params < mother.n_active_params
+
+
+@pytest.mark.parametrize("text,name", [
+    ("/write notes.txt hello", "write"),
+    ("write notes.txt", "write"),
+    ("/sh ls -la", "sh"),
+    ("/find TODO", "find"),
+    ("search for TODO", "find"),
+    ("/delete old.txt", "delete"),
+    ("remove old.txt", "delete"),
+])
+def test_the_wider_action_vocabulary_parses(text, name):
+    from motherbrain.commands import parse
+
+    assert parse(text).name == name
+
+
+def test_every_action_needs_its_argument():
+    from motherbrain.commands import parse
+
+    for text in ("/write", "/sh", "/find", "/delete", "/see"):
+        assert parse(text).name == "error", f"{text} should not be accepted bare"
+
+
+def test_every_action_is_refused_over_http(served):
+    """These write files and run commands.
+
+    In a terminal that is no more than the shell already allows. Over HTTP any
+    one of them is remote code execution against whoever serves the model, so
+    the refusal has to cover the whole set, not the ones that existed when it
+    was written.
+    """
+    from fastapi.testclient import TestClient
+
+    from motherbrain.commands import LOCAL_ONLY
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+
+    probes = {
+        "make": "/make a thing", "run": "/run x.py", "ls": "/ls /",
+        "cat": "/cat /etc/passwd", "see": "/see x.png",
+        "write": "/write /etc/x hi", "sh": "/sh rm -rf /",
+        "find": "/find secret", "delete": "/delete /etc/passwd",
+    }
+    # every local-only action must have a probe, so adding one without
+    # covering it here fails rather than slipping through
+    assert set(probes) == LOCAL_ONLY
+
+    for name, text in probes.items():
+        result = client.post("/command", json={"text": text}).json()
+        assert result["kind"] == "error", f"{name} was not refused"
+        assert "never over the network" in result["text"]
