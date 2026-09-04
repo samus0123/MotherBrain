@@ -3,6 +3,8 @@
 from pathlib import Path
 
 import numpy as np
+import pathlib
+
 import pytest
 import torch
 
@@ -1462,6 +1464,113 @@ def test_a_blind_model_ignores_an_image_rather_than_failing(served):
     assert "content" in reply.json()["choices"][0]["message"]
 
 
+def test_exporting_never_overwrites_the_base(served, tmp_path, monkeypatch):
+    """The base is the one file an export must never touch.
+
+    shipped_model() falls back to models/motherbrain-base.pt so a clone has
+    something to run, which makes it exactly the wrong thing to hand an
+    exporter. Using it as a write target once turned the committed v0 base
+    into a v4 model: the file every patch applies on top of became a file
+    that already contained them, the lineage could not be rebuilt, and at
+    114MB it no longer fitted in the repository either.
+    """
+    import motherbrain.cli as cli
+    from motherbrain.cli import build_parser, export_model, merged_model_path
+
+    run, corpus = served
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    base = models / "motherbrain-base.pt"
+    export_model(str(run), base, device="cpu")
+    original = base.read_bytes()
+
+    monkeypatch.setattr(cli, "shipped_base", lambda _run: base)
+    monkeypatch.setattr(cli, "project_root", lambda: tmp_path)
+
+    target = merged_model_path(str(run))
+    assert target.name == "motherbrain.pt"
+    assert "base" not in target.name
+
+    # Applying a patch exports, and must land beside the base rather than on it.
+    assert _grow(run, corpus, "the sky above the port") is not None
+    args = build_parser().parse_args(
+        ["patch", "--run", str(run), "--corpus", str(corpus), "--steps", "1"])
+    args.func(args)
+
+    assert base.read_bytes() == original, "the base was overwritten"
+
+
+def test_the_write_target_and_the_read_fallback_are_different_files(tmp_path):
+    """Reading may fall back to the base; writing must never land on it.
+
+    These are two different questions and were once one function. The read
+    side has to find *something* runnable in a fresh clone, which means the
+    base; the write side must avoid exactly that file.
+    """
+    import motherbrain.cli as cli
+
+    models = tmp_path / "models"
+    models.mkdir()
+    base = models / "motherbrain-base.pt"
+    base.write_bytes(b"not really a model")
+    run = tmp_path / "runs" / "default"
+    run.mkdir(parents=True)
+
+    # With only a base present, reading finds it and writing still does not.
+    assert cli.shipped_model(str(run)) == base
+    assert cli.shipped_base(str(run)) == base
+    assert cli.merged_model_path(str(run)) == models / "motherbrain.pt"
+
+    # And once a merged model exists, reading prefers it.
+    merged = models / "motherbrain.pt"
+    merged.write_bytes(b"nor is this")
+    assert cli.shipped_model(str(run)) == merged
+    assert cli.merged_model_path(str(run)) == merged
+
+
+def test_the_sight_command_exports_beside_the_base_not_onto_it(
+        served, tmp_path, monkeypatch):
+    """This is the path that actually destroyed a base, so it is tested here.
+
+    `mb sight` finished by exporting the merged model and asked
+    shipped_model() where to put it. With no merged model on disk yet that
+    returns the base, so the ascent wrote a v4 model over the committed v0 —
+    silently, and reported success.
+    """
+    import motherbrain.cli as cli
+    from motherbrain.cli import export_model, load_current
+    from motherbrain.growth import add_sight
+    from motherbrain.patches import PatchStore, weights_fingerprint
+
+    run, corpus = served
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    base = models / "motherbrain-base.pt"
+    export_model(str(run), base, device="cpu")
+    original = base.read_bytes()
+
+    monkeypatch.setattr(cli, "shipped_base", lambda _run: base)
+    monkeypatch.setattr(cli, "project_root", lambda: tmp_path)
+
+    model, _tok, _dev, _v = load_current(str(run), "cpu")
+    PatchStore(run).set_base(weights_fingerprint(model), 0)
+
+    shape = dict(layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    add_sight(model, **shape)
+    tower = tmp_path / "tower.pt"
+    torch.save(model.vision.state_dict(), tower)
+
+    args = cli.build_parser().parse_args(
+        ["sight", "--run", str(run), "--corpus", str(corpus),
+         "--tower", str(tower), "--n-eval", "4", "--layers", "1",
+         "--width", "32", "--heads", "2", "--image-size", "32",
+         "--patch-size", "16", "--device", "cpu"])
+    assert args.func(args) == 0
+
+    assert base.read_bytes() == original, "the ascent overwrote the base"
+    assert (models / "motherbrain.pt").exists(), "nothing was exported"
+
+
 def test_every_command_is_reachable_from_the_window():
     """A command the parser knows but the window drops is a silent dead end.
 
@@ -2220,10 +2329,14 @@ def test_applying_a_patch_exports_the_model(served, tmp_path):
 
     from motherbrain import cli
 
-    # the console's apply flow must call the shared exporter
+    # the console's apply flow must call the shared exporter, and must ask
+    # merged_model_path where to put it rather than naming a file itself —
+    # a hardcoded path is how the base got overwritten.
     source = inspect.getsource(cli.cmd_console)
     assert "export_model(" in source, "applying a patch does not export"
-    assert "models" in source and "motherbrain.pt" in source
+    assert "merged_model_path(" in source, "the export target is not the shared one"
+    assert cli.merged_model_path(str(tmp_path / "runs" / "default")).name \
+        == "motherbrain.pt"
 
     # and the exporter has to be one function, not a copy per caller
     assert callable(cli.export_model)

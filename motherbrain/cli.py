@@ -344,6 +344,24 @@ def shipped_model(run_dir: str) -> Path | None:
                                  "motherbrain-15m.pt"))
 
 
+def merged_model_path(run_dir: str) -> Path:
+    """Where a merged, current-version model is written.
+
+    Never the base. shipped_model() prefers the merged export and falls back
+    to models/motherbrain-base.pt so a clone has something to run - which
+    makes it exactly the wrong thing to hand an exporter. Using it as a write
+    target overwrote the committed base with a v4 model: the file the patches
+    apply on top of became a file that already had them, so the lineage could
+    not be rebuilt, and at 114MB it no longer fitted in the repository either.
+    """
+    root = Path(run_dir).resolve()
+    for base in (root.parent.parent, root.parent, project_root(), Path.cwd()):
+        candidate = Path(base) / "models"
+        if candidate.is_dir():
+            return candidate / "motherbrain.pt"
+    return Path(project_root()) / "models" / "motherbrain.pt"
+
+
 def load_current(run_dir: str, device: str = "auto"):
     """The model as of the current version: base checkpoint + applied patches.
 
@@ -471,8 +489,7 @@ def cmd_sight(args) -> int:
               "attached\n             but has not learned to see; train longer.")
     print(f"  in effect  the model now serving is v{version.version}")
 
-    target = Path(args.export or shipped_model(args.run)
-                  or Path("models/motherbrain.pt"))
+    target = Path(args.export or merged_model_path(args.run))
     try:
         written = export_model(args.run, target, device=args.device,
                                corpus_dir=args.corpus)
@@ -1173,10 +1190,9 @@ def cmd_console(args) -> int:
 
         # The grown model lives in runs/, which is gitignored and does not
         # survive a fresh clone or a wiped machine. Exporting here is what
-        # makes the ascent durable: models/motherbrain.pt is the committed
-        # artifact, and without this step every applied patch is temporary.
-        target = Path(args.export or shipped_model(args.run)
-                      or (project_root() / "models" / "motherbrain.pt"))
+        # makes the ascent durable. What the repository actually carries is
+        # the patch; this is the whole merged model, for running elsewhere.
+        target = Path(args.export or merged_model_path(args.run))
         try:
             written = export_model(args.run, target, device=args.device)
         except Exception as exc:

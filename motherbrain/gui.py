@@ -739,7 +739,7 @@ class App:
         self.run_worker(self._apply)
 
     def _apply(self) -> None:
-        from motherbrain.cli import export_model, human, shipped_model
+        from motherbrain.cli import export_model, human, merged_model_path
         from motherbrain.patches import PatchConfig, create_patch
 
         self._emit("learning …\n", "note")
@@ -771,7 +771,7 @@ class App:
         model, tok, dev, current = load_current(self.run_dir, self.device)
         self.bridge.post(self._adopt, model, tok, dev, current)
 
-        target = shipped_model(self.run_dir) or Path("models/motherbrain.pt")
+        target = merged_model_path(self.run_dir)
         try:
             written = export_model(self.run_dir, target, device=self.device)
             self._emit(f"exported {target} ({written / 1e6:,.1f} MB)\n", "note")
