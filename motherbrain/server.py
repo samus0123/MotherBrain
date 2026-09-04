@@ -708,14 +708,17 @@ UI_HTML = """<!doctype html>
 <div id="ask">
   <h2>What would you like to do?</h2>
   <div class="choices">
-    <button class="choice" data-mode="text">
-      <b>1 · Tell me what to do</b><span>by text</span></button>
-    <button class="choice" id="voice-choice" data-mode="voice">
-      <b>2 · Tell me what to do</b><span id="voice-note">by voice</span></button>
+    <button class="choice" data-mode="make">
+      <b>1 · Tell MotherBrain what kind of program to make</b>
+      <span>by text or voice</span></button>
+    <button class="choice" id="voice-choice" data-mode="text">
+      <b>2 · Tell MotherBrain what to do</b>
+      <span id="voice-note">by text or voice</span></button>
     <button class="choice" data-mode="feed">
-      <b>3 · Learn new information</b><span>stored, not yet in the model</span></button>
+      <b>3 · Teach MotherBrain something new</b>
+      <span>stored, not yet in the model</span></button>
     <button class="choice" data-mode="update">
-      <b>4 · Apply it as a patch</b>
+      <b>4 · Apply new knowledge as a patch (update)</b>
       <span>ascend to the next version, and grow</span></button>
   </div>
   <div class="why" id="voice-why"></div>
@@ -1086,6 +1089,7 @@ let pendingVoice = false;
 document.querySelectorAll('.choice[data-mode]').forEach(b => {
   b.onclick = () => {
     const m = b.dataset.mode;
+    if (m === 'make') return showPanel('programpanel');
     if (m === 'feed') return showPanel('feedpanel');
     if (m === 'update') return doUpdate();
     setMode(m);

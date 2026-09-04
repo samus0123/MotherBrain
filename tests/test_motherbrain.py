@@ -666,17 +666,41 @@ def test_retraining_the_base_drops_the_stale_lineage(tmp_path):
 # ---- loading --------------------------------------------------------------
 
 
-def test_status_reports_a_fresh_clone_as_not_loadable(tmp_path, capsys):
-    """A clone has patches and a manifest but no weights, because the base
-    checkpoint is too large to commit. Saying so is the whole point."""
-    from motherbrain.cli import build_parser
+def test_status_reports_a_workspace_with_no_weights_as_not_loadable(
+        tmp_path, capsys, monkeypatch):
+    """With no committed base anywhere, say so and name the way out.
 
-    args = build_parser().parse_args(
+    A real clone now carries models/motherbrain-base.pt and is loadable, so
+    the base has to be hidden to reach this branch at all.
+    """
+    import motherbrain.cli as cli
+
+    monkeypatch.setattr(cli, "shipped_base", lambda _run: None)
+    args = cli.build_parser().parse_args(
         ["status", "--corpus", str(tmp_path / "corpus"), "--run", str(tmp_path / "run")])
     assert args.func(args) == 0
     out = capsys.readouterr().out
     assert "NOT LOADABLE" in out
     assert "mb bootstrap" in out
+
+
+def test_status_reports_a_clone_carrying_the_base_as_ready(tmp_path, capsys):
+    """The committed base plus the committed patches is a loadable model.
+
+    This is the payoff for committing patches: a clone that has never trained
+    anything is ready, at the current version, with no download.
+    """
+    from motherbrain.cli import build_parser, shipped_base
+
+    if shipped_base(str(tmp_path)) is None:
+        pytest.skip("no committed base in this checkout")
+
+    args = build_parser().parse_args(
+        ["status", "--corpus", str(tmp_path / "corpus"), "--run", "runs/default"])
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "READY" in out
+    assert "base weights" in out
 
 
 def test_status_reports_a_trained_run_as_ready(served, capsys):
@@ -688,7 +712,8 @@ def test_status_reports_a_trained_run_as_ready(served, capsys):
     assert args.func(args) == 0
     out = capsys.readouterr().out
     assert "READY" in out
-    assert "mb chat" in out
+    for way in ("mb gui", "mb console", "mb serve"):
+        assert way in out, way
 
 
 def test_project_root_is_found_from_a_subdirectory(tmp_path, monkeypatch):
@@ -1216,12 +1241,16 @@ def test_choose_mode_asks_when_voice_is_possible(monkeypatch):
 
 
 def test_console_offers_both_modes_in_the_browser():
-    """The page asks before it starts, and detects the two halves separately."""
+    """Voice is a way of using option 2, not an option of its own.
+
+    The page still has to detect the two halves separately: Firefox has
+    synthesis without recognition, and claiming both would leave a dead mic.
+    """
     from motherbrain.server import UI_HTML
 
     assert "What would you like to do?" in UI_HTML
     assert 'data-mode="text"' in UI_HTML
-    assert 'data-mode="voice"' in UI_HTML
+    assert "by text or voice" in UI_HTML
     # recognition and synthesis are detected apart: Firefox has one, not both
     assert "webkitSpeechRecognition" in UI_HTML
     assert "speechSynthesis" in UI_HTML
@@ -1284,27 +1313,52 @@ def test_opening_menu_lists_the_four_things_you_can_do(monkeypatch):
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(speak="espeak", listen="sr"))
-    for answer, expected in [("1", "text"), ("2", "voice"), ("3", "learn"),
-                             ("4", "apply"), ("", "text"), ("teach", "learn"),
-                             ("patch", "apply"), ("9", "text")]:
+    for answer, expected in [("1", "make"), ("2", "do"), ("3", "learn"),
+                             ("4", "apply"), ("", "do"), ("teach", "learn"),
+                             ("patch", "apply"), ("program", "make"),
+                             ("update", "apply"), ("9", "do")]:
         monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
-        assert voice.choose_start()[0] == expected
+        assert voice.choose_start()[0] == expected, answer
+
+
+def test_only_the_conversational_options_ask_about_voice(monkeypatch):
+    """Teaching and patching are not conversations, so they never ask."""
+    import motherbrain.voice as voice
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    asked = []
+
+    def record(prompt):
+        asked.append(prompt)
+        return "voice"
+
+    monkeypatch.setattr("builtins.input", record)
+    voice.choose_start()                       # answers "voice" -> option 2
+    assert len(asked) == 1, "an implied mode must not be asked for twice"
+
+    for answer in ("3", "4"):
+        asked.clear()
+        monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
+        action, mode, _cap = voice.choose_start()
+        assert action in ("learn", "apply") and mode == "text"
 
 
 def test_voice_falls_back_when_it_cannot_be_honoured(monkeypatch, capsys):
-    """Choosing option 2 on a machine with no speech has to say so."""
+    """Asking to speak on a machine with no speech has to say so."""
     import motherbrain.voice as voice
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(reason="no engine"))
-    monkeypatch.setattr("builtins.input", lambda _: "2")
-    assert voice.choose_start()[0] == "text"
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    action, mode, _cap = voice.choose_start()
+    assert (action, mode) == ("do", "text")
     assert "unavailable" in capsys.readouterr().out
 
     monkeypatch.setattr(voice, "detect",
                         lambda: voice.Capability(speak="espeak", listen="sr"))
-    monkeypatch.setattr("builtins.input", lambda _: "2")
-    assert voice.choose_start()[0] == "voice"
+    monkeypatch.setattr("builtins.input", lambda _: "voice")
+    assert voice.choose_start()[:2] == ("do", "voice")
 
 
 def test_menu_survives_no_terminal(monkeypatch):
@@ -1316,25 +1370,416 @@ def test_menu_survives_no_terminal(monkeypatch):
         raise OSError("no stdin")
 
     monkeypatch.setattr("builtins.input", no_terminal)
-    assert voice.choose_start()[0] == "text"
+    assert voice.choose_start()[:2] == ("do", "text")
 
 
-def test_web_menu_matches_the_terminal_menu():
+def test_every_surface_offers_the_same_four_options():
+    """The terminal, the browser and the window must not drift apart.
+
+    Three menus written three times is three chances to describe the same
+    button differently, so each option is checked against all of them by its
+    distinguishing words rather than its exact punctuation.
+    """
+    from motherbrain.gui import OPTIONS
+    from motherbrain.server import UI_HTML
+    from motherbrain.voice import MENU
+
+    wanted = [("what kind of program", "make"),
+              ("what to do", "do"),
+              ("something new", "teach"),
+              ("as a patch", "apply")]
+
+    gui_text = " ".join(label + " " + hint for label, hint in OPTIONS).lower()
+    for phrase, _ in wanted:
+        assert phrase in MENU.lower(), f"terminal menu is missing: {phrase}"
+        assert phrase in UI_HTML.lower(), f"browser menu is missing: {phrase}"
+        assert phrase in gui_text, f"window menu is missing: {phrase}"
+
+    assert len(OPTIONS) == 4
+
+
+def _data_uri(colour=(200, 10, 10), size=40) -> str:
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), colour).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def test_api_decodes_inline_images_and_refuses_to_fetch_urls():
+    """Inline images are decoded; a URL is not followed.
+
+    A model server that fetches whatever appears in its input is a
+    request-forgery primitive pointed at the inside of your network, and an
+    IDE that sends a link instead of the bytes should get no picture rather
+    than an outbound request.
+    """
+    from motherbrain.api_compat import content_to_images
+
+    content = [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": _data_uri()}},
+    ]
+    images = content_to_images(content, 32)
+    assert len(images) == 1
+    assert images[0].shape == (1, 3, 32, 32)
+
+    for hostile in ("http://169.254.169.254/latest/meta-data/",
+                    "file:///etc/passwd",
+                    "https://example.com/cat.png"):
+        assert content_to_images(
+            [{"type": "image_url", "image_url": {"url": hostile}}], 32) == []
+
+    assert content_to_images("plain text", 32) == []
+    assert content_to_images([{"type": "text", "text": "hi"}], 32) == []
+
+
+def test_a_blind_model_ignores_an_image_rather_than_failing(served):
+    """Sending a picture to a model with no tower must not be an error.
+
+    Editors attach images without asking what the model can do, and refusing
+    the whole request would break plain text chat for everyone.
+    """
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+    reply = client.post("/v1/chat/completions", json={
+        "model": "motherbrain",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": _data_uri()}},
+        ]}],
+        "max_tokens": 4,
+    })
+    assert reply.status_code == 200, reply.text
+    assert "content" in reply.json()["choices"][0]["message"]
+
+
+# ---- sight ----------------------------------------------------------------
+
+
+def test_rendered_pairs_are_reproducible_and_varied():
+    """Held-out accuracy only means something if train and test never overlap.
+
+    A seed fixes the set, so a run is repeatable; a different seed gives
+    different images of the same world, which is what makes the two splits
+    comparable and disjoint.
+    """
+    from motherbrain.imagedata import COLOURS, SHAPES, pairs
+
+    a, again = pairs(6, size=32, seed=3), pairs(6, size=32, seed=3)
+    assert all(torch.equal(x[0], y[0]) and x[1] == y[1] for x, y in zip(a, again))
+
+    other = pairs(6, size=32, seed=4)
+    assert not torch.equal(a[0][0], other[0][0])
+
+    for image, cap in a:
+        assert image.shape == (3, 32, 32)
+        assert 0.0 <= image.min() and image.max() <= 1.0
+        _article, colour, shape = cap.split()
+        assert colour in COLOURS and shape in SHAPES
+
+
+def test_sight_adds_parameters_and_refuses_twice():
+    """Attaching a tower is growth: new parameters, nothing existing touched."""
+    from motherbrain.growth import add_sight
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny())
+    before = model.n_params()
+    text_before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    add_sight(model, layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    assert model.n_params() > before
+    assert model.vision is not None
+
+    for name, tensor in text_before.items():
+        assert torch.equal(tensor, model.state_dict()[name]), name
+
+    with pytest.raises(ValueError, match="already see"):
+        add_sight(model, layers=1, width=32, heads=2, image_size=32, patch_size=16)
+
+
+def test_a_sight_patch_rebuilds_into_a_model_that_sees(served):
+    """A patch is only weights; the structure has to be replayed to load them.
+
+    So the tower's shape travels with the version. Getting that wrong gives a
+    shape error at best and silently wrong weights at worst, which is why the
+    rebuilt model is compared against the original output rather than just
+    checked for existence.
+    """
+    from motherbrain.cli import load_current
+    from motherbrain.growth import add_sight
+    from motherbrain.patches import PatchStore, Version, weights_fingerprint
+
+    run, _corpus = served
+    model, tok, _dev, _v = load_current(str(run), "cpu")
+    store = PatchStore(run)
+    store.set_base(weights_fingerprint(model), 0)
+
+    shape = dict(layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    before = model.n_params()
+    add_sight(model, **shape)
+    with torch.no_grad():                     # make the tower do something
+        for p in model.vision.parameters():
+            p.normal_(std=0.02)
+    model.eval()
+
+    image = torch.rand(1, 3, 32, 32)
+    idx = torch.tensor([tok.encode("a red", bos=True)])
+    with torch.no_grad():
+        expected, _ = model(idx, targets=None, images=image)
+
+    store.record(
+        Version(version=1, patch_id="sight01", parent=0, created_at=0.0,
+                doc_start=0, doc_end=0, n_documents=0, n_chars=0, n_tokens=0,
+                steps=1, rank=0, trainable_params=1, loss_before=1.0,
+                loss_after=0.5, mode="sight",
+                base_fingerprint=store.base_fingerprint,
+                params_before=before, params_after=model.n_params(),
+                vision_layers=shape["layers"], vision_width=shape["width"],
+                vision_heads=shape["heads"], image_size=shape["image_size"],
+                patch_size=shape["patch_size"]),
+        {name: t for name, t in model.state_dict().items()
+         if name.startswith("vision.")})
+
+    rebuilt, _tok, version = __import__(
+        "motherbrain.patches", fromlist=["build_version"]).build_version(
+            str(run), device="cpu")
+    assert version == 1
+    assert rebuilt.vision is not None, "the rebuilt model cannot see"
+    assert rebuilt.n_params() == model.n_params()
+
+    rebuilt.eval()
+    with torch.no_grad():
+        got, _ = rebuilt(idx, targets=None, images=image)
+    # The patch is stored fp16, so agreement is to that precision.
+    assert torch.allclose(expected, got, atol=2e-2)
+
+
+def test_a_sight_patch_must_also_enlarge_the_lineage(tmp_path):
+    """Every version is larger than the last, whatever kind of patch it is."""
+    from motherbrain.patches import PatchStore, Version
+
+    store = PatchStore(tmp_path)
+    with pytest.raises(ValueError, match="must add parameters"):
+        store.record(
+            Version(version=1, patch_id="p", parent=0, created_at=0.0,
+                    doc_start=0, doc_end=0, n_documents=0, n_chars=0,
+                    n_tokens=0, steps=1, rank=0, trainable_params=1,
+                    loss_before=1.0, loss_after=0.5, mode="sight",
+                    params_before=100, params_after=100),
+            {"x": torch.zeros(1)})
+
+
+def test_forced_choice_is_at_chance_before_the_tower_learns():
+    """An attached but untrained tower must not look like it can see.
+
+    This is the measurement the whole exercise rests on: if it read anything
+    other than the image, an untrained tower would still score.
+    """
+    from motherbrain.growth import add_sight
+    from motherbrain.imagedata import pairs
+    from motherbrain.sight import all_captions, forced_choice_accuracy
+    from motherbrain.tokenizer import Tokenizer
+
+    corpus_text = " ".join(all_captions()) * 20
+    tok = Tokenizer.train([corpus_text], vocab_size=300, verbose=False)
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny(vocab_size=tok.vocab_size, max_seq_len=64)).eval()
+    add_sight(model, layers=1, width=32, heads=2, image_size=32, patch_size=16)
+
+    samples = pairs(32, size=32, seed=11)
+    accuracy = forced_choice_accuracy(model, tok, samples, "cpu")
+    assert 0.0 <= accuracy <= 0.25, f"untrained tower scored {accuracy:.1%}"
+
+
+def test_workspace_flag_resolves_both_paths():
+    """One flag, so a drive cannot be half-configured.
+
+    Passing --corpus and --run separately means two chances to point at
+    different installations; --workspace is the pair. An explicit path still
+    wins, because overriding one of them is a real thing to want.
+    """
+    from motherbrain.cli import build_parser
+
+    args = build_parser().parse_args(["serve", "--workspace", "/media/usb/MB"])
+    assert args.corpus.startswith("/media/usb/MB")
+    assert args.run.startswith("/media/usb/MB")
+
+    args = build_parser().parse_args(
+        ["serve", "--workspace", "/media/usb/MB", "--run", "/elsewhere"])
+    assert args.run == "/elsewhere"
+    assert args.corpus.startswith("/media/usb/MB")
+
+
+def test_workspace_copy_is_runnable_on_its_own(served, tmp_path, monkeypatch):
+    """The copied directory must not need the checkout it came from.
+
+    That is the whole point of putting one on a drive: base, patches,
+    manifest and tokenizer travel together, and loading from the copy gets
+    the same version as loading from the original.
+    """
+    from motherbrain.cli import (build_parser, export_model, load_current,
+                                 shipped_base)
+    import motherbrain.cli as cli
+
+    run, corpus = served
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    export_model(str(run), models / "motherbrain-base.pt", device="cpu")
+    monkeypatch.setattr(cli, "shipped_base",
+                        lambda _run: models / "motherbrain-base.pt")
+
+    assert _grow(run, corpus, "the sky above the port") is not None
+    _model, _tok, _dev, expected = load_current(str(run), "cpu")
+
+    dest = tmp_path / "drive" / "MotherBrain"
+    args = build_parser().parse_args(
+        ["workspace", str(dest), "--run", str(run), "--corpus", str(corpus)])
+    assert args.func(args) == 0
+
+    for relative in ("models/motherbrain-base.pt", "models/motherbrain.pt",
+                     "runs/default/versions.json", "runs/default/tokenizer.json"):
+        assert (dest / relative).is_file(), relative
+    assert list((dest / "runs" / "default" / "patches").glob("*.pt"))
+    assert not (dest / "data" / "corpus").exists(), "corpus copied without asking"
+
+    # Load from the copy alone, resolving paths exactly as --workspace does.
+    copied = build_parser().parse_args(["status", "--workspace", str(dest)])
+    _model, _tok, _dev, version = load_current(copied.run, "cpu")
+    assert version == expected
+
+
+def test_code_seed_becomes_a_named_function():
+    """A base model continues context; it cannot be told what to write.
+
+    So the request becomes a docstring and its own words become the function
+    name — the shape the model saw in training. Filler words make poor
+    identifiers and are dropped, and a request made entirely of them still has
+    to produce a valid one.
+    """
+    from motherbrain.actions import code_seed, default_filename
+
+    opener, head = code_seed("make a script that renames files")
+    assert opener == "def renames_files("
+    assert head.startswith('"""make a script that renames files"""')
+    assert head.endswith(opener)
+    assert default_filename("make a script that renames files") == "renames_files.py"
+
+    assert code_seed("the a of it")[0] == "def main("
+    assert default_filename("!!!") == "program.py"
+
+
+def test_stream_never_splits_a_character(monkeypatch):
+    """Decoding token by token can cut a multi-byte character in half.
+
+    Emitting the halves gives replacement characters mid-word in every
+    language that needs more than ASCII, so bytes are held back until they
+    decode.
+    """
+    from motherbrain.actions import stream
+
+    class Tok:
+        def encode(self, text, bos=False, eos=False):
+            return [1]
+
+        def decode(self, ids):
+            # One character split across two tokens: only both together decode.
+            return {(2,): "\ufffd", (2, 3): "é", (4,): "!"}.get(tuple(ids), "\ufffd")
+
+    class Model:
+        vision = None
+
+        def generate(self, ids, **kw):
+            yield from (2, 3, 4)
+
+    pieces = list(stream(Model(), Tok(), "cpu", "x"))
+    assert pieces == ["é", "!"]
+
+
+def test_gui_opens_and_wires_its_four_options():
+    """The window must build and dispatch without a model present.
+
+    Loading happens on a worker thread, so a failure there has to leave a
+    usable window rather than a frozen one — and every option has to be
+    reachable before any weights exist.
+    """
+    tk = pytest.importorskip("tkinter")
+
+    from motherbrain import gui
+
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+
+    class Cfg:
+        image_size = 128
+
+    class Model:
+        vision = None
+        cfg = Cfg()
+
+        def n_params(self):
+            return 47_201_688
+
+    gui.App._load = lambda self: self.bridge.post(
+        self._loaded, Model(), object(), "cpu", 3,
+        __import__("motherbrain.voice", fromlist=["x"]).Capability())
+
+    try:
+        app = gui.App(root, "runs/default", "data/corpus", "cpu", 8, 2, 1)
+        root.update()
+        assert len(app.buttons) == 4
+        assert "v3" in app.header.cget("text")
+        assert "47.2M" in app.header.cget("text")
+
+        app.choose(3)                            # option 4 needs no typing
+        assert app.extra.winfo_children(), "apply must offer a button"
+        app.choose(2)                            # option 3 offers a file picker
+        assert app.extra.winfo_children(), "teach must offer a picker"
+
+        app.choose(1)                            # option 2 runs a real command
+        app.entry.insert("1.0", "list files")
+        app.submit()
+        for _ in range(60):
+            root.update()
+            if not app.busy:
+                break
+        assert "> list files" in app.view.get("1.0", "end")
+    finally:
+        root.destroy()
+
+
+def test_web_menu_wires_every_option_to_a_handler():
+    """A button with no handler looks identical to one that works.
+
+    The browser console lost its handlers once already, to a stray newline in
+    a JS string literal, so each option's dispatch value is checked to exist
+    both on a button and in the click handler that acts on it.
+    """
     from motherbrain.server import UI_HTML
 
     assert "What would you like to do?" in UI_HTML
-    for mode in ("text", "voice", "feed", "update"):
-        assert f'data-mode="{mode}"' in UI_HTML
-    for label in ("Tell me what to do", "Learn new information",
-                  "Apply it as a patch"):
-        assert label in UI_HTML
-
+    for mode in ("make", "text", "feed", "update"):
+        assert f'data-mode="{mode}"' in UI_HTML, mode
+    for branch in ("'make'", "'feed'", "'update'"):
+        assert f"m === {branch}" in UI_HTML, branch
 
 def test_console_page_offers_feeding_first():
     from motherbrain.server import UI_HTML
 
     assert 'data-mode="feed"' in UI_HTML
-    assert "Learn new information" in UI_HTML
+    assert "Teach MotherBrain something new" in UI_HTML
     # the distinction people miss: storing text is not the same as learning it
     assert "learning is what puts it in the weights" in UI_HTML
     assert "learn it now (grows the model)" in UI_HTML

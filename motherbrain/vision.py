@@ -123,6 +123,42 @@ class VisionTower(nn.Module):
         return self.to_text(self.norm(x))
 
 
+def load_image_bytes(data: bytes, size: int) -> torch.Tensor:
+    """Decode image bytes into the tensor the tower expects.
+
+    Separate from load_image because the bytes arrive from a request body as
+    often as from a disk, and a server should not have to write a temporary
+    file to look at a picture.
+    """
+    import io
+
+    from PIL import Image
+
+    img = Image.open(io.BytesIO(data)).convert("RGB").resize((size, size))
+    raw = torch.frombuffer(bytearray(img.tobytes()), dtype=torch.uint8)
+    return (raw.view(size, size, 3).permute(2, 0, 1).float() / 255.0).unsqueeze(0)
+
+
+def load_data_uri(uri: str, size: int) -> torch.Tensor | None:
+    """Decode a `data:image/...;base64,...` URI, or return None if it is not one.
+
+    IDEs and browsers send images inline this way. A URL pointing somewhere
+    else is deliberately not fetched: a model server that follows links in its
+    input will fetch whatever it is told to, from inside your network.
+    """
+    import base64
+
+    if not uri.startswith("data:image/"):
+        return None
+    _head, _, encoded = uri.partition(",")
+    if not encoded:
+        return None
+    try:
+        return load_image_bytes(base64.b64decode(encoded), size)
+    except Exception:                                     # noqa: BLE001
+        return None
+
+
 def load_image(path: str, size: int) -> torch.Tensor:
     """Read an image file into the (1, 3, size, size) tensor the tower wants."""
     from PIL import Image

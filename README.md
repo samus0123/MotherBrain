@@ -44,8 +44,21 @@ pip install -e ".[dev]"      # plus pytest and httpx, to run the tests
 
 `mb` finds your corpus and checkpoints by walking up from the current directory
 for a workspace, the way git finds `.git`, so it works from a subdirectory too.
-Override with `--corpus`/`--run`, or the `MB_CORPUS`/`MB_RUN` environment
-variables.
+Override with `--corpus`/`--run`, or point everything at one directory with
+`--workspace` (or `MB_WORKSPACE`).
+
+**A clone is already runnable.** The base weights and every patch are
+committed, so there is nothing to train and nothing to download:
+
+```bash
+git clone https://github.com/samus0123/MotherBrain
+cd MotherBrain
+sh scripts/install.sh
+mb status          # READY — loaded v3
+mb gui             # or: mb console, or: mb serve
+```
+
+`mb bootstrap` is only for starting a *new* lineage from your own corpus.
 
 ### If it will not start
 
@@ -143,28 +156,39 @@ mb serve            # 127.0.0.1 by default
 ```
 What would you like to do?
 
-  1  Tell me what to do by text
-  2  Tell me what to do by voice
-  3  Learn new information
-  4  Apply the learned information as a patch (ascend to the next version)
+  1  Tell MotherBrain what kind of program to make    (text or voice)
+  2  Tell MotherBrain what to do                      (text or voice)
+  3  Teach MotherBrain something new
+  4  Apply new knowledge as a patch (update)
 
-choose [1-4, default 1]
+choose [1-4, default 2]
 ```
 
-The browser console at `/` opens on the same four.
+All three faces open on the same four options — the terminal (`mb console`),
+the window (`mb gui`), and the browser (`mb serve`, then `/`).
 
-**1 and 2 — tell it what to do**, typed or spoken. Both land at the same
-prompt: write text for the model to continue, or run commands like `/make`,
-`/run`, `/versions`. Option 2 falls back to text, with the reason, on a machine
-that cannot speak or listen.
+**1 — what kind of program to make.** Describe it in plain words. The
+description becomes a docstring and its own words become the function name,
+because a base model continues context and cannot be told what to write. You
+get the code, then choose whether to save it and whether to run it. It is
+plausible Python, not working Python: read it first.
 
-**3 — Learn new information.** Type, paste, or give a path. This *stores* it.
+**2 — what to do.** An instruction: `make`, `run`, `write`, `find`, `delete`,
+`list`, or `sh` for any shell command. Anything the command table does not
+recognise is a prompt, and the model continues it. Parsing is deterministic —
+the model is never asked to interpret an instruction.
+
+Options 1 and 2 each ask **text or voice**, and only when the machine can
+actually do voice. Where it cannot, they say why and use text. Teaching and
+patching never ask, because they are not conversations.
+
+**3 — teach it something new.** Type, paste, or give a path. This *stores* it.
 The model is unchanged, and the console says so rather than leaving the
 impression that feeding was enough.
 
-**4 — Apply it as a patch.** This is where text on disk becomes part of the
-model: new experts are trained on it, the parameter count grows, and the
-version ascends.
+**4 — apply new knowledge as a patch.** This is where text on disk becomes
+part of the model: new experts are trained on it, the parameter count grows,
+and the version ascends.
 
 ```
 v1 -> v2
@@ -176,19 +200,12 @@ v1 -> v2
 
 Learning and applying are separate steps because they are separate things.
 
-Applying also **exports the model**, because a grown model otherwise lives only
-in `runs/`, which is gitignored and absent from a fresh clone. The export is
-what makes an ascent durable:
-
-```
-  in effect  the model now serving is v3
-  exported   models/motherbrain.pt (88.4 MB)
-             commit it to keep v3: git add models/motherbrain.pt && git commit
-```
-
-If the export fails it says so and notes that the patch exists only in `runs/`,
-rather than leaving the impression it was saved. `--export <path>` chooses a
-different destination.
+Applying also writes the merged model to `models/motherbrain.pt`. What makes
+an ascent durable in the repository, though, is the **patch** in
+`runs/default/patches/` — about 19MB, and committed. A merged model passed
+GitHub's 100MB limit at v3 and was never coming back under it, so the base is
+committed once and each version is committed as its patch. A clone rebuilds
+the current version from the two.
 
 ## Text, voice, or teach it something
 
@@ -350,16 +367,25 @@ instruction to learn something.
 
 ## How do I run it?
 
-Three commands, from a clean clone:
+Two commands, from a clean clone. The weights are committed, so there is
+nothing to train first:
 
 ```bash
 pip install -e .        # installs deps and the `mb` command
-mb bootstrap            # trains a base model if there is not one yet
-mb chat                 # talk to it
+mb gui                  # a window; or mb console, or mb serve
 ```
 
-`mb serve` instead of `mb chat` exposes it over HTTP for your IDEs. `mb status`
-at any point tells you what state you are in.
+| command | what you get |
+| --- | --- |
+| `mb gui` | a desktop window: the four options as buttons, voice, images |
+| `mb console` | the same four options in the terminal |
+| `mb serve` | HTTP for your IDEs, and a browser console at `/` |
+| `mb chat` | one prompt, one completion, nothing else |
+| `mb status` | what is on disk and what to run next |
+
+`mb bootstrap` is a different thing: it starts a **new** lineage from your own
+corpus, replacing the committed one. You want it only if you are training your
+own base rather than continuing this one.
 
 A freshly bootstrapped model is barely trained and will emit mostly whitespace
 and fragments — `mb chat` frames its output and reports a token count so you
@@ -425,6 +451,62 @@ loads under `torch.load(weights_only=True)` — no code executes when you open
 one, which is what makes it safe to hand to someone else. This is also how a
 trained model survives a machine: checkpoints are gitignored, exports are
 small enough to keep.
+
+## Running it from your own drive
+
+MotherBrain does not have to live in a checkout. `mb workspace` copies a
+complete, self-contained one onto any disk — the base the patches apply to,
+the patches, the manifest, the tokenizer, and a merged model of the current
+version:
+
+```bash
+mb workspace /media/usb/MotherBrain
+```
+
+```
+workspace  /media/usb/MotherBrain
+  models/motherbrain-base.pt                       50.6 MB
+  runs/default/versions.json                        0.0 MB
+  runs/default/patches/0001-e22273f6.pt            18.9 MB
+  runs/default/patches/0002-f487c08f.pt            18.9 MB
+  runs/default/patches/0003-c1dce65e.pt            18.9 MB
+  models/motherbrain.pt                           107.2 MB
+  total                                           214.7 MB
+```
+
+The corpus is left behind unless you pass `--with-corpus`; it is the largest
+thing here and is only needed to *learn* something new, not to run. Then point
+anything at it:
+
+```bash
+mb gui       --workspace /media/usb/MotherBrain
+mb console   --workspace /media/usb/MotherBrain
+mb serve     --workspace /media/usb/MotherBrain --host 0.0.0.0
+```
+
+or set it once, and every command follows:
+
+```bash
+export MB_WORKSPACE=/media/usb/MotherBrain     # Windows: setx MB_WORKSPACE ...
+```
+
+**Hosting from the drive.** `mb serve --host 0.0.0.0` makes it reachable from
+every machine on your network, and it will refuse to do that without an API
+key unless you insist:
+
+```bash
+MB_API_KEY=$(openssl rand -hex 32) mb serve \
+    --workspace /media/usb/MotherBrain --host 0.0.0.0
+```
+
+Patches applied while serving are written back to the drive, so the drive
+holds the lineage and the checkout is not involved at all. Add `--tls-cert`
+and `--tls-key` (see **Serving over HTTPS**) before letting it off your own
+network — without them, everything fed and generated crosses in the clear.
+
+A model resolves against the run directory's own neighbourhood first, so a
+workspace on a drive always loads *that* drive's model, never whichever
+checkout you happened to type the command from.
 
 ## How do I feed it new information?
 
