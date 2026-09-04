@@ -537,7 +537,7 @@ def cmd_console(args) -> int:
     import torch
 
     from motherbrain.commands import HELP, parse
-    from motherbrain.data import Corpus
+    from motherbrain.data import TEXT_SUFFIXES, Corpus
     from motherbrain.patches import PatchConfig, PatchStore, create_patch
     from motherbrain.tokenizer import EOS_ID
 
@@ -689,6 +689,133 @@ def cmd_console(args) -> int:
                                     eos_id=EOS_ID, images=image):
             print(tok.decode([token]), end="", flush=True)
         print(f"\n{rule}\n")
+
+    def do_write(path: str, content: str) -> None:
+        """Write a file, asking for the text when it was not given inline."""
+        target = Path(path).expanduser()
+        if not content:
+            print(f"What should go in {target}? Blank line to finish.\n")
+            lines: list[str] = []
+            while True:
+                try:
+                    line = input("  ")
+                except (EOFError, KeyboardInterrupt, OSError):
+                    print()
+                    break
+                if not line.strip():
+                    break
+                lines.append(line)
+            content = "\n".join(lines)
+        if not content:
+            print("nothing to write.\n")
+            return
+
+        if target.exists():
+            try:
+                answer = input(f"{target} exists. overwrite? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt, OSError):
+                print()
+                return
+            if not answer.startswith("y"):
+                print("left alone.\n")
+                return
+
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content + "\n", encoding="utf-8")
+        print(f"wrote {len(content) + 1:,} bytes to {target}\n")
+
+    def do_delete(path: str) -> None:
+        """Delete a file, after confirming. Deleting is not undoable."""
+        target = Path(path).expanduser()
+        if not target.exists():
+            print(f"no such file: {target}\n")
+            return
+        if target.is_dir():
+            print(f"{target} is a directory; this only deletes files.\n")
+            return
+        size = target.stat().st_size
+        try:
+            answer = input(f"delete {target} ({size:,} bytes)? "
+                           f"this cannot be undone [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return
+        if not answer.startswith("y"):
+            print("kept.\n")
+            return
+        target.unlink()
+        print(f"deleted {target}\n")
+
+    def do_find(pattern: str) -> None:
+        """Search the files below here for a pattern."""
+        import re as _re
+
+        try:
+            rx = _re.compile(pattern)
+        except _re.error as exc:
+            print(f"not a valid pattern: {exc}\n")
+            return
+
+        root = Path.cwd()
+        hits = scanned = 0
+        for path in sorted(root.rglob("*")):
+            if hits >= 40 or scanned >= 4000:
+                break
+            if not path.is_file() or path.suffix.lower() not in TEXT_SUFFIXES:
+                continue
+            if any(p in {".git", "node_modules", "__pycache__", ".venv"}
+                   for p in path.parts):
+                continue
+            scanned += 1
+            try:
+                for n, line in enumerate(path.read_text(
+                        encoding="utf-8", errors="replace").splitlines(), 1):
+                    if rx.search(line):
+                        rel = path.relative_to(root)
+                        print(f"  {rel}:{n}: {line.strip()[:96]}")
+                        hits += 1
+                        if hits >= 40:
+                            break
+            except OSError:
+                continue
+        print(f"\n{hits} match(es) in {scanned} file(s)"
+              + (" (stopped early)" if hits >= 40 else "") + "\n")
+
+    def do_sh(command: str) -> None:
+        """Run a shell command and show what it did.
+
+        This is the console reaching the machine directly. It is confined to
+        the terminal, where you already have a shell, and refused over HTTP
+        where it would be remote code execution.
+        """
+        import subprocess
+
+        try:
+            answer = input(f"run: {command}\nconfirm? [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt, OSError):
+            print()
+            return
+        if not answer.startswith("y"):
+            print("not run.\n")
+            return
+
+        rule = "─" * 60
+        print(rule)
+        try:
+            proc = subprocess.run(command, shell=True, capture_output=True,
+                                  text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            print(f"{rule}\nstopped after 60 seconds.\n")
+            return
+        except OSError as exc:
+            print(f"{rule}\ncould not run it: {exc}\n")
+            return
+        if proc.stdout:
+            print(proc.stdout, end="")
+        if proc.stderr:
+            print(proc.stderr, end="")
+        print(rule)
+        print(f"exit code {proc.returncode}\n")
 
     def do_run(path: str) -> None:
         """Run a python file and show what it did."""
@@ -927,7 +1054,15 @@ def cmd_console(args) -> int:
         apply_as_patch()
         mode = "text"
 
-    print("/help for commands, empty line or ctrl-c to leave.\n")
+    print("Tell me what to do. For example:\n")
+    print("  make a script that renames files      write code, save it, run it")
+    print("  write notes.txt                       create a file")
+    print("  find TODO                             search the files here")
+    print("  run script.py                         run it and show the output")
+    print("  list files                            what is here")
+    print("  sh git status                         any shell command")
+    print("  <anything else>                       the model continues it")
+    print("\n/help for the full list, empty line or ctrl-c to leave.\n")
 
     while True:
         try:
@@ -1003,6 +1138,14 @@ def cmd_console(args) -> int:
             do_make(cmd.text, cmd.args.get("path"))
         elif cmd.name == "see":
             do_see(cmd.args["path"], cmd.args.get("prompt", ""))
+        elif cmd.name == "write":
+            do_write(cmd.args["path"], cmd.args.get("content", ""))
+        elif cmd.name == "delete":
+            do_delete(cmd.args["path"])
+        elif cmd.name == "find":
+            do_find(cmd.args["pattern"])
+        elif cmd.name == "sh":
+            do_sh(cmd.args["command"])
         elif cmd.name == "run":
             do_run(cmd.args["path"])
         elif cmd.name == "ls":
@@ -1189,7 +1332,7 @@ def experts_for_target(cfg: ModelConfig, target: float) -> int:
 
 def cmd_patch(args) -> int:
     """Train the not-yet-learned corpus documents into the next version."""
-    from motherbrain.data import Corpus
+    from motherbrain.data import TEXT_SUFFIXES, Corpus
     from motherbrain.patches import PatchConfig, PatchStore, create_patch
 
     store = PatchStore(args.run)

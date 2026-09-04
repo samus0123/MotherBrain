@@ -270,8 +270,32 @@ exit code 1  (it failed, which is usual for code this model writes)
 |---|---|
 | `/make <what> [-> file]` | writes a program, saves it, offers to run it |
 | `/run <file>` | runs a python file and shows its output |
+| `/write <file> [text]` | writes a file, asking for the text if not given |
+| `/find <pattern>` | searches the files here |
+| `/sh <command>` | runs a shell command, after confirming |
+| `/delete <file>` | deletes a file, after confirming |
 | `/ls [dir]` | lists files |
 | `/cat <file>` | shows a file |
+| `/see <image> [prompt]` | looks at an image |
+
+Choosing option 1 or 2 opens with what you can ask for, rather than a bare
+prompt:
+
+```
+Tell me what to do. For example:
+
+  make a script that renames files      write code, save it, run it
+  write notes.txt                       create a file
+  find TODO                             search the files here
+  run script.py                         run it and show the output
+  list files                            what is here
+  sh git status                         any shell command
+  <anything else>                       the model continues it
+```
+
+Plain English works for all of them — "search for TODO", "remove old.txt",
+"list files". Anything the table does not cover is treated as a prompt and
+continued by the model.
 
 **Two things are worth being exact about.**
 
