@@ -635,6 +635,14 @@ def cmd_status(args) -> int:
     if store.base_fingerprint:
         print(f"  base fingerprint: {store.base_fingerprint}")
 
+    sighted = [v for v in versions if v.mode == "sight"]
+    if sighted:
+        best = max(sighted, key=lambda v: v.sight_accuracy)
+        print(f"  sight      v{best.version}, naming {best.sight_accuracy:.1%} of "
+              f"held-out images (chance 3.1%)")
+    else:
+        print("  sight      none yet (run `mb sight` to add a vision tower)")
+
     pending = corpus.n_documents - store.consumed_docs()
     if pending > 0:
         print(f"  {pending} document(s) fed but not yet learned "

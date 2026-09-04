@@ -82,9 +82,21 @@ from motherbrain import __version__
 print(f"MotherBrain {__version__} installed · torch {torch.__version__}")
 PYEOF
 
+# The window needs Tkinter, which Debian and its derivatives split into its own
+# package. Everything else works without it, so this is a note rather than a
+# failure.
+if ! "$VENV/bin/python" -c "import tkinter" >/dev/null 2>&1; then
+  echo "note: no Tkinter, so 'mb gui' (the window) will not open."
+  echo "      Debian, Ubuntu, Kali:  sudo apt install python3-tk"
+  echo "      then re-run this script."
+  echo
+fi
+
 echo
 echo "done. start it with:"
-echo "    $VENV/bin/mb console"
+echo "    $VENV/bin/mb gui        # a window"
+echo "    $VENV/bin/mb console    # the terminal"
+echo "    $VENV/bin/mb serve      # HTTP, then open http://127.0.0.1:8000"
 echo
 echo "or activate the environment first:"
-echo "    . $VENV/bin/activate && mb console"
+echo "    . $VENV/bin/activate && mb gui"
