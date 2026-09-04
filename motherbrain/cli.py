@@ -20,6 +20,22 @@ from pathlib import Path
 
 from motherbrain.config import PRESETS, ModelConfig, human, scale_to
 
+def resolve_paths(args) -> None:
+    """Fill in --corpus and --run, honouring --workspace when it is given.
+
+    One directory holds everything a MotherBrain needs - corpus, run, models -
+    so pointing at a drive should be one flag rather than three paths that can
+    disagree with each other. An explicit --corpus or --run still wins.
+    """
+    workspace = getattr(args, "workspace", None)
+    root = Path(workspace).expanduser() if workspace else None
+
+    if getattr(args, "corpus", None) is None:
+        args.corpus = str(root / "data" / "corpus") if root else DEFAULT_CORPUS
+    if getattr(args, "run", None) is None:
+        args.run = str(root / "runs" / "default") if root else DEFAULT_RUN
+
+
 def project_root() -> Path:
     """Find the MotherBrain workspace, the way git walks up to find .git.
 
@@ -418,6 +434,82 @@ def cmd_chat(args) -> int:
 
 # --------------------------------------------------------------------------
 # status and bootstrap
+
+
+def cmd_workspace(args) -> int:
+    """Copy a complete, runnable MotherBrain onto another disk.
+
+    The point is a directory that does not need this checkout: the base the
+    patches apply to, the patches themselves, the manifest, the tokenizer, and
+    a merged model of the current version. Point --workspace at it afterwards
+    and every command works from there - including `mb serve`, which is what
+    hosting from your own drive means.
+
+    The corpus is left behind unless asked for. It is the largest thing here
+    by far and is only needed to learn something new, not to run.
+    """
+    import shutil
+
+    dest = Path(args.dest).expanduser()
+    run = Path(args.run)
+    (dest / "models").mkdir(parents=True, exist_ok=True)
+    (dest / "runs" / "default" / "patches").mkdir(parents=True, exist_ok=True)
+
+    copied: list[tuple[str, int]] = []
+
+    def copy(src: Path, target: Path) -> None:
+        if not src.is_file():
+            return
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, target)
+        copied.append((str(target.relative_to(dest)), target.stat().st_size))
+
+    base = shipped_base(args.run)
+    if base is None:
+        print("error: no committed base to copy (models/motherbrain-base.pt).\n"
+              "       run `mb export` from a checkout that has one.",
+              file=sys.stderr)
+        return 1
+    copy(base, dest / "models" / "motherbrain-base.pt")
+
+    for name in ("config.json", "tokenizer.json", "versions.json"):
+        copy(run / name, dest / "runs" / "default" / name)
+    for patch in sorted((run / "patches").glob("*.pt")):
+        copy(patch, dest / "runs" / "default" / "patches" / patch.name)
+
+    if args.with_corpus:
+        corpus = Path(args.corpus)
+        if corpus.is_dir():
+            shutil.copytree(corpus, dest / "data" / "corpus", dirs_exist_ok=True)
+            size = sum(f.stat().st_size for f in (dest / "data" / "corpus").rglob("*")
+                       if f.is_file())
+            copied.append(("data/corpus/", size))
+
+    # The merged model: the whole current version in one file, which is what
+    # you actually want a copy of on a disk you own.
+    merged = dest / "models" / "motherbrain.pt"
+    try:
+        written = export_model(args.run, merged, device=args.device,
+                               corpus_dir=args.corpus)
+        copied.append((str(merged.relative_to(dest)), written))
+    except Exception as exc:                              # noqa: BLE001
+        print(f"warning: could not export the merged model: {exc}", file=sys.stderr)
+
+    total = sum(size for _, size in copied)
+    print(f"workspace  {dest.resolve()}")
+    for name, size in copied:
+        print(f"  {name:<44} {size / 1e6:>8,.1f} MB")
+    print(f"  {'total':<44} {total / 1e6:>8,.1f} MB")
+    if not args.with_corpus:
+        print("\n  the corpus was not copied (--with-corpus to include it).")
+        print("  it is only needed to teach something new, not to run.")
+
+    print(f"\nrun it from there:")
+    print(f"  mb gui       --workspace {dest}")
+    print(f"  mb console   --workspace {dest}")
+    print(f"  mb serve     --workspace {dest} --host 0.0.0.0")
+    print(f"\nor set it once:  export MB_WORKSPACE={dest}")
+    return 0
 
 
 def cmd_gui(args) -> int:
@@ -1678,16 +1770,34 @@ def cmd_serve(args) -> int:
 # --------------------------------------------------------------------------
 
 
+class _Parser(argparse.ArgumentParser):
+    """An ArgumentParser that resolves --workspace as part of parsing.
+
+    Doing it here rather than in main() means every caller gets it - the tests
+    build a parser and invoke the command function directly, and a path that
+    only main() fills in would be None for all of them.
+    """
+
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args, namespace)
+        resolve_paths(parsed)
+        return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = _Parser(
         prog="mb", description="MotherBrain: build, feed, train and serve a language model.",
         formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__,
     )
     sub = p.add_subparsers(dest="command", required=True)
 
     def common(sp):
-        sp.add_argument("--corpus", default=DEFAULT_CORPUS, help="corpus directory")
-        sp.add_argument("--run", default=DEFAULT_RUN, help="run/checkpoint directory")
+        sp.add_argument("--workspace", default=os.environ.get("MB_WORKSPACE"),
+                        help="a MotherBrain directory to work in: its "
+                             "data/corpus, runs/default and models/ are used "
+                             "together. Point it at a drive to run from there.")
+        sp.add_argument("--corpus", default=None, help="corpus directory")
+        sp.add_argument("--run", default=None, help="run/checkpoint directory")
         return sp
 
     s = sub.add_parser("scale", help="price out a configuration")
@@ -1835,6 +1945,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--days", type=int, default=825)
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_cert)
+
+    s = common(sub.add_parser(
+        "workspace",
+        help="copy a complete, runnable MotherBrain onto another disk"))
+    s.add_argument("dest", help="where to put it, e.g. /media/usb/MotherBrain")
+    s.add_argument("--with-corpus", action="store_true",
+                   help="also copy the corpus (large; only needed to learn)")
+    s.add_argument("--device", default="cpu")
+    s.set_defaults(func=cmd_workspace)
 
     s = common(sub.add_parser(
         "gui", help="open MotherBrain in a window (the same four options)"))

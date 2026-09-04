@@ -1398,6 +1398,63 @@ def test_every_surface_offers_the_same_four_options():
     assert len(OPTIONS) == 4
 
 
+def test_workspace_flag_resolves_both_paths():
+    """One flag, so a drive cannot be half-configured.
+
+    Passing --corpus and --run separately means two chances to point at
+    different installations; --workspace is the pair. An explicit path still
+    wins, because overriding one of them is a real thing to want.
+    """
+    from motherbrain.cli import build_parser
+
+    args = build_parser().parse_args(["serve", "--workspace", "/media/usb/MB"])
+    assert args.corpus.startswith("/media/usb/MB")
+    assert args.run.startswith("/media/usb/MB")
+
+    args = build_parser().parse_args(
+        ["serve", "--workspace", "/media/usb/MB", "--run", "/elsewhere"])
+    assert args.run == "/elsewhere"
+    assert args.corpus.startswith("/media/usb/MB")
+
+
+def test_workspace_copy_is_runnable_on_its_own(served, tmp_path, monkeypatch):
+    """The copied directory must not need the checkout it came from.
+
+    That is the whole point of putting one on a drive: base, patches,
+    manifest and tokenizer travel together, and loading from the copy gets
+    the same version as loading from the original.
+    """
+    from motherbrain.cli import (build_parser, export_model, load_current,
+                                 shipped_base)
+    import motherbrain.cli as cli
+
+    run, corpus = served
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    export_model(str(run), models / "motherbrain-base.pt", device="cpu")
+    monkeypatch.setattr(cli, "shipped_base",
+                        lambda _run: models / "motherbrain-base.pt")
+
+    assert _grow(run, corpus, "the sky above the port") is not None
+    _model, _tok, _dev, expected = load_current(str(run), "cpu")
+
+    dest = tmp_path / "drive" / "MotherBrain"
+    args = build_parser().parse_args(
+        ["workspace", str(dest), "--run", str(run), "--corpus", str(corpus)])
+    assert args.func(args) == 0
+
+    for relative in ("models/motherbrain-base.pt", "models/motherbrain.pt",
+                     "runs/default/versions.json", "runs/default/tokenizer.json"):
+        assert (dest / relative).is_file(), relative
+    assert list((dest / "runs" / "default" / "patches").glob("*.pt"))
+    assert not (dest / "data" / "corpus").exists(), "corpus copied without asking"
+
+    # Load from the copy alone, resolving paths exactly as --workspace does.
+    copied = build_parser().parse_args(["status", "--workspace", str(dest)])
+    _model, _tok, _dev, version = load_current(copied.run, "cpu")
+    assert version == expected
+
+
 def test_code_seed_becomes_a_named_function():
     """A base model continues context; it cannot be told what to write.
 
