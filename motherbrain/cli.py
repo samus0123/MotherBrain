@@ -436,6 +436,52 @@ def cmd_chat(args) -> int:
 # status and bootstrap
 
 
+def cmd_sight(args) -> int:
+    """Give the current version sight, as the next version."""
+    from motherbrain.sight import create_sight_patch
+
+    def progress(info):
+        if info["step"] % 25 == 0 or info["step"] == info["total"]:
+            print(f"  step {info['step']}/{info['total']}  "
+                  f"loss {info['loss']:.4f}", flush=True)
+
+    tower = None
+    if args.tower:
+        import torch
+
+        tower = torch.load(args.tower, map_location="cpu", weights_only=True)
+        print(f"loading an already-trained tower from {args.tower}")
+
+    version, result = create_sight_patch(
+        args.run, device=args.device, steps=args.steps,
+        batch_size=args.batch_size, lr=args.lr, layers=args.layers,
+        width=args.width, heads=args.heads, image_size=args.image_size,
+        patch_size=args.patch_size, n_train=args.n_train, n_eval=args.n_eval,
+        progress_cb=progress, tower_state=tower)
+
+    print(f"\nv{version.parent} -> v{version.version}")
+    print(f"  gained     sight: a {args.layers}-layer vision tower")
+    print(f"  grew       {human(version.params_before)} -> "
+          f"{human(version.params_after)} "
+          f"(+{version.params_after - version.params_before:,} parameters)")
+    print(f"  names      {result['accuracy_after']:.1%} of held-out images "
+          f"correctly (chance {result['chance']:.1%})")
+    if result["accuracy_after"] < result["chance"] * 2:
+        print("  warning    that is not meaningfully above chance. The tower is "
+              "attached\n             but has not learned to see; train longer.")
+    print(f"  in effect  the model now serving is v{version.version}")
+
+    target = Path(args.export or shipped_model(args.run)
+                  or Path("models/motherbrain.pt"))
+    try:
+        written = export_model(args.run, target, device=args.device,
+                               corpus_dir=args.corpus)
+        print(f"  exported   {target} ({written / 1e6:,.1f} MB)")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  warning: could not export to {target}: {exc}")
+    return 0
+
+
 def cmd_workspace(args) -> int:
     """Copy a complete, runnable MotherBrain onto another disk.
 
@@ -1945,6 +1991,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--days", type=int, default=825)
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_cert)
+
+    s = common(sub.add_parser(
+        "sight", help="give the current version sight, as the next version"))
+    s.add_argument("--steps", type=int, default=3000)
+    s.add_argument("--batch-size", type=int, default=24)
+    s.add_argument("--lr", type=float, default=6e-4)
+    s.add_argument("--layers", type=int, default=4, help="vision tower depth")
+    s.add_argument("--width", type=int, default=256)
+    s.add_argument("--heads", type=int, default=4)
+    s.add_argument("--image-size", type=int, default=64)
+    s.add_argument("--patch-size", type=int, default=16)
+    s.add_argument("--n-train", type=int, default=4096,
+                   help="rendered image-caption pairs to train on")
+    s.add_argument("--n-eval", type=int, default=192,
+                   help="held-out pairs used to measure whether it can see")
+    s.add_argument("--tower", help="a trained vision tower to load instead of "
+                                   "training one here")
+    s.add_argument("--export", help="where to write the merged model")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_sight)
 
     s = common(sub.add_parser(
         "workspace",

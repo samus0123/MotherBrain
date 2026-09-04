@@ -45,6 +45,11 @@ ATTN_TARGETS = ("wq", "wk", "wv", "wo")
 FFN_TARGETS = ("gate", "up", "down")
 
 
+# Modes that add parameters. The lineage's promise - every version larger
+# than the last - is checked against these.
+GROWING_MODES = ("grow", "sight")
+
+
 @dataclass
 class PatchConfig:
     # "grow" appends experts, so the model gains parameters with every version.
@@ -61,6 +66,15 @@ class PatchConfig:
     include_ffn: bool = True
     include_experts: bool = False
     seed: int = 1337
+
+    # Only meaningful when mode == "sight": the shape of the vision tower to
+    # attach. Recorded with the version, because a patch is only weights and
+    # they have to be loaded back into the structure they were trained in.
+    vision_layers: int = 4
+    vision_width: int = 256
+    vision_heads: int = 4
+    image_size: int = 64
+    patch_size: int = 16
 
 
 def _sample_fingerprint(model: nn.Module, legacy: bool) -> str:
@@ -149,9 +163,34 @@ class Version:
     params_before: int = 0
     params_after: int = 0
 
+    # The shape of the vision tower a sight patch attached. Weights alone
+    # cannot say what they belong to, so rebuilding a version needs this.
+    vision_layers: int = 0
+    vision_width: int = 0
+    vision_heads: int = 0
+    image_size: int = 0
+    patch_size: int = 0
+
+    # What the model could name in held-out images after this patch, out of
+    # images it had never seen. Nothing else in a lineage measures whether the
+    # model can actually see, so it is recorded rather than reported once and
+    # forgotten.
+    sight_accuracy: float = 0.0
+
     @property
     def filename(self) -> str:
         return f"{self.version:04d}-{self.patch_id}.pt"
+
+    def patch_config(self) -> "PatchConfig":
+        """The configuration needed to replay this version onto the base."""
+        return PatchConfig(
+            mode=self.mode, grow_experts=self.grow_experts, rank=self.rank,
+            include_ffn=True,
+            vision_layers=self.vision_layers or 4,
+            vision_width=self.vision_width or 256,
+            vision_heads=self.vision_heads or 4,
+            image_size=self.image_size or 64,
+            patch_size=self.patch_size or 16)
 
 
 class LoRALinear(nn.Module):
@@ -237,7 +276,24 @@ def merge_all(model: nn.Module) -> int:
 
 
 def apply_patch(model: nn.Module, payload: dict, cfg: PatchConfig) -> int:
-    """Load a saved patch into `model`, growing it first if that is its kind."""
+    """Load a saved patch into `model`, growing it first if that is its kind.
+
+    A patch is only weights; the structure they belong to has to be rebuilt
+    first, exactly as it was when they were trained. That is why the mode is
+    recorded with the version and replayed here.
+    """
+    if cfg.mode == "sight":
+        from motherbrain.growth import add_sight
+
+        add_sight(model, layers=cfg.vision_layers, width=cfg.vision_width,
+                  heads=cfg.vision_heads, image_size=cfg.image_size,
+                  patch_size=cfg.patch_size)
+        result = model.load_state_dict(payload, strict=False)
+        if result.unexpected_keys:
+            raise ValueError(
+                f"patch does not fit this model: {result.unexpected_keys[:3]}")
+        return cfg.vision_layers
+
     if cfg.mode == "grow":
         from motherbrain.growth import grow
 
@@ -362,10 +418,10 @@ class PatchStore:
         # larger than the one before it, and a patch that does not enlarge the
         # model is a bug in the caller rather than a version worth keeping -
         # recording it would leave a lineage that claims growth it did not do.
-        if v.mode == "grow" and v.params_after and v.params_before:
+        if v.mode in GROWING_MODES and v.params_after and v.params_before:
             if v.params_after <= v.params_before:
                 raise ValueError(
-                    f"a growth patch must add parameters: v{v.version} went "
+                    f"a {v.mode} patch must add parameters: v{v.version} went "
                     f"{v.params_before:,} -> {v.params_after:,}")
             previous = [x for x in self.manifest()["versions"]
                         if x["version"] < v.version and x.get("params_after")]
@@ -441,9 +497,7 @@ def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
     for v in store.versions():
         if v.version > target:
             break
-        cfg = PatchConfig(mode=v.mode, grow_experts=v.grow_experts,
-                          rank=v.rank, include_ffn=True)
-        apply_patch(model, store.load_payload(v), cfg)
+        apply_patch(model, store.load_payload(v), v.patch_config())
     model.eval()
     return model, tok, target
 

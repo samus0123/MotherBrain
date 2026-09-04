@@ -1398,6 +1398,210 @@ def test_every_surface_offers_the_same_four_options():
     assert len(OPTIONS) == 4
 
 
+def _data_uri(colour=(200, 10, 10), size=40) -> str:
+    import base64
+    import io
+
+    from PIL import Image
+
+    buf = io.BytesIO()
+    Image.new("RGB", (size, size), colour).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def test_api_decodes_inline_images_and_refuses_to_fetch_urls():
+    """Inline images are decoded; a URL is not followed.
+
+    A model server that fetches whatever appears in its input is a
+    request-forgery primitive pointed at the inside of your network, and an
+    IDE that sends a link instead of the bytes should get no picture rather
+    than an outbound request.
+    """
+    from motherbrain.api_compat import content_to_images
+
+    content = [
+        {"type": "text", "text": "what is this?"},
+        {"type": "image_url", "image_url": {"url": _data_uri()}},
+    ]
+    images = content_to_images(content, 32)
+    assert len(images) == 1
+    assert images[0].shape == (1, 3, 32, 32)
+
+    for hostile in ("http://169.254.169.254/latest/meta-data/",
+                    "file:///etc/passwd",
+                    "https://example.com/cat.png"):
+        assert content_to_images(
+            [{"type": "image_url", "image_url": {"url": hostile}}], 32) == []
+
+    assert content_to_images("plain text", 32) == []
+    assert content_to_images([{"type": "text", "text": "hi"}], 32) == []
+
+
+def test_a_blind_model_ignores_an_image_rather_than_failing(served):
+    """Sending a picture to a model with no tower must not be an error.
+
+    Editors attach images without asking what the model can do, and refusing
+    the whole request would break plain text chat for everyone.
+    """
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+    reply = client.post("/v1/chat/completions", json={
+        "model": "motherbrain",
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": "look"},
+            {"type": "image_url", "image_url": {"url": _data_uri()}},
+        ]}],
+        "max_tokens": 4,
+    })
+    assert reply.status_code == 200, reply.text
+    assert "content" in reply.json()["choices"][0]["message"]
+
+
+# ---- sight ----------------------------------------------------------------
+
+
+def test_rendered_pairs_are_reproducible_and_varied():
+    """Held-out accuracy only means something if train and test never overlap.
+
+    A seed fixes the set, so a run is repeatable; a different seed gives
+    different images of the same world, which is what makes the two splits
+    comparable and disjoint.
+    """
+    from motherbrain.imagedata import COLOURS, SHAPES, pairs
+
+    a, again = pairs(6, size=32, seed=3), pairs(6, size=32, seed=3)
+    assert all(torch.equal(x[0], y[0]) and x[1] == y[1] for x, y in zip(a, again))
+
+    other = pairs(6, size=32, seed=4)
+    assert not torch.equal(a[0][0], other[0][0])
+
+    for image, cap in a:
+        assert image.shape == (3, 32, 32)
+        assert 0.0 <= image.min() and image.max() <= 1.0
+        _article, colour, shape = cap.split()
+        assert colour in COLOURS and shape in SHAPES
+
+
+def test_sight_adds_parameters_and_refuses_twice():
+    """Attaching a tower is growth: new parameters, nothing existing touched."""
+    from motherbrain.growth import add_sight
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny())
+    before = model.n_params()
+    text_before = {k: v.clone() for k, v in model.state_dict().items()}
+
+    add_sight(model, layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    assert model.n_params() > before
+    assert model.vision is not None
+
+    for name, tensor in text_before.items():
+        assert torch.equal(tensor, model.state_dict()[name]), name
+
+    with pytest.raises(ValueError, match="already see"):
+        add_sight(model, layers=1, width=32, heads=2, image_size=32, patch_size=16)
+
+
+def test_a_sight_patch_rebuilds_into_a_model_that_sees(served):
+    """A patch is only weights; the structure has to be replayed to load them.
+
+    So the tower's shape travels with the version. Getting that wrong gives a
+    shape error at best and silently wrong weights at worst, which is why the
+    rebuilt model is compared against the original output rather than just
+    checked for existence.
+    """
+    from motherbrain.cli import load_current
+    from motherbrain.growth import add_sight
+    from motherbrain.patches import PatchStore, Version, weights_fingerprint
+
+    run, _corpus = served
+    model, tok, _dev, _v = load_current(str(run), "cpu")
+    store = PatchStore(run)
+    store.set_base(weights_fingerprint(model), 0)
+
+    shape = dict(layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    before = model.n_params()
+    add_sight(model, **shape)
+    with torch.no_grad():                     # make the tower do something
+        for p in model.vision.parameters():
+            p.normal_(std=0.02)
+    model.eval()
+
+    image = torch.rand(1, 3, 32, 32)
+    idx = torch.tensor([tok.encode("a red", bos=True)])
+    with torch.no_grad():
+        expected, _ = model(idx, targets=None, images=image)
+
+    store.record(
+        Version(version=1, patch_id="sight01", parent=0, created_at=0.0,
+                doc_start=0, doc_end=0, n_documents=0, n_chars=0, n_tokens=0,
+                steps=1, rank=0, trainable_params=1, loss_before=1.0,
+                loss_after=0.5, mode="sight",
+                base_fingerprint=store.base_fingerprint,
+                params_before=before, params_after=model.n_params(),
+                vision_layers=shape["layers"], vision_width=shape["width"],
+                vision_heads=shape["heads"], image_size=shape["image_size"],
+                patch_size=shape["patch_size"]),
+        {name: t for name, t in model.state_dict().items()
+         if name.startswith("vision.")})
+
+    rebuilt, _tok, version = __import__(
+        "motherbrain.patches", fromlist=["build_version"]).build_version(
+            str(run), device="cpu")
+    assert version == 1
+    assert rebuilt.vision is not None, "the rebuilt model cannot see"
+    assert rebuilt.n_params() == model.n_params()
+
+    rebuilt.eval()
+    with torch.no_grad():
+        got, _ = rebuilt(idx, targets=None, images=image)
+    # The patch is stored fp16, so agreement is to that precision.
+    assert torch.allclose(expected, got, atol=2e-2)
+
+
+def test_a_sight_patch_must_also_enlarge_the_lineage(tmp_path):
+    """Every version is larger than the last, whatever kind of patch it is."""
+    from motherbrain.patches import PatchStore, Version
+
+    store = PatchStore(tmp_path)
+    with pytest.raises(ValueError, match="must add parameters"):
+        store.record(
+            Version(version=1, patch_id="p", parent=0, created_at=0.0,
+                    doc_start=0, doc_end=0, n_documents=0, n_chars=0,
+                    n_tokens=0, steps=1, rank=0, trainable_params=1,
+                    loss_before=1.0, loss_after=0.5, mode="sight",
+                    params_before=100, params_after=100),
+            {"x": torch.zeros(1)})
+
+
+def test_forced_choice_is_at_chance_before_the_tower_learns():
+    """An attached but untrained tower must not look like it can see.
+
+    This is the measurement the whole exercise rests on: if it read anything
+    other than the image, an untrained tower would still score.
+    """
+    from motherbrain.growth import add_sight
+    from motherbrain.imagedata import pairs
+    from motherbrain.sight import all_captions, forced_choice_accuracy
+    from motherbrain.tokenizer import Tokenizer
+
+    corpus_text = " ".join(all_captions()) * 20
+    tok = Tokenizer.train([corpus_text], vocab_size=300, verbose=False)
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny(vocab_size=tok.vocab_size, max_seq_len=64)).eval()
+    add_sight(model, layers=1, width=32, heads=2, image_size=32, patch_size=16)
+
+    samples = pairs(32, size=32, seed=11)
+    accuracy = forced_choice_accuracy(model, tok, samples, "cpu")
+    assert 0.0 <= accuracy <= 0.25, f"untrained tower scored {accuracy:.1%}"
+
+
 def test_workspace_flag_resolves_both_paths():
     """One flag, so a drive cannot be half-configured.
 

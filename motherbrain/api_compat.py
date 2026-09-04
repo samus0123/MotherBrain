@@ -103,6 +103,31 @@ def content_to_text(content: Any) -> str:
     return str(content)
 
 
+def content_to_images(content: Any, size: int) -> list:
+    """Pull inline images out of OpenAI-style content parts.
+
+    Only `data:` URIs are decoded. A URL pointing elsewhere is left alone on
+    purpose: a model server that fetches whatever appears in its input is a
+    request-forgery primitive aimed at the inside of your network.
+    """
+    from motherbrain.vision import load_data_uri
+
+    if not isinstance(content, list):
+        return []
+    images = []
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        url = part.get("image_url")
+        if isinstance(url, dict):
+            url = url.get("url")
+        if isinstance(url, str):
+            decoded = load_data_uri(url, size)
+            if decoded is not None:
+                images.append(decoded)
+    return images
+
+
 def normalise_stop(stop: Any) -> list[str]:
     if stop is None:
         return []
@@ -133,7 +158,8 @@ def build_chat_prompt(messages: list[ChatMessage]) -> str:
 
 
 def stream_pieces(state, prompt: str, max_tokens: int, temperature: float,
-                  top_k: int | None, top_p: float, stops: list[str]) -> Iterator[str]:
+                  top_k: int | None, top_p: float, stops: list[str],
+                  image=None) -> Iterator[str]:
     """Yield decoded text incrementally, honouring stop sequences.
 
     Tokens are decoded one at a time, so a stop string that straddles a token
@@ -152,8 +178,12 @@ def stream_pieces(state, prompt: str, max_tokens: int, temperature: float,
     x = torch.tensor([ids], device=device)
 
     emitted = ""
+    extra = {}
+    if image is not None and getattr(model, "vision", None) is not None:
+        extra["images"] = image.to(device)
     for token in model.generate(x, max_new_tokens=max_tokens, temperature=temperature,
-                                top_k=top_k or None, top_p=top_p, eos_id=EOS_ID):
+                                top_k=top_k or None, top_p=top_p, eos_id=EOS_ID,
+                                **extra):
         piece = tok.decode([token])
         if not piece:
             continue
@@ -205,6 +235,14 @@ def register_compat_routes(app, state, auth) -> None:
         if state.training.get("active"):
             raise HTTPException(409, "a training run is in progress; try again shortly")
         prompt = build_chat_prompt(req.messages)
+        model, _tok, _dev, _ = state.snapshot()
+        image = None
+        if getattr(model, "vision", None) is not None:
+            for message in reversed(req.messages):
+                found = content_to_images(message.content, model.cfg.image_size)
+                if found:
+                    image = found[-1]     # the most recent picture is the subject
+                    break
         stops = normalise_stop(req.stop)
         max_tokens = _limits(req.max_tokens, 256)
         cid = f"chatcmpl-{uuid.uuid4().hex[:24]}"
@@ -212,7 +250,7 @@ def register_compat_routes(app, state, auth) -> None:
 
         if not req.stream:
             text = "".join(stream_pieces(state, prompt, max_tokens, req.temperature,
-                                         req.top_k, req.top_p, stops))
+                                         req.top_k, req.top_p, stops, image))
             _, counter, _, _ = state.snapshot()
             n_prompt = len(counter.encode(prompt))
             n_out = len(counter.encode(text))
@@ -235,7 +273,7 @@ def register_compat_routes(app, state, auth) -> None:
                                  "finish_reason": None}]}
             yield sse(head)
             for piece in stream_pieces(state, prompt, max_tokens, req.temperature,
-                                       req.top_k, req.top_p, stops):
+                                       req.top_k, req.top_p, stops, image):
                 yield sse({"id": cid, "object": "chat.completion.chunk",
                            "created": created, "model": MODEL_ID,
                            "choices": [{"index": 0, "delta": {"content": piece},

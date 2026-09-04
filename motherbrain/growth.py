@@ -131,6 +131,40 @@ def grow(model, n_new: int) -> tuple[ModelConfig, list[nn.Parameter]]:
     return new_cfg, trainable
 
 
+def add_sight(model, layers: int = 4, width: int = 256, heads: int = 4,
+              image_size: int = 64, patch_size: int = 16
+              ) -> tuple[ModelConfig, list[nn.Parameter]]:
+    """Attach a vision tower to a model that does not have one.
+
+    Growth by experts makes a model bigger at what it already does. This makes
+    it able to do something it could not do at all, and it is still growth: the
+    tower's parameters are new, and nothing that existed before it is touched.
+
+    The language half is left exactly as it was and is not returned as
+    trainable. A tower learning to see while the layers reading it are also
+    moving is two moving targets, and the text the model already knows is the
+    fixed thing that gives the visual vectors somewhere to land.
+    """
+    from motherbrain.vision import VisionTower
+
+    if getattr(model, "vision", None) is not None:
+        raise ValueError("this model can already see")
+    if layers < 1:
+        raise ValueError("a vision tower needs at least one layer")
+
+    cfg = ModelConfig.from_dict(model.cfg.to_dict())
+    cfg.vision_layers = layers
+    cfg.vision_width = width
+    cfg.vision_heads = heads
+    cfg.image_size = image_size
+    cfg.patch_size = patch_size
+
+    tower = VisionTower(cfg).to(next(model.parameters()).device)
+    model.vision = tower
+    model.cfg = cfg
+    return cfg, list(tower.parameters())
+
+
 @torch.no_grad()
 def release(model, n_new: int) -> None:
     """Let the newly added experts be routed to.
