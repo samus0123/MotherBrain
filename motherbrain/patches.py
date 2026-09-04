@@ -63,6 +63,37 @@ class PatchConfig:
     seed: int = 1337
 
 
+def _sample_fingerprint(model: nn.Module, legacy: bool) -> str:
+    """Hash parameter names, shapes and a bounded sample of their values.
+
+    `legacy` reproduces the original hash byte for byte - fp32-exact values
+    with the storage dtype folded in - so manifests written before this
+    function grew its tolerance can still be recognised.
+    """
+    h = hashlib.sha256()
+    budget = 1 << 18  # a quarter-million values is plenty to disambiguate
+    for name, p in sorted(model.state_dict().items()):
+        h.update(name.encode())
+        h.update(str(tuple(p.shape)).encode())
+        if legacy:
+            h.update(str(p.dtype).encode())
+        if budget > 0:
+            flat = p.detach().reshape(-1).float()
+            take = min(flat.numel(), budget)
+            if take:
+                sample = flat[:take]
+                # Rounding to fp16 before hashing is what lets an exported
+                # model stand in for the checkpoint it came from: `mb export`
+                # stores fp16, so the two agree to exactly this precision and
+                # no further. Two genuinely different bases still differ by
+                # far more than fp16 resolution.
+                if not legacy:
+                    sample = sample.to(torch.float16)
+                h.update(sample.cpu().numpy().tobytes())
+                budget -= take
+    return h.hexdigest()[:32]
+
+
 def weights_fingerprint(model: nn.Module) -> str:
     """A stable identity for a set of base weights.
 
@@ -71,20 +102,25 @@ def weights_fingerprint(model: nn.Module) -> str:
     names, shapes and a bounded sample of their values gives every base
     checkpoint an identity, cheaply enough that it stays practical for a large
     model.
+
+    The sample is rounded to fp16, so a checkpoint and the model exported from
+    it share one identity. That is what lets a clone carrying only the
+    committed export rebuild the whole lineage.
     """
-    h = hashlib.sha256()
-    budget = 1 << 20  # a megabyte of actual values is plenty to disambiguate
-    for name, p in sorted(model.state_dict().items()):
-        h.update(name.encode())
-        h.update(str(tuple(p.shape)).encode())
-        h.update(str(p.dtype).encode())
-        if budget > 0:
-            flat = p.detach().reshape(-1).float()
-            take = min(flat.numel(), budget // 4)
-            if take:
-                h.update(flat[:take].cpu().numpy().tobytes())
-                budget -= take * 4
-    return h.hexdigest()[:32]
+    return _sample_fingerprint(model, legacy=False)
+
+
+def fingerprint_matches(model: nn.Module, expected: str) -> bool:
+    """Whether `model` is the base these patches were trained against.
+
+    Lineages recorded before the fingerprint became precision-tolerant carry
+    the older, fp32-exact hash. Accepting either keeps those manifests working
+    rather than stranding a model somebody already grew.
+    """
+    if not expected:
+        return True
+    return expected in (weights_fingerprint(model),
+                        _sample_fingerprint(model, legacy=True))
 
 
 @dataclass
@@ -286,6 +322,18 @@ class PatchStore:
     def base_fingerprint(self) -> str:
         return self.manifest().get("base_fingerprint", "")
 
+    def restamp(self, fingerprint: str) -> None:
+        """Record a new hash for the *same* base weights, keeping the lineage.
+
+        Distinct from set_base, which adopts different weights and therefore
+        discards every patch. This is for when only the way we hash changed.
+        """
+        m = self.manifest()
+        m["base_fingerprint"] = fingerprint
+        for v in m["versions"]:
+            v["base_fingerprint"] = fingerprint
+        self.write(m)
+
     def set_base(self, fingerprint: str, n_docs: int) -> list[str]:
         """Adopt a base checkpoint, discarding a lineage built on a different one.
 
@@ -374,15 +422,21 @@ def build_version(run_dir: str | Path, target: int | None = None, device="cpu"):
     # checking would only force the manifest to track weights that move at
     # every checkpoint - so it is skipped.
     expected = store.base_fingerprint if store.versions() else ""
+    if expected and not fingerprint_matches(model, expected):
+        raise ValueError(
+            f"these patches were trained against a different base checkpoint "
+            f"(manifest {expected}, loaded {weights_fingerprint(model)}). "
+            f"Applying them would corrupt the model. Retrain the base, or "
+            f"restore the checkpoint the lineage was built on."
+        )
     if expected:
-        actual = weights_fingerprint(model)
-        if actual != expected:
-            raise ValueError(
-                f"these patches were trained against a different base checkpoint "
-                f"(manifest {expected}, loaded {actual}). Applying them would "
-                f"corrupt the model. Retrain the base, or restore the checkpoint "
-                f"the lineage was built on."
-            )
+        current = weights_fingerprint(model)
+        if current != expected:
+            # The manifest predates the precision-tolerant fingerprint, and
+            # matched on the legacy hash instead. Re-stamp it now, while the
+            # checkpoint is loaded to prove the two agree - afterwards the
+            # exported model can stand in for it.
+            store.restamp(current)
 
     for v in store.versions():
         if v.version > target:

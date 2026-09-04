@@ -268,7 +268,17 @@ def load_runtime(run_dir: str, device: str = "auto"):
     run = Path(run_dir)
     ckpt = run / "checkpoint.pt"
     if not ckpt.exists():
-        raise FileNotFoundError(f"no checkpoint at {ckpt}; run `mb train` first")
+        base = shipped_base(run_dir)
+        if base is None:
+            raise FileNotFoundError(f"no checkpoint at {ckpt}; run `mb train` first")
+        model, tok, dev, version, steps = load_exported(base, device)
+        if version != 0:
+            raise ValueError(
+                f"{base} is version {version}, not the base. Patches apply on "
+                f"top of the base, so building from a merged model would apply "
+                f"them twice. Restore the v0 export, or train a base."
+            )
+        return model, tok, dev, {"step": steps}
     dev = pick_device(device)
     model, meta = load_checkpoint(ckpt, device=dev)
     model.eval()
@@ -279,21 +289,43 @@ def load_runtime(run_dir: str, device: str = "auto"):
     return model, tok, dev, meta
 
 
-def shipped_model(run_dir: str) -> Path | None:
-    """The exported model committed alongside the code, if there is one.
+def _find_model(run_dir: str, names: tuple[str, ...]) -> Path | None:
+    """Look for a model beside the run directory first, then beside the code.
 
-    A clone carries `models/motherbrain.pt` but not a training checkpoint -
-    checkpoints are far too large for a repository. Without this, a fresh
-    clone has a model sitting right there and every command insists there is
-    none, which is the least helpful thing it could say.
+    The run directory wins because it is the one the caller named. Point
+    `--run` at a drive and its own models/ directory is what should load —
+    not whichever checkout the command happened to be typed from.
     """
     root = Path(run_dir).resolve()
-    for base in (project_root(), root.parent.parent, Path.cwd()):
-        for name in ("motherbrain.pt", "motherbrain-15m.pt"):
+    for base in (root.parent.parent, root.parent, project_root(), Path.cwd()):
+        for name in names:
             candidate = Path(base) / "models" / name
             if candidate.is_file():
                 return candidate
     return None
+
+
+def shipped_base(run_dir: str) -> Path | None:
+    """The committed v0 export that patches are applied on top of.
+
+    A clone carries `models/motherbrain-base.pt` but not a training checkpoint;
+    checkpoints are far too large for a repository. The base never changes, so
+    committing it once alongside the patches makes the whole lineage
+    reproducible from a clone - no training, no download.
+    """
+    return _find_model(run_dir, ("motherbrain-base.pt",))
+
+
+def shipped_model(run_dir: str) -> Path | None:
+    """The most complete exported model lying beside the code, if any.
+
+    Prefers a merged current-version export, and falls back to the base. This
+    is what `mb chat` and `mb console` run when there is nothing else; a fresh
+    clone has a model sitting right there, and every command insisting there is
+    none is the least helpful thing it could say.
+    """
+    return _find_model(run_dir, ("motherbrain.pt", "motherbrain-base.pt",
+                                 "motherbrain-15m.pt"))
 
 
 def load_current(run_dir: str, device: str = "auto"):
@@ -305,7 +337,10 @@ def load_current(run_dir: str, device: str = "auto"):
     from motherbrain.patches import build_version
     from motherbrain.train import pick_device
 
-    if not (Path(run_dir) / "checkpoint.pt").exists():
+    if not (Path(run_dir) / "checkpoint.pt").exists() \
+            and shipped_base(run_dir) is None:
+        # No base to patch. A merged export still runs, at whatever version it
+        # was exported at.
         shipped = shipped_model(run_dir)
         if shipped is not None:
             model, tok, dev, version, _steps = load_exported(str(shipped), device)

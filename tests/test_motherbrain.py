@@ -520,6 +520,119 @@ def test_fingerprint_identifies_a_base_checkpoint():
     assert weights_fingerprint(a) != weights_fingerprint(different)
 
 
+def test_fingerprint_survives_an_fp16_export_round_trip():
+    """The committed base ships fp16, and must still be the same base.
+
+    `mb export` halves precision to keep the file inside GitHub's 100MB limit.
+    If that changed the base's identity, every patch trained against the
+    checkpoint would be refused by a clone carrying only the export — which is
+    the whole reason the export is committed.
+    """
+    from motherbrain.patches import fingerprint_matches, weights_fingerprint
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny())
+    exact = weights_fingerprint(model)
+
+    rounded = MotherBrain(tiny())
+    rounded.load_state_dict({k: v.to(torch.float16).float()
+                             for k, v in model.state_dict().items()})
+
+    assert weights_fingerprint(rounded) == exact
+    assert fingerprint_matches(rounded, exact)
+
+    torch.manual_seed(1)
+    assert not fingerprint_matches(MotherBrain(tiny()), exact)
+
+
+def test_a_legacy_fingerprint_is_still_recognised():
+    """Manifests written before the hash grew its tolerance still load.
+
+    Someone who has already grown a model has a lineage stamped with the
+    fp32-exact hash. Refusing it would strand their versions, so the older
+    form is accepted and re-stamped on the next build.
+    """
+    from motherbrain.patches import _sample_fingerprint, fingerprint_matches
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny())
+    legacy = _sample_fingerprint(model, legacy=True)
+
+    assert legacy != _sample_fingerprint(model, legacy=False)
+    assert fingerprint_matches(model, legacy)
+
+
+def _grow(run, corpus, text):
+    """Feed one document and fold it into a new version, as the console does."""
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchConfig, create_patch
+
+    Corpus(corpus).add_text(text, "test")
+    return create_patch(str(run), str(corpus), device="cpu",
+                        cfg=PatchConfig(mode="grow", grow_experts=1, steps=2))
+
+
+def test_a_clone_without_a_checkpoint_rebuilds_the_lineage(served, tmp_path):
+    """Base export plus patches must reconstruct the current version.
+
+    This is what committing patches buys. A clone carries no checkpoint — they
+    are far too large — so if the patches could not be applied on top of the
+    committed base, the clone would silently run v0 while the manifest claimed
+    v2, which is the failure this guards against.
+    """
+    from motherbrain.cli import export_model, load_current
+    from motherbrain.patches import PatchStore, weights_fingerprint
+
+    run, corpus = served
+    store = PatchStore(run)
+    model, _tok, _dev, _v = load_current(str(run), "cpu")
+    store.set_base(weights_fingerprint(model), 0)
+
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    export_model(str(run), models / "motherbrain-base.pt", device="cpu")
+
+    assert _grow(run, corpus, "the sky above the port") is not None
+    assert _grow(run, corpus, "a screen tuned to a dead channel") is not None
+    full, _tok, _dev, grown = load_current(str(run), "cpu")
+    assert grown == 2
+
+    # Now strip it to what a clone actually carries.
+    (run / "checkpoint.pt").unlink()
+    (run / "best.pt").unlink(missing_ok=True)
+
+    rebuilt, _tok, _dev, version = load_current(str(run), "cpu")
+    assert version == grown, "the clone fell back to the base instead of patching"
+    assert rebuilt.n_params() == full.n_params()
+
+    # Same weights to fp16, which is the precision the base is committed at.
+    a, b = full.state_dict(), rebuilt.state_dict()
+    for name in a:
+        assert torch.allclose(a[name], b[name], atol=1e-3), name
+
+
+def test_a_merged_export_is_refused_as_a_patch_base(served, tmp_path):
+    """Patches applied on top of a model that already contains them double up.
+
+    `mb patch` writes the merged current model to models/motherbrain.pt, so a
+    file of exactly that shape sits on every machine. Mistaking it for the base
+    would apply every delta twice and produce confident nonsense, so the export
+    records its version and loading refuses anything but v0.
+    """
+    from motherbrain.cli import export_model, load_runtime
+
+    run, corpus = served
+    assert _grow(run, corpus, "the sky above the port") is not None
+
+    models = tmp_path / "models"
+    models.mkdir(exist_ok=True)
+    export_model(str(run), models / "motherbrain-base.pt", device="cpu")
+    (run / "checkpoint.pt").unlink()
+
+    with pytest.raises(ValueError, match="not the base"):
+        load_runtime(str(run), "cpu")
+
+
 def test_retraining_the_base_drops_the_stale_lineage(tmp_path):
     """A patch is a delta against particular weights.
 
