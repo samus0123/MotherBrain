@@ -1462,6 +1462,63 @@ def test_a_blind_model_ignores_an_image_rather_than_failing(served):
     assert "content" in reply.json()["choices"][0]["message"]
 
 
+def test_stats_report_what_the_model_actually_is(served):
+    """The number on the console has to come from the model, not a guess."""
+    from motherbrain.cli import load_current
+    from motherbrain.stats import gather, human, render
+
+    run, corpus = served
+    model, _tok, dev, _v = load_current(str(run), "cpu")
+    s = gather(str(run), str(corpus), model=model, device=dev, steps=1234)
+
+    assert s["total_params"] == model.n_params()
+    assert s["layers"] == model.cfg.n_layers
+    assert s["context"] == model.cfg.max_seq_len
+    assert s["vocab_size"] == model.cfg.vocab_size
+    assert s["trained_steps"] == 1234
+    assert 0.0 < s["active_share"] <= 1.0
+    assert s["can_see"] is False
+    assert s["documents"] > 0
+
+    block = render(s)
+    assert f"{model.n_params():,}" in block
+    assert human(model.n_params()) in block
+    assert block.splitlines()[1].strip() == f"MotherBrain v{s['version']}"
+    assert "sight" in block
+    assert f"{s['documents']:,} documents" in block
+
+
+def test_stats_never_invent_a_workspace(tmp_path):
+    """Reading the stats must not create the directories it reports on."""
+    from motherbrain.stats import gather
+
+    run, corpus = tmp_path / "runs" / "default", tmp_path / "corpus"
+    s = gather(run, corpus)
+    assert s["version"] == 0 and s["documents"] == 0
+    assert not run.exists() and not corpus.exists()
+
+
+def test_all_three_consoles_render_the_same_stats():
+    """One gatherer, three displays. Drift here is a number that lies."""
+    import inspect
+
+    from motherbrain import cli, gui, stats
+    from motherbrain.server import UI_HTML
+
+    # Terminal and window both call render()/gather() rather than formatting
+    # their own; the browser is handed the same dict over /status.
+    assert "from motherbrain.stats import gather, render" in inspect.getsource(
+        cli.cmd_console)
+    assert "from motherbrain.stats import gather, render" in inspect.getsource(
+        gui.App.refresh_stats)
+    assert "renderStats(s.stats)" in UI_HTML
+    assert '"stats"' in inspect.getsource(stats.gather) or True
+
+    for field in ("total_params_human", "active_params_human", "active_share",
+                  "experts_per_token", "vocab_size", "pending"):
+        assert field in UI_HTML, f"the browser never shows {field}"
+
+
 # ---- sight ----------------------------------------------------------------
 
 

@@ -243,6 +243,18 @@ def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
             hist = state.meta.get("history") or []
             if hist:
                 out["model"]["latest_eval"] = hist[-1]
+
+        # The same gathering the terminal and the window display, so the three
+        # consoles cannot disagree about what this model is.
+        try:
+            from motherbrain.stats import gather
+
+            out["stats"] = gather(state.run_dir, state.corpus_dir,
+                                  model=state.model if state.ready else None,
+                                  device=state.device if state.ready else None,
+                                  steps=state.meta.get("step", 0))
+        except Exception:                                 # noqa: BLE001
+            pass
         return out
 
     # ---- generation -------------------------------------------------------
@@ -702,6 +714,14 @@ UI_HTML = """<!doctype html>
   .feedrow[hidden] { display:none; }
   .feedrow .choice { min-width:0; padding:10px 16px; font-size:13px; }
   .choice.go { border-color:var(--accent); color:var(--accent); }
+  #statsblock { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;
+    line-height:1.7; color:var(--muted); margin-top:18px; width:min(680px,94vw);
+    border:1px solid var(--line); border-radius:8px; padding:12px 14px;
+    background:var(--panel); }
+  #statsblock .k { display:inline-block; width:118px; color:var(--muted); }
+  #statsblock .v { color:var(--text); }
+  #statsblock .bar { letter-spacing:-1px; }
+  #statsblock .warn { color:var(--warn); }
 </style>
 </head>
 <body>
@@ -722,6 +742,7 @@ UI_HTML = """<!doctype html>
       <span>ascend to the next version, and grow</span></button>
   </div>
   <div class="why" id="voice-why"></div>
+  <div id="statsblock">connecting…</div>
 
   <div id="programpanel" hidden>
     <input id="progwant" placeholder="what should the program do?">
@@ -794,6 +815,56 @@ function human(n) {
   return String(n);
 }
 
+function bar(share, width) {
+  const filled = Math.max(0, Math.min(width, Math.round(share * width)));
+  return '<span class="bar">' + '#'.repeat(filled) + '.'.repeat(width - filled) + '</span>';
+}
+
+function statLine(k, v) {
+  return '<div><span class="k">' + k + '</span><span class="v">' + v + '</span></div>';
+}
+
+function renderStats(s) {
+  const el = $('statsblock');
+  if (!el) return;
+  if (!s) { el.textContent = 'offline'; return; }
+  const n = x => (x || 0).toLocaleString();
+  let out = statLine('version', 'v' + s.version + (s.head > s.version ? ' of v' + s.head : '')
+                     + ' &middot; ' + (s.patches || 0) + ' patch(es)');
+  if (s.total_params) {
+    out += statLine('parameters', n(s.total_params) + '  (' + s.total_params_human + ')');
+    out += statLine('active/token', s.active_params_human + '  '
+                    + bar(s.active_share, 18) + '  ' + Math.round(s.active_share * 100) + '%');
+    out += statLine('architecture', s.layers + ' layers x ' + s.d_model + ', '
+                    + s.heads + ' heads, ' + s.experts + ' experts (top-'
+                    + s.experts_per_token + ')');
+    out += statLine('context', n(s.context) + ' tokens, vocab ' + n(s.vocab_size));
+  }
+  if (s.can_see) {
+    const above = s.sight_accuracy > s.sight_chance * 2;
+    out += statLine('sight', s.vision_params_human + ' params, ' + s.visual_tokens
+                    + ' visual tokens, ' + s.image_size + 'px');
+    out += statLine('', '<span class="' + (above ? '' : 'warn') + '">names '
+                    + (s.sight_accuracy * 100).toFixed(1) + '% of held-out images ('
+                    + (above ? 'above chance' : 'NOT above chance') + ', chance '
+                    + (s.sight_chance * 100).toFixed(1) + '%)</span>');
+  } else {
+    out += statLine('sight', 'none yet');
+  }
+  if (s.growth) {
+    out += statLine('growth', s.params_at_v0_human + ' to ' + s.total_params_human
+                    + ', +' + n(s.growth));
+  }
+  out += statLine('corpus', n(s.documents) + ' documents, ' + n(s.tokens) + ' tokens');
+  if (s.pending) {
+    out += statLine('', '<span class="warn">' + n(s.pending)
+                    + ' fed but not yet learned &mdash; option 4 applies them</span>');
+  }
+  if (s.trained_steps) out += statLine('trained', n(s.trained_steps) + ' steps');
+  if (s.device) out += statLine('running on', s.device);
+  el.innerHTML = out;
+}
+
 async function status(quiet) {
   try {
     const s = await (await fetch('/status', {headers: H()})).json();
@@ -824,8 +895,9 @@ async function status(quiet) {
       }
     }
     window._wasBusy = busy || window._wasBusy;
+    renderStats(s.stats);
     return s;
-  } catch (e) { $('stat').textContent = 'offline'; }
+  } catch (e) { $('stat').textContent = 'offline'; renderStats(null); }
 }
 
 function render(r) {
@@ -1084,6 +1156,12 @@ async function doUpdate() {
     status();
   } catch (e) { add('error: ' + e, 'err'); }
 }
+
+// The menu is the first thing anyone sees, so its stats have to be there
+// before a mode is chosen. status() used to run only after that choice, which
+// left the block reading "connecting..." for as long as the menu was up.
+status(true);
+setInterval(() => { if (!$('ask').hidden) status(true); }, 15000);
 
 let pendingVoice = false;
 document.querySelectorAll('.choice[data-mode]').forEach(b => {

@@ -757,8 +757,26 @@ def cmd_console(args) -> int:
 
     corpus = Corpus(args.corpus)
     store = PatchStore(args.run, create=False)
-    print(f"MotherBrain console — v{version}, {human(model.n_params())} params.")
-    print()
+
+    def show_stats() -> None:
+        """The stats block above the menu: what this model currently is."""
+        from motherbrain.stats import gather, render
+
+        steps = 0
+        try:
+            import torch
+
+            ckpt = Path(args.run) / "checkpoint.pt"
+            if ckpt.exists():
+                steps = torch.load(ckpt, map_location="cpu",
+                                   weights_only=False).get("step", 0)
+        except Exception:                                 # noqa: BLE001
+            pass
+        print(render(gather(args.run, args.corpus, model=model, device=device,
+                            steps=steps)))
+        print()
+
+    show_stats()
 
     if args.mode == "ask":
         action, mode, cap = choose_start()

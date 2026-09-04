@@ -106,6 +106,14 @@ class App:
                                anchor="w", padx=12, pady=8)
         self.header.pack(fill="x")
 
+        # The same stats block the terminal prints, in the same words. A
+        # number that disagrees with itself between two windows is worse than
+        # no number, so both render what motherbrain.stats gathered.
+        self.stats = tk.Label(root, text="", font=("TkFixedFont", 9),
+                              anchor="w", justify="left", padx=12,
+                              fg="#333333")
+        self.stats.pack(fill="x")
+
         buttons = tk.Frame(root, padx=10)
         buttons.pack(fill="x")
         self.buttons = []
@@ -192,10 +200,22 @@ class App:
             self.image_btn.config(state="normal")
         else:
             self.image_btn.config(text="🖼 (none)")
-        self.say_note(f"Ready. MotherBrain v{version}, "
-                      f"{human(model.n_params())} parameters.\n")
+        self.refresh_stats()
         self.status.config(text="ready")
         self.entry.focus_set()
+
+    def refresh_stats(self) -> None:
+        """Redraw the stats block. Called on load and after every ascent."""
+        from motherbrain.stats import gather, render
+
+        if self.model is None:
+            return
+        try:
+            summary = gather(self.run_dir, self.corpus_dir, model=self.model,
+                             device=self.dev)
+            self.stats.config(text=render(summary, width=78))
+        except Exception as exc:                          # noqa: BLE001
+            self.stats.config(text=f"  (stats unavailable: {exc})")
 
     def _load_failed(self, message: str) -> None:
         self.header.config(text="MotherBrain — no model loaded")
@@ -605,6 +625,7 @@ class App:
         self.header.config(
             text=f"MotherBrain v{version} · {human(model.n_params())} parameters "
                  f"· {dev} · {sight}")
+        self.refresh_stats()
 
     # ---- voice and images -------------------------------------------------
 
