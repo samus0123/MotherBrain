@@ -22,7 +22,7 @@
         "console"
       ],
       "note": "update",
-      "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3",
+      "base_fingerprint": "68d4a71f47aec78c5ad619e24514de58",
       "mode": "grow",
       "grow_experts": 1,
       "params_before": 18880896,
@@ -47,7 +47,7 @@
         "console"
       ],
       "note": "applied",
-      "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3",
+      "base_fingerprint": "68d4a71f47aec78c5ad619e24514de58",
       "mode": "grow",
       "grow_experts": 1,
       "params_before": 28321160,
@@ -72,12 +72,12 @@
         "console"
       ],
       "note": "applied",
-      "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3",
+      "base_fingerprint": "68d4a71f47aec78c5ad619e24514de58",
       "mode": "grow",
       "grow_experts": 1,
       "params_before": 37761424,
       "params_after": 47201688
     }
   ],
-  "base_fingerprint": "b145a2ffe3e2ca2e5a6292ef723e54b3"
+  "base_fingerprint": "68d4a71f47aec78c5ad619e24514de58"
 }
