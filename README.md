@@ -385,6 +385,20 @@ the table is small, literal, and refuses rather than guesses - `/checkout`
 without a version is an error, and "learning rates matter" is a prompt, not an
 instruction to learn something.
 
+## Starting the window
+
+```bash
+sh scripts/gui.sh
+```
+
+That checks the four things that stop `mb gui` working and says which one it
+is: a checkout older than the window command (it updates itself), MotherBrain
+not installed, Tkinter missing — Debian, Ubuntu and Kali ship it separately as
+`python3-tk` — or no display, which is SSH without X forwarding or a headless
+machine. In that last case it points you at `mb serve` and a browser.
+
+`mb gui` directly works too, once those are in place.
+
 ## How do I run it?
 
 Two commands, from a clean clone. The weights are committed, so there is
