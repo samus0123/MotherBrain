@@ -76,6 +76,149 @@ class Bridge:
         self.root.after(40, self._pump)
 
 
+# A dark palette, defined once. Tk's defaults are a grey from 1994, and a
+# window somebody is meant to sit in front of for an hour should not look like
+# an error dialog.
+PALETTE = {
+    "bg":      "#0f1115",   # the window itself
+    "panel":   "#181b22",   # cards, transcript, input
+    "raised":  "#1f2430",   # a card under the pointer
+    "line":    "#2a3040",   # borders
+    "text":    "#e6e9ef",
+    "muted":   "#8b93a5",
+    "accent":  "#5eead4",   # the selected option, and MotherBrain's own voice
+    "you":     "#7dd3fc",   # what you said
+    "warn":    "#fbbf24",
+    "bad":     "#f87171",
+}
+
+
+class Card:
+    """One of the four options, drawn by hand.
+
+    tk.Button ignores background colour on macOS, so a themed window built
+    from real buttons is grey on one platform and dark on the others. A frame
+    with labels inside behaves the same everywhere, which matters more here
+    than the few lines it costs.
+    """
+
+    def __init__(self, parent, tk, index: int, title: str, hint: str,
+                 command) -> None:
+        self.tk = tk
+        self.command = command
+        self.enabled = False
+        self.selected = False
+
+        self.frame = tk.Frame(parent, bg=PALETTE["panel"],
+                              highlightbackground=PALETTE["line"],
+                              highlightthickness=1, cursor="hand2")
+        self.frame.pack(fill="x", pady=3)
+
+        inner = tk.Frame(self.frame, bg=PALETTE["panel"], padx=14, pady=10)
+        inner.pack(fill="x")
+
+        self.number = tk.Label(inner, text=str(index + 1), bg=PALETTE["panel"],
+                               fg=PALETTE["muted"],
+                               font=("TkDefaultFont", 15, "bold"), width=2)
+        self.number.pack(side="left", padx=(0, 12))
+
+        stack = tk.Frame(inner, bg=PALETTE["panel"])
+        stack.pack(side="left", fill="x", expand=True)
+        self.title = tk.Label(stack, text=title, bg=PALETTE["panel"],
+                              fg=PALETTE["muted"], anchor="w",
+                              font=("TkDefaultFont", 11, "bold"))
+        self.title.pack(fill="x")
+        self.hint = tk.Label(stack, text=hint, bg=PALETTE["panel"],
+                             fg=PALETTE["muted"], anchor="w", justify="left",
+                             wraplength=620, font=("TkDefaultFont", 9))
+        self.hint.pack(fill="x", pady=(2, 0))
+
+        for widget in (self.frame, inner, stack, self.number, self.title,
+                       self.hint):
+            widget.bind("<Button-1>", self._click)
+            widget.bind("<Enter>", self._enter)
+            widget.bind("<Leave>", self._leave)
+
+    # The tests and the smoke script read a card the way they read a button.
+    def cget(self, key: str):
+        return self.title.cget("text") if key == "text" else ""
+
+    def config(self, **kw) -> None:
+        if "state" in kw:
+            self.enabled = kw["state"] == "normal"
+            self._paint()
+
+    def _click(self, _event=None):
+        if self.enabled:
+            self.command()
+
+    def _enter(self, _event=None):
+        if self.enabled and not self.selected:
+            self._fill(PALETTE["raised"])
+
+    def _leave(self, _event=None):
+        if not self.selected:
+            self._fill(PALETTE["panel"])
+
+    def _fill(self, colour: str) -> None:
+        self.frame.config(bg=colour)
+        for widget in self.frame.winfo_children():
+            widget.config(bg=colour)
+            for child in widget.winfo_children():
+                child.config(bg=colour)
+                for grandchild in child.winfo_children():
+                    grandchild.config(bg=colour)
+
+    def select(self, on: bool) -> None:
+        self.selected = on
+        self._paint()
+
+    def _paint(self) -> None:
+        self._fill(PALETTE["raised"] if self.selected else PALETTE["panel"])
+        self.frame.config(highlightbackground=(
+            PALETTE["accent"] if self.selected else PALETTE["line"]))
+        if not self.enabled:
+            self.title.config(fg=PALETTE["muted"])
+            self.number.config(fg=PALETTE["line"])
+            return
+        self.title.config(fg=PALETTE["text"] if self.selected
+                          else PALETTE["text"])
+        self.number.config(fg=PALETTE["accent"] if self.selected
+                           else PALETTE["muted"])
+
+
+class Chip:
+    """A small flat button - Send, Speak, Image - in the same style."""
+
+    def __init__(self, parent, tk, text: str, command, accent: bool = False):
+        self.tk = tk
+        self.command = command
+        self.enabled = False
+        self.accent = accent
+        self.label = tk.Label(parent, text=text, bg=PALETTE["panel"],
+                              fg=PALETTE["muted"], padx=14, pady=7,
+                              cursor="hand2", font=("TkDefaultFont", 10),
+                              highlightbackground=PALETTE["line"],
+                              highlightthickness=1)
+        self.label.pack(fill="x", pady=2)
+        self.label.bind("<Button-1>", lambda e: self.enabled and self.command())
+        self.label.bind("<Enter>", lambda e: self.enabled and
+                        self.label.config(bg=PALETTE["raised"]))
+        self.label.bind("<Leave>", lambda e: self.label.config(bg=PALETTE["panel"]))
+
+    def config(self, **kw) -> None:
+        if "text" in kw:
+            self.label.config(text=kw["text"])
+        if "state" in kw:
+            self.enabled = kw["state"] == "normal"
+            self.label.config(fg=(PALETTE["accent"] if self.accent else
+                                  PALETTE["text"]) if self.enabled
+                              else PALETTE["muted"])
+
+    def cget(self, key: str):
+        return self.label.cget(key)
+
+
 class App:
     def __init__(self, root, run_dir: str, corpus_dir: str, device: str,
                  max_tokens: int, steps: int, grow: int) -> None:
@@ -97,71 +240,103 @@ class App:
         self.busy = False
         self.cap = None
 
+        P = PALETTE
         root.title("MotherBrain")
-        root.geometry("880x680")
-        root.minsize(640, 480)
+        root.geometry("960x860")
+        root.minsize(720, 560)
+        root.configure(bg=P["bg"])
 
-        self.header = tk.Label(root, text="loading MotherBrain ...",
-                               font=("TkDefaultFont", 11, "bold"),
-                               anchor="w", padx=12, pady=8)
-        self.header.pack(fill="x")
+        head = tk.Frame(root, bg=P["bg"], padx=18, pady=14)
+        head.pack(fill="x")
+        tk.Label(head, text="MotherBrain", bg=P["bg"], fg=P["text"],
+                 font=("TkDefaultFont", 17, "bold"), anchor="w").pack(anchor="w")
+        self.header = tk.Label(head, text="loading …", bg=P["bg"],
+                               fg=P["accent"], anchor="w",
+                               font=("TkDefaultFont", 10))
+        self.header.pack(anchor="w", pady=(2, 0))
 
-        # The same stats block the terminal prints, in the same words. A
-        # number that disagrees with itself between two windows is worse than
-        # no number, so both render what motherbrain.stats gathered.
-        self.stats = tk.Label(root, text="", font=("TkFixedFont", 9),
-                              anchor="w", justify="left", padx=12,
-                              fg="#333333")
-        self.stats.pack(fill="x")
+        # The same stats block the terminal prints, in the same words. A number
+        # that disagrees with itself between two windows is worse than none.
+        #
+        # It folds away, because ten lines of reference material at the top of
+        # the window leaves the transcript - the part you actually read - as a
+        # sliver on a laptop screen.
+        # Folded by default: the header line above already carries version,
+        # size, device and whether it can see, and the transcript is what the
+        # window is for. Ctrl+B, or the fold itself, opens the detail.
+        self.stats_open = False
+        self.stats_wrap = tk.Frame(root, bg=P["panel"],
+                                   highlightbackground=P["line"],
+                                   highlightthickness=1)
+        self.stats_wrap.pack(fill="x", padx=18, pady=(0, 10))
+        self.stats_toggle = tk.Label(self.stats_wrap, text="▾  stats",
+                                     bg=P["panel"], fg=P["muted"], anchor="w",
+                                     padx=14, pady=6, cursor="hand2",
+                                     font=("TkDefaultFont", 9))
+        self.stats_toggle.pack(fill="x")
+        self.stats_toggle.bind("<Button-1>", lambda e: self.toggle_stats())
+        self.stats = tk.Label(self.stats_wrap, text="", font=("TkFixedFont", 9),
+                              bg=P["panel"], fg=P["muted"], anchor="w",
+                              justify="left", padx=14)
+        self.stats_toggle.config(text="▸  stats")
 
-        buttons = tk.Frame(root, padx=10)
-        buttons.pack(fill="x")
+        cards = tk.Frame(root, bg=P["bg"], padx=18)
+        cards.pack(fill="x")
         self.buttons = []
-        for i, (label, _hint) in enumerate(OPTIONS):
-            b = tk.Button(buttons, text=label, anchor="w", justify="left",
-                          state="disabled",
-                          command=lambda n=i: self.choose(n))
-            b.pack(fill="x", pady=2)
-            self.buttons.append(b)
+        for i, (label, hint) in enumerate(OPTIONS):
+            # The number is drawn separately, so strip the one in the text.
+            title = label.split("  ", 1)[-1]
+            card = Card(cards, tk, i, title, hint, lambda n=i: self.choose(n))
+            self.buttons.append(card)
 
-        self.hint = tk.Label(root, text="", anchor="w", padx=12, pady=4,
-                             wraplength=840, justify="left", fg="#555555")
+        # Each card already carries its own description, so this line says what
+        # you can type instead of repeating it.
+        self.hint = tk.Label(root, text="", bg=P["bg"], fg=P["muted"],
+                             anchor="w", padx=18, pady=6, wraplength=880,
+                             justify="left", font=("TkFixedFont", 9))
         self.hint.pack(fill="x")
 
-        self.view = scrolledtext.ScrolledText(root, wrap="word", height=18,
-                                              font=("TkFixedFont", 10),
-                                              state="disabled", padx=8, pady=8)
-        self.view.pack(fill="both", expand=True, padx=10, pady=(0, 6))
-        self.view.tag_configure("you", foreground="#0057b7")
-        self.view.tag_configure("mb", foreground="#111111")
-        self.view.tag_configure("note", foreground="#777777")
-        self.view.tag_configure("bad", foreground="#a11")
+        # Packed bottom-up and before the transcript: these reserve their space
+        # first, so shrinking the window shrinks the transcript rather than
+        # squeezing the input box down to a single line.
+        self.status = tk.Label(root, text="", bg=P["panel"], fg=P["muted"],
+                               anchor="w", padx=18, pady=6,
+                               font=("TkDefaultFont", 9))
+        self.status.pack(fill="x", side="bottom")
 
-        row = tk.Frame(root, padx=10)
-        row.pack(fill="x", pady=(0, 4))
-        self.entry = tk.Text(row, height=3, wrap="word", font=("TkDefaultFont", 10))
+        self.extra = tk.Frame(root, bg=P["bg"], padx=18)
+        self.extra.pack(fill="x", side="bottom", pady=(0, 8))
+
+        row = tk.Frame(root, bg=P["bg"], padx=18)
+        row.pack(fill="x", side="bottom", pady=(4, 6))
+
+        self.view = scrolledtext.ScrolledText(
+            root, wrap="word", height=15, font=("TkFixedFont", 10),
+            state="disabled", padx=14, pady=12, relief="flat",
+            bg=P["panel"], fg=P["text"], insertbackground=P["text"],
+            selectbackground=P["line"], highlightthickness=1,
+            highlightbackground=P["line"])
+        self.view.pack(fill="both", expand=True, padx=18, pady=(0, 10))
+        self.view.tag_configure("you", foreground=P["you"])
+        self.view.tag_configure("mb", foreground=P["text"])
+        self.view.tag_configure("note", foreground=P["muted"])
+        self.view.tag_configure("bad", foreground=P["bad"])
+
+        self.entry = tk.Text(row, height=3, wrap="word", relief="flat",
+                             font=("TkDefaultFont", 11), bg=P["panel"],
+                             fg=P["text"], insertbackground=P["accent"],
+                             padx=12, pady=10, highlightthickness=1,
+                             highlightbackground=P["line"],
+                             highlightcolor=P["accent"])
         self.entry.pack(side="left", fill="both", expand=True)
         self.entry.bind("<Return>", self._on_return)
         self.entry.bind("<Shift-Return>", lambda e: None)
 
-        side = tk.Frame(row, padx=6)
+        side = tk.Frame(row, bg=P["bg"], padx=8)
         side.pack(side="right", fill="y")
-        self.send_btn = tk.Button(side, text="Send", width=10, state="disabled",
-                                  command=self.submit)
-        self.send_btn.pack(fill="x", pady=1)
-        self.voice_btn = tk.Button(side, text="🎤 Speak", width=10,
-                                   state="disabled", command=self.listen)
-        self.voice_btn.pack(fill="x", pady=1)
-        self.image_btn = tk.Button(side, text="🖼 Image", width=10,
-                                   state="disabled", command=self.pick_image)
-        self.image_btn.pack(fill="x", pady=1)
-
-        self.extra = tk.Frame(root, padx=10)
-        self.extra.pack(fill="x", pady=(0, 8))
-
-        self.status = tk.Label(root, text="", anchor="w", padx=12, pady=4,
-                               relief="sunken", fg="#444444")
-        self.status.pack(fill="x", side="bottom")
+        self.send_btn = Chip(side, tk, "Send", self.submit, accent=True)
+        self.voice_btn = Chip(side, tk, "Speak", self.listen)
+        self.image_btn = Chip(side, tk, "Image", self.pick_image)
 
         self.build_menus()
         self.choose(1)
@@ -179,9 +354,16 @@ class App:
         and the typed commands do, so there is one implementation per action.
         """
         tk = self.tk
-        bar = tk.Menu(self.root)
+        # X11 draws menus from the system palette, which is a light grey that
+        # sits badly above a dark window. macOS ignores these and uses its own
+        # menu bar, which is correct there.
+        style = dict(bg=PALETTE["panel"], fg=PALETTE["text"],
+                     activebackground=PALETTE["accent"],
+                     activeforeground=PALETTE["bg"],
+                     borderwidth=0, relief="flat")
+        bar = tk.Menu(self.root, **style)
 
-        model = tk.Menu(bar, tearoff=0)
+        model = tk.Menu(bar, tearoff=0, **style)
         model.add_command(label="Status", accelerator="Ctrl+I",
                           command=lambda: self.dispatch("/status"))
         model.add_command(label="Versions", accelerator="Ctrl+L",
@@ -202,13 +384,15 @@ class App:
                           command=self.root.destroy)
         bar.add_cascade(label="Model", menu=model)
 
-        do = tk.Menu(bar, tearoff=0)
+        do = tk.Menu(bar, tearoff=0, **style)
         for i, (label, _hint) in enumerate(OPTIONS):
             do.add_command(label=label, accelerator=f"Ctrl+{i + 1}",
                            command=lambda n=i: self.choose(n))
         bar.add_cascade(label="Do", menu=do)
 
-        view = tk.Menu(bar, tearoff=0)
+        view = tk.Menu(bar, tearoff=0, **style)
+        view.add_command(label="Show or hide stats", accelerator="Ctrl+B",
+                         command=self.toggle_stats)
         view.add_command(label="Refresh stats", accelerator="Ctrl+R",
                          command=self.refresh_stats)
         view.add_command(label="Clear transcript", accelerator="Ctrl+K",
@@ -219,7 +403,7 @@ class App:
                          command=self.forget_image)
         bar.add_cascade(label="View", menu=view)
 
-        tools = tk.Menu(bar, tearoff=0)
+        tools = tk.Menu(bar, tearoff=0, **style)
         tools.add_command(label="Price a configuration…",
                           command=self.scale_dialog)
         tools.add_command(label="Run a shell command…",
@@ -230,7 +414,7 @@ class App:
                                                            "find "))
         bar.add_cascade(label="Tools", menu=tools)
 
-        helpmenu = tk.Menu(bar, tearoff=0)
+        helpmenu = tk.Menu(bar, tearoff=0, **style)
         helpmenu.add_command(label="What can I say?", accelerator="F1",
                              command=lambda: self.dispatch("/help"))
         helpmenu.add_command(label="About MotherBrain", command=self.about)
@@ -244,6 +428,7 @@ class App:
                 ("<Control-l>", lambda e: self.dispatch("/versions")),
                 ("<Control-u>", lambda e: self.apply_patch()),
                 ("<Control-e>", lambda e: self.export_model()),
+                ("<Control-b>", lambda e: self.toggle_stats()),
                 ("<Control-r>", lambda e: self.refresh_stats()),
                 ("<Control-k>", lambda e: self._clear_view()),
                 ("<Control-q>", lambda e: self.root.destroy()),
@@ -365,23 +550,53 @@ class App:
         for child in self.extra.winfo_children():
             child.destroy()
 
+    def action(self, text: str, command, accent: bool = False):
+        """A button in the row under the transcript, styled like the rest."""
+        colour = PALETTE["accent"] if accent else PALETTE["text"]
+        label = self.tk.Label(self.extra, text=text, bg=PALETTE["panel"],
+                              fg=colour, padx=14, pady=8, cursor="hand2",
+                              font=("TkDefaultFont", 10),
+                              highlightbackground=PALETTE["line"],
+                              highlightthickness=1)
+        label.pack(side="left", padx=(0, 8))
+        label.bind("<Button-1>", lambda e: command())
+        label.bind("<Enter>", lambda e: label.config(bg=PALETTE["raised"]))
+        label.bind("<Leave>", lambda e: label.config(bg=PALETTE["panel"]))
+        return label
+
     # ---- options ----------------------------------------------------------
+
+    EXAMPLES = {
+        "make": "e.g.  a script that renames files    ·    a csv column average",
+        "do": "e.g.  find TODO   ·   run script.py   ·   list files   ·   "
+              "sh git status",
+        "teach": "type or paste what it should learn, or choose a file",
+        "apply": "no typing needed — press the button",
+    }
+
+    def toggle_stats(self) -> None:
+        """Fold the stats panel away, and back."""
+        self.stats_open = not self.stats_open
+        if self.stats_open:
+            self.stats.pack(fill="x", pady=(0, 10))
+            self.stats_toggle.config(text="▾  stats")
+        else:
+            self.stats.pack_forget()
+            self.stats_toggle.config(text="▸  stats")
 
     def choose(self, n: int) -> None:
         self.mode = ("make", "do", "teach", "apply")[n]
-        self.hint.config(text=OPTIONS[n][1])
+        self.hint.config(text=self.EXAMPLES[self.mode])
         for i, b in enumerate(self.buttons):
-            b.config(relief="sunken" if i == n else "raised")
+            b.select(i == n)
         self.clear_extra()
 
         if self.mode == "teach":
-            tk = self.tk
-            tk.Button(self.extra, text="Choose a file or folder to learn from…",
-                      command=self.pick_corpus_path).pack(side="left")
+            self.action("Choose a file or folder to learn from…",
+                        self.pick_corpus_path)
         if self.mode == "apply":
-            tk = self.tk
-            tk.Button(self.extra, text="Apply now — ascend to the next version",
-                      command=self.apply_patch).pack(side="left")
+            self.action("Apply now — ascend to the next version",
+                        self.apply_patch, accent=True)
             self.say_note("Option 4 needs no typing: press the button.\n")
         self.entry.focus_set()
 
@@ -440,27 +655,50 @@ class App:
     # ---- option 1: write a program ---------------------------------------
 
     def _make(self, want: str) -> None:
-        from motherbrain.actions import CODE_CAVEAT, generate_code
+        """Option 1, with the reasoning loop behind it.
+
+        Generating once gives code that usually does not compile. Proposing
+        several, checking each against the compiler, repairing what was merely
+        interrupted, and keeping the one the model itself rates highest gives
+        code that does - and the trace says how it got there rather than
+        presenting the result as if it arrived whole.
+        """
+        from motherbrain.actions import CODE_CAVEAT
+        from motherbrain.reasoning import reason_code
 
         self.last_want = want
-        parts = []
-        for piece in generate_code(self.model, self.tok, self.dev, want,
-                                   max_tokens=self.max_tokens):
-            parts.append(piece)
-            self._emit(piece)
-        code = f'"""{want}"""\n\n{"".join(parts)}\n'
-        self.last_code = code
-        self._emit(f"\n\n{CODE_CAVEAT}\n")
+
+        def on_step(step):
+            mark = "✓" if step.ok else "✗"
+            self._emit(f"  {mark} {step.name}\n", "note")
+            if step.note:
+                self._emit(f"      {step.note}\n", "note")
+
+        self._emit("thinking …\n", "note")
+        trace = reason_code(self.model, self.tok, self.dev, want,
+                            attempts=4, max_tokens=self.max_tokens,
+                            on_step=on_step)
+        for step in trace.steps:
+            if step.name.startswith(("closed", "scored", "chose", "kept",
+                                     "nothing", "no candidate")):
+                on_step(step)
+
+        if not trace.succeeded:
+            self._emit("\nnothing it wrote would compile, after "
+                       f"{trace.goal and len(trace.steps)} steps.\n", "bad")
+            self._speak("nothing compiled")
+            return
+
+        self.last_code = trace.answer
+        self._emit("\n" + trace.answer + "\n")
+        self._emit(f"\n{CODE_CAVEAT}\n", "note")
         self.bridge.post(self._offer_save)
         self._speak("program written")
 
     def _offer_save(self) -> None:
         self.clear_extra()
-        self.tk.Button(self.extra, text="Save as…",
-                       command=self.save_code).pack(side="left")
-        self.tk.Button(self.extra, text="Save and run",
-                       command=lambda: self.save_code(run=True)).pack(side="left",
-                                                                     padx=6)
+        self.action("Save as…", self.save_code, accent=True)
+        self.action("Save and run", lambda: self.save_code(run=True))
 
     def save_code(self, run: bool = False) -> None:
         from tkinter import filedialog, messagebox
