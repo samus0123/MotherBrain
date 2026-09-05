@@ -1571,6 +1571,38 @@ def test_the_sight_command_exports_beside_the_base_not_onto_it(
     assert (models / "motherbrain.pt").exists(), "nothing was exported"
 
 
+def test_an_unknown_command_says_what_to_do_about_it(capsys):
+    """`mb gui` on an old checkout must not just say "invalid choice".
+
+    Commands get added as this goes; the overwhelming cause of one not
+    existing is a checkout older than it. argparse's default message is true
+    and useless, and never mentions git pull.
+    """
+    from motherbrain.cli import RECENT_COMMANDS, build_parser
+
+    parser = build_parser()
+    for action in parser._actions:
+        if getattr(action, "choices", None) and "gui" in action.choices:
+            del action.choices["gui"]
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["gui"])
+    err = capsys.readouterr().err
+    assert "no `mb gui` command in this copy" in err
+    assert "git pull" in err
+    assert "pip install -e ." in err
+    assert "console" in err, "it should still list what this copy can do"
+
+    # A genuine typo gets a suggestion instead of a version lecture.
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(["stat"])
+    err = capsys.readouterr().err
+    assert "git pull" not in err
+    assert "status" in err
+
+    assert "gui" in RECENT_COMMANDS
+
+
 def test_every_command_is_reachable_from_the_window():
     """A command the parser knows but the window drops is a silent dead end.
 

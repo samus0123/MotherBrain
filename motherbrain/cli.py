@@ -1858,6 +1858,16 @@ def cmd_serve(args) -> int:
 # --------------------------------------------------------------------------
 
 
+# Commands added late enough that somebody's checkout may predate them. The
+# point is to answer "why does this not exist?" with a date and a git pull
+# rather than a list of what does.
+RECENT_COMMANDS = {
+    "gui": "in September 2026, along with the desktop window",
+    "sight": "in September 2026, when MotherBrain learned to see",
+    "workspace": "in September 2026, for running from your own drive",
+}
+
+
 class _Parser(argparse.ArgumentParser):
     """An ArgumentParser that resolves --workspace as part of parsing.
 
@@ -1870,6 +1880,43 @@ class _Parser(argparse.ArgumentParser):
         parsed = super().parse_args(args, namespace)
         resolve_paths(parsed)
         return parsed
+
+    def error(self, message: str) -> None:
+        """Say what to do about an unknown command, not just that it is one.
+
+        argparse's "invalid choice: 'gui'" is true and useless. The overwhelming
+        cause is a checkout from before that command existed - MotherBrain gains
+        commands as it goes - and the answer is `git pull`, which the default
+        message never mentions.
+        """
+        import re as _re
+
+        hit = _re.search(r"invalid choice: '([^']+)'", message)
+        if hit:
+            wanted = hit.group(1)
+            known = sorted(self._subparsers_names())
+            print(f"mb: there is no `mb {wanted}` command in this copy of "
+                  f"MotherBrain.\n", file=sys.stderr)
+            if wanted in RECENT_COMMANDS:
+                print(f"`mb {wanted}` was added {RECENT_COMMANDS[wanted]}. This "
+                      f"checkout is older than that.\n"
+                      f"Update it:\n"
+                      f"    git pull\n"
+                      f"    .venv/bin/pip install -e .\n", file=sys.stderr)
+            else:
+                near = [k for k in known if k.startswith(wanted[:2])]
+                if near:
+                    print(f"Did you mean:  {', '.join(near)}\n", file=sys.stderr)
+            print(f"what this copy can do:\n    {', '.join(known)}",
+                  file=sys.stderr)
+            raise SystemExit(2)
+        super().error(message)
+
+    def _subparsers_names(self):
+        for action in self._actions:
+            if hasattr(action, "choices") and action.choices:
+                return list(action.choices)
+        return []
 
 
 def build_parser() -> argparse.ArgumentParser:
