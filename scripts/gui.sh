@@ -45,14 +45,26 @@ fi
 
 # ---- 3. Tkinter ------------------------------------------------------------
 
+# A previous run of tk-local.sh may have put one in your home directory.
+TKENV=${MB_TK_DIR:-$HOME/.local/share/motherbrain-tk}/env.sh
+if [ -f "$TKENV" ] && ! "$PY" -c "import tkinter" >/dev/null 2>&1; then
+  # shellcheck disable=SC1090
+  . "$TKENV"
+  say "using the Tkinter in $(dirname "$TKENV")"
+fi
+
 if ! "$PY" -c "import tkinter" >/dev/null 2>&1; then
   fail "the window needs Tkinter, which is not installed." \
-"Debian, Ubuntu, Kali   sudo apt install python3-tk
-Fedora                 sudo dnf install python3-tkinter
-Arch                   sudo pacman -S tk
+"With root:
+    sudo apt install python3-tk          Debian, Ubuntu, Kali
+    sudo dnf install python3-tkinter     Fedora
+    sudo pacman -S tk                    Arch
 
-Then run this script again. Everything else works without it:
-    $MB console
+Without root - unpacks it into your home directory, touching nothing else:
+    sh scripts/tk-local.sh
+
+Or skip the window entirely. The browser console has the same four options
+and needs nothing installed:
     $MB serve       then open http://127.0.0.1:8000"
 fi
 
