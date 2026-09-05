@@ -454,6 +454,23 @@ def cmd_chat(args) -> int:
 # status and bootstrap
 
 
+def cmd_think(args) -> int:
+    """Work at a goal: propose, check, repair, choose - and show the working."""
+    from motherbrain.reasoning import reason_and_run, reason_code
+
+    model, tok, device, version = load_current(args.run, args.device)
+    print(f"MotherBrain v{version} - {human(model.n_params())} params\n")
+
+    solve = reason_and_run if args.run_it else reason_code
+    trace = solve(model, tok, device, args.goal, attempts=args.attempts,
+                  max_tokens=args.max_tokens)
+    print(trace.render())
+    if trace.succeeded:
+        print()
+        print(trace.answer)
+    return 0 if trace.succeeded else 1
+
+
 def cmd_sight(args) -> int:
     """Give the current version sight, as the next version."""
     from motherbrain.sight import create_sight_patch
@@ -2080,6 +2097,17 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--days", type=int, default=825)
     s.add_argument("--force", action="store_true")
     s.set_defaults(func=cmd_cert)
+
+    s = common(sub.add_parser(
+        "think", help="work at a goal, checking and repairing as it goes"))
+    s.add_argument("goal", help="what you want, in plain words")
+    s.add_argument("--attempts", type=int, default=4,
+                   help="how many candidates to propose before giving up")
+    s.add_argument("--max-tokens", type=int, default=140)
+    s.add_argument("--run-it", action="store_true",
+                   help="also run the winner and report what it printed")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_think)
 
     s = common(sub.add_parser(
         "sight", help="give the current version sight, as the next version"))

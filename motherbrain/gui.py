@@ -655,17 +655,43 @@ class App:
     # ---- option 1: write a program ---------------------------------------
 
     def _make(self, want: str) -> None:
-        from motherbrain.actions import CODE_CAVEAT, generate_code
+        """Option 1, with the reasoning loop behind it.
+
+        Generating once gives code that usually does not compile. Proposing
+        several, checking each against the compiler, repairing what was merely
+        interrupted, and keeping the one the model itself rates highest gives
+        code that does - and the trace says how it got there rather than
+        presenting the result as if it arrived whole.
+        """
+        from motherbrain.actions import CODE_CAVEAT
+        from motherbrain.reasoning import reason_code
 
         self.last_want = want
-        parts = []
-        for piece in generate_code(self.model, self.tok, self.dev, want,
-                                   max_tokens=self.max_tokens):
-            parts.append(piece)
-            self._emit(piece)
-        code = f'"""{want}"""\n\n{"".join(parts)}\n'
-        self.last_code = code
-        self._emit(f"\n\n{CODE_CAVEAT}\n")
+
+        def on_step(step):
+            mark = "✓" if step.ok else "✗"
+            self._emit(f"  {mark} {step.name}\n", "note")
+            if step.note:
+                self._emit(f"      {step.note}\n", "note")
+
+        self._emit("thinking …\n", "note")
+        trace = reason_code(self.model, self.tok, self.dev, want,
+                            attempts=4, max_tokens=self.max_tokens,
+                            on_step=on_step)
+        for step in trace.steps:
+            if step.name.startswith(("closed", "scored", "chose", "kept",
+                                     "nothing", "no candidate")):
+                on_step(step)
+
+        if not trace.succeeded:
+            self._emit("\nnothing it wrote would compile, after "
+                       f"{trace.goal and len(trace.steps)} steps.\n", "bad")
+            self._speak("nothing compiled")
+            return
+
+        self.last_code = trace.answer
+        self._emit("\n" + trace.answer + "\n")
+        self._emit(f"\n{CODE_CAVEAT}\n", "note")
         self.bridge.post(self._offer_save)
         self._speak("program written")
 

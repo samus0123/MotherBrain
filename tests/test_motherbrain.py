@@ -1739,6 +1739,119 @@ def test_all_three_consoles_render_the_same_stats():
         assert field in UI_HTML, f"the browser never shows {field}"
 
 
+# ---- reasoning --------------------------------------------------------------
+
+
+def test_the_compiler_is_the_check_not_the_model():
+    """Whether code compiles is answered by ast, not by asking the model."""
+    from motherbrain.reasoning import parses, runs
+
+    assert parses("def f():\n    return 1\n")[0]
+    ok, message, line = parses("def f():\n    return [1,\n\n@x(*[y]), z\n")
+    assert not ok and message and line
+
+    assert runs("print(6 * 7)") == (True, "42")
+    assert runs("raise ValueError('nope')")[0] is False
+    assert runs("while True: pass", timeout=0.5)[0] is False
+
+
+def test_interrupted_code_is_closed_rather_than_discarded():
+    """Sampling stops at a token limit, not at a sensible place.
+
+    The commonest failure by far is a docstring or bracket opened and never
+    closed - the model was not wrong, it ran out of room. Finishing the
+    construct is a repair the system can make with certainty, and it is the
+    difference between nothing compiling and most things compiling.
+    """
+    from motherbrain.reasoning import parses, patch_up
+
+    interrupted = [
+        'def f():\n    """an unfinished docstring',
+        "def f():\n    return [1, 2,",
+        "def f():",
+        "def f():\n    x = (1 + (2 *",
+        "def f():\n    d = {'a': [1,",
+    ]
+    for code in interrupted:
+        assert not parses(code)[0], f"expected {code!r} to be broken"
+        assert parses(patch_up(code))[0], f"could not mend {code!r}"
+
+    # Something already valid is left exactly as it was.
+    good = "def f():\n    return 1\n"
+    assert patch_up(good) == good
+
+
+def test_a_bracket_inside_a_string_is_not_a_bracket():
+    """The repair walks the text; quotes have to suppress bracket counting."""
+    from motherbrain.reasoning import parses, patch_up
+
+    code = 'def f():\n    return "a ( b [ c {"'
+    assert parses(code)[0], "this was already valid"
+    assert patch_up(code) == code + "\n"
+
+
+def test_reasoning_beats_generating_once(monkeypatch):
+    """The whole claim, on a model that fails the way the real one does.
+
+    A stub that emits an unterminated docstring stands in for what the real
+    model does at a token limit: generating once never compiles, and the loop
+    gets there by closing what was left open.
+    """
+    from motherbrain.reasoning import parses, reason_code
+
+    class Tok:
+        def encode(self, text, bos=False, eos=False):
+            return [1, 2, 3]
+
+        def decode(self, ids):
+            return ""
+
+    class Model:
+        """Scoring is the model's own judgement, so the stub has to answer it."""
+
+        vision = None
+
+        def generate(self, ids, **kw):
+            return iter(())
+
+        def __call__(self, x, targets=None, **kw):
+            vocab = 8
+            return torch.zeros(1, x.shape[1], vocab), None
+
+    def fake_stream(model, tok, device, prompt, **kw):
+        # what the real model does: opens a docstring, runs out of tokens
+        yield 'x):\n    """describe it'
+
+    monkeypatch.setattr("motherbrain.actions.stream", fake_stream)
+
+    once = '"""goal"""\n\ndef goal(x):\n    """describe it\n'
+    assert not parses(once)[0], "the stub should produce broken code"
+
+    trace = reason_code(Model(), Tok(), "cpu", "goal", attempts=2,
+                        max_tokens=8)
+    assert trace.succeeded, trace.render()
+    assert parses(trace.answer)[0]
+    assert any("closed what generation left open" in s.name for s in trace.steps)
+
+
+def test_the_trace_records_failures_as_well_as_the_answer():
+    """A trace that only shows what worked is an advertisement, not a record."""
+    from motherbrain.reasoning import Trace
+
+    trace = Trace(goal="something")
+    trace.add("tried a thing", "detail", ok=False, note="did not work")
+    trace.add("tried another", "detail", ok=True)
+    rendered = trace.render()
+
+    assert "something" in rendered
+    assert "✗" in rendered and "✓" in rendered
+    assert "did not work" in rendered
+    assert "no candidate survived" in rendered
+
+    trace.succeeded = True
+    assert "answered" in trace.render()
+
+
 # ---- sight ----------------------------------------------------------------
 
 
