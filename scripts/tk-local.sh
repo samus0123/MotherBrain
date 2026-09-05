@@ -79,12 +79,22 @@ LIBDIR="$DEST/usr/lib/python$VER"
   exit 1
 }
 
+# The tcl and tk shared libraries land in a multiarch directory whose name
+# depends on the machine - x86_64-linux-gnu on a PC, aarch64-linux-gnu on a
+# Pi or an ARM laptop. Hardcoding one of them breaks the other, so it is
+# looked up rather than assumed.
+ARCHLIB=""
+for candidate in "$DEST"/usr/lib/*-linux-gnu*; do
+  [ -d "$candidate" ] && ARCHLIB="$candidate" && break
+done
+
 ENVFILE="$DEST/env.sh"
-cat > "$ENVFILE" <<EOF
-# Written by scripts/tk-local.sh. Source this, or let scripts/gui.sh find it.
-export PYTHONPATH="$LIBDIR:$LIBDIR/lib-dynload\${PYTHONPATH:+:\$PYTHONPATH}"
-export LD_LIBRARY_PATH="$DEST/usr/lib/x86_64-linux-gnu\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
-EOF
+{
+  echo "# Written by scripts/tk-local.sh. Source this, or let gui.sh find it."
+  echo "export PYTHONPATH=\"$LIBDIR:$LIBDIR/lib-dynload\${PYTHONPATH:+:\$PYTHONPATH}\""
+  [ -n "$ARCHLIB" ] && \
+    echo "export LD_LIBRARY_PATH=\"$ARCHLIB\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}\""
+} > "$ENVFILE"
 
 # shellcheck disable=SC1090
 . "$ENVFILE"
