@@ -1210,23 +1210,95 @@ class App:
                       f"is conditioned on it.\n")
 
 
+def _free_port(preferred: int = 8000) -> int:
+    """A port that is actually free, preferring the documented one."""
+    import socket
+
+    for port in (preferred, 8001, 8080, 0):
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", port))
+                return s.getsockname()[1]
+            except OSError:
+                continue
+    return preferred
+
+
+def run_in_browser(run_dir: str, corpus_dir: str, device: str,
+                   reason: str) -> int:
+    """The window could not open, so serve the same thing to a browser.
+
+    `mb gui` means "give me a graphical MotherBrain". Refusing because this
+    particular machine has no Tkinter, or no display, answers a question
+    nobody asked: the browser console has the same four options and needs
+    neither. So the command falls back to it rather than failing, and says
+    what it did.
+    """
+    import threading
+    import time
+    import webbrowser
+
+    try:
+        import uvicorn
+
+        from motherbrain.server import create_app
+    except ImportError as exc:
+        print(f"cannot open a window ({reason}), and cannot serve one either:"
+              f"\n  {exc}\n\nThe install did not finish. Run:"
+              f"\n    sh scripts/install.sh\n"
+              f"\nor `sh scripts/doctor.sh` to see what is missing.",
+              file=sys.stderr)
+        return 1
+
+    port = _free_port()
+    url = f"http://127.0.0.1:{port}"
+    print(f"no window here ({reason}).")
+    print(f"opening MotherBrain in your browser instead: {url}")
+    print("the same four options, and nothing to install. ctrl-c to stop.\n")
+
+    def open_when_up():
+        # Give uvicorn a moment to bind before pointing a browser at it.
+        time.sleep(1.5)
+        try:
+            if not webbrowser.open(url):
+                print(f"could not open a browser; go to {url} yourself.")
+        except Exception:                                 # noqa: BLE001
+            print(f"could not open a browser; go to {url} yourself.")
+
+    threading.Thread(target=open_when_up, daemon=True).start()
+    app = create_app(run_dir=run_dir, corpus_dir=corpus_dir, device=device)
+    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    return 0
+
+
 def run(run_dir: str, corpus_dir: str, device: str = "auto",
-        max_tokens: int = 120, steps: int = 100, grow: int = 1) -> int:
-    """Open the window. Returns a process exit code."""
+        max_tokens: int = 120, steps: int = 100, grow: int = 1,
+        web: bool | None = None) -> int:
+    """Open MotherBrain's interface: a window if this machine has one.
+
+    Falls back to the browser rather than failing, because every reason a
+    window cannot open here is a reason the browser console still can.
+    """
+    if web:
+        return run_in_browser(run_dir, corpus_dir, device, "you asked for it")
+
     try:
         import tkinter as tk
     except ImportError:
-        print(MISSING_TK, file=sys.stderr)
-        return 1
+        if web is False:
+            print(MISSING_TK, file=sys.stderr)
+            return 1
+        return run_in_browser(run_dir, corpus_dir, device,
+                              "Tkinter is not installed")
 
     try:
         root = tk.Tk()
     except tk.TclError as exc:
-        print(f"no display to open a window on ({exc}).\n\n"
-              f"On a headless machine or Android, serve it instead:\n"
-              f"  mb serve --host 0.0.0.0\n"
-              f"then open http://127.0.0.1:8000 in a browser.", file=sys.stderr)
-        return 1
+        if web is False:
+            print(f"no display to open a window on ({exc}).", file=sys.stderr)
+            return 1
+        return run_in_browser(run_dir, corpus_dir, device,
+                              "there is no display")
 
     App(root, run_dir, corpus_dir, device, max_tokens, steps, grow)
     root.mainloop()
