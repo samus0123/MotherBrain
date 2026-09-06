@@ -1657,6 +1657,71 @@ def test_the_fallback_finds_a_port_that_is_free():
         s.bind(("127.0.0.1", port))       # free, so this must not raise
 
 
+def test_advice_matches_the_platform_it_is_given_on(monkeypatch):
+    """Telling a Windows user to run `sh scripts/install.sh` is telling them
+    to run nothing: neither that shell nor that path exists there."""
+    import importlib
+    import sys as _sys
+
+    import motherbrain.cli as cli
+
+    monkeypatch.setattr(_sys, "platform", "win32")
+    importlib.reload(cli)
+    win = cli.platform_commands()
+    assert win["pip"].startswith(".venv\\Scripts")
+    assert win["install"].endswith("install.ps1")
+    assert "sh " not in win["install"]
+
+    monkeypatch.setattr(_sys, "platform", "linux")
+    importlib.reload(cli)
+    nix = cli.platform_commands()
+    assert nix["pip"] == ".venv/bin/pip"
+    assert nix["install"] == "sh scripts/install.sh"
+    assert ".ps1" not in nix["install"]
+
+
+def test_windows_scripts_look_for_files_that_exist():
+    """A .ps1 checking for a file the repo no longer ships fails a good clone.
+
+    start.ps1 and doctor.ps1 both looked for models/motherbrain.pt, which is
+    the merged current model - gitignored, and absent from every clone. The
+    committed one is models/motherbrain-base.pt, so a correct checkout failed
+    at the step meant to confirm it was correct.
+    """
+    import re
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    scripts = sorted((root / "scripts").glob("*.ps1"))
+    assert scripts, "no PowerShell scripts found"
+
+    for script in scripts:
+        text = script.read_text()
+
+        # Nothing may send a Windows user off main: it carries everything.
+        assert "claude/massive-parameter-llm-mcs613" not in text, \
+            f"{script.name} still switches away from main"
+
+        # Every path it insists must exist, has to.
+        for wanted in re.findall(r'Test-Path "([^"$]+)"', text):
+            if "\\Scripts\\" in wanted or ".venv" in wanted:
+                continue                      # created by installing, not shipped
+            local = root / wanted.replace("\\", "/")
+            if local.suffix in (".pt", ".json") and "base" not in local.name:
+                continue                      # a permitted fallback, not required
+            assert local.exists(), f"{script.name} requires missing {wanted}"
+
+
+def test_every_platform_has_a_way_in():
+    """Each supported system needs an installer and a launcher that name it."""
+    root = pathlib.Path(__file__).resolve().parent.parent
+    for name in ("install.sh", "gui.sh", "doctor.sh",
+                 "install.ps1", "gui.ps1", "doctor.ps1", "start.ps1"):
+        assert (root / "scripts" / name).is_file(), f"missing scripts/{name}"
+
+    readme = (root / "README.md").read_text()
+    assert "install.ps1" in readme, "the README never mentions the Windows installer"
+
+
 def test_every_command_is_reachable_from_the_window():
     """A command the parser knows but the window drops is a silent dead end.
 

@@ -385,6 +385,37 @@ the table is small, literal, and refuses rather than guesses - `/checkout`
 without a version is an error, and "learning rates matter" is a prompt, not an
 instruction to learn something.
 
+## Windows 10 and 11
+
+Open PowerShell in the folder you want it in, then:
+
+```powershell
+git clone https://github.com/samus0123/MotherBrain
+cd MotherBrain
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+powershell -ExecutionPolicy Bypass -File scripts\gui.ps1
+```
+
+`-ExecutionPolicy Bypass` is needed because Windows refuses to run downloaded
+scripts by default. It applies to that one command and changes nothing
+permanently.
+
+Windows needs less care than Linux does. The python.org installer includes
+Tkinter, so the window opens with nothing extra, and PyPI's torch wheel for
+Windows does not drag in the CUDA runtime the way the Linux one does — no
+5.5GB surprise. The one thing that does go wrong is Python not being on PATH:
+tick **"Add python.exe to PATH"** during setup, or the scripts cannot find it.
+
+After that, either of these works from the MotherBrain folder:
+
+```powershell
+.venv\Scripts\mb.exe gui        # the window
+.venv\Scripts\mb.exe console    # the terminal
+.venv\Scripts\mb.exe serve      # then open http://127.0.0.1:8000
+```
+
+If something fails, `scripts\doctor.ps1` reports what is missing.
+
 ## Starting the window
 
 ```bash

@@ -506,11 +506,11 @@ class App:
         if cap.listen:
             self.voice_btn.config(state="normal")
         else:
-            self.voice_btn.config(text="🎤 (none)")
+            self.voice_btn.config(text="Speak (n/a)")
         if getattr(model, "vision", None) is not None:
             self.image_btn.config(state="normal")
         else:
-            self.image_btn.config(text="🖼 (none)")
+            self.image_btn.config(text="Image (n/a)")
         self.refresh_stats()
         self.status.config(text="ready")
         self.entry.focus_set()
@@ -1159,7 +1159,7 @@ class App:
 
     def forget_image(self) -> None:
         self.image_path = None
-        self.image_btn.config(text="🖼 Image")
+        self.image_btn.config(text="Image")
         self.say_note("no longer looking at an image.\n")
 
     # ---- voice and images -------------------------------------------------
@@ -1205,7 +1205,7 @@ class App:
         if not path:
             return
         self.image_path = path
-        self.image_btn.config(text="🖼 " + Path(path).name[:8])
+        self.image_btn.config(text=Path(path).name[:10])
         self.say_note(f"looking at {Path(path).name}. The next thing you send "
                       f"is conditioned on it.\n")
 
@@ -1243,10 +1243,13 @@ def run_in_browser(run_dir: str, corpus_dir: str, device: str,
 
         from motherbrain.server import create_app
     except ImportError as exc:
+        from motherbrain.cli import platform_commands
+
+        where = platform_commands()
         print(f"cannot open a window ({reason}), and cannot serve one either:"
               f"\n  {exc}\n\nThe install did not finish. Run:"
-              f"\n    sh scripts/install.sh\n"
-              f"\nor `sh scripts/doctor.sh` to see what is missing.",
+              f"\n    {where['install']}\n"
+              f"\nor `{where['doctor']}` to see what is missing.",
               file=sys.stderr)
         return 1
 

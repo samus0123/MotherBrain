@@ -1875,6 +1875,31 @@ def cmd_serve(args) -> int:
 # --------------------------------------------------------------------------
 
 
+def platform_commands() -> dict:
+    """What the install and repair commands are actually called here.
+
+    Telling a Windows user to run `sh scripts/install.sh` and
+    `.venv/bin/pip` is telling them to run nothing: neither path exists on
+    their machine. The advice has to change with the platform or it is not
+    advice.
+    """
+    if sys.platform == "win32":
+        return {
+            "pip": r".venv\Scripts\pip.exe",
+            "mb": r".venv\Scripts\mb.exe",
+            "install": r"powershell -ExecutionPolicy Bypass -File scripts\install.ps1",
+            "doctor": r"powershell -ExecutionPolicy Bypass -File scripts\doctor.ps1",
+            "gui": r"powershell -ExecutionPolicy Bypass -File scripts\gui.ps1",
+        }
+    return {
+        "pip": ".venv/bin/pip",
+        "mb": ".venv/bin/mb",
+        "install": "sh scripts/install.sh",
+        "doctor": "sh scripts/doctor.sh",
+        "gui": "sh scripts/gui.sh",
+    }
+
+
 # Commands added late enough that somebody's checkout may predate them. The
 # point is to answer "why does this not exist?" with a date and a git pull
 # rather than a list of what does.
@@ -1915,11 +1940,12 @@ class _Parser(argparse.ArgumentParser):
             print(f"mb: there is no `mb {wanted}` command in this copy of "
                   f"MotherBrain.\n", file=sys.stderr)
             if wanted in RECENT_COMMANDS:
+                where = platform_commands()
                 print(f"`mb {wanted}` was added {RECENT_COMMANDS[wanted]}. This "
                       f"checkout is older than that.\n"
                       f"Update it:\n"
                       f"    git pull\n"
-                      f"    .venv/bin/pip install -e .\n", file=sys.stderr)
+                      f"    {where['pip']} install -e .\n", file=sys.stderr)
             else:
                 near = [k for k in known if k.startswith(wanted[:2])]
                 if near:

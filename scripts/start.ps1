@@ -10,17 +10,14 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path -Parent $PSScriptRoot)
 Write-Host "MotherBrain: $(Get-Location)"
 
-# 1. The code. main holds only a LICENSE and a README, so a plain clone lands
-#    on a branch with nothing to run.
+# 1. The code. main carries everything now - the weights included - so a plain
+#    clone is enough and there is no branch to switch to.
 if (-not (Test-Path "motherbrain\cli.py")) {
-    Write-Host "`nstep 1: getting the code (this checkout is missing it)"
-    git fetch origin claude/massive-parameter-llm-mcs613
-    git checkout claude/massive-parameter-llm-mcs613
-    if (-not (Test-Path "motherbrain\cli.py")) {
-        Write-Host "`ncould not switch to the branch that holds the code. Start again with:"
-        Write-Host "  git clone -b claude/massive-parameter-llm-mcs613 https://github.com/samus0123/MotherBrain"
-        exit 1
-    }
+    Write-Host "`nstep 1 failed: this directory does not hold MotherBrain."
+    Write-Host "Clone it and run this from inside:"
+    Write-Host "  git clone https://github.com/samus0123/MotherBrain"
+    Write-Host "  cd MotherBrain"
+    exit 1
 }
 Write-Host "  ok: code present"
 
@@ -57,17 +54,21 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "  ok: installed"
 
-# 3. Something to run. A clone ships models\motherbrain.pt.
-if (-not (Test-Path "models\motherbrain.pt") -and
+# 3. Something to run. A clone ships models\motherbrain-base.pt and the
+#    patches; models\motherbrain.pt is a local artifact and is not committed,
+#    so looking for that one failed on a perfectly good checkout.
+if (-not (Test-Path "models\motherbrain-base.pt") -and
+    -not (Test-Path "models\motherbrain.pt") -and
     -not (Test-Path "runs\default\checkpoint.pt")) {
     Write-Host "`nstep 3 failed: no model found — the checkout is incomplete."
-    Write-Host "Try:  git checkout claude/massive-parameter-llm-mcs613 -- models"
+    Write-Host "Try a fresh clone:"
+    Write-Host "  git clone https://github.com/samus0123/MotherBrain"
     exit 1
 }
 Write-Host "  ok: model present`n"
 
 if (Test-Path ".venv\Scripts\mb.exe") {
-    & ".venv\Scripts\mb.exe" console @args
+    & ".venv\Scripts\mb.exe" gui @args
 } else {
-    & $vpy -m motherbrain.cli console @args
+    & $vpy -m motherbrain.cli gui @args
 }
