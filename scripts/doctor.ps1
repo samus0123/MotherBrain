@@ -13,8 +13,9 @@ try { git rev-parse --abbrev-ref HEAD; git log --oneline -1 }
 catch { Write-Host "not a git repository (or git not installed)" }
 
 Write-Host "`n--- files that must exist ---"
-foreach ($f in @("motherbrain\cli.py", "models\motherbrain.pt",
-                 "scripts\start.ps1", "pyproject.toml")) {
+foreach ($f in @("motherbrain\cli.py", "models\motherbrain-base.pt",
+                 "runs\default\versions.json", "scripts\start.ps1",
+                 "pyproject.toml")) {
     if (Test-Path $f) { Write-Host "  ok      $f" } else { Write-Host "  MISSING $f" }
 }
 
