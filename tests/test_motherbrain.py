@@ -1603,6 +1603,60 @@ def test_an_unknown_command_says_what_to_do_about_it(capsys):
     assert "gui" in RECENT_COMMANDS
 
 
+def test_mb_gui_serves_a_browser_rather_than_failing(monkeypatch):
+    """`mb gui` means "give me a graphical MotherBrain", not "open Tkinter".
+
+    Refusing because this machine has no Tkinter, or no display, answers a
+    question nobody asked - the browser console has the same four options and
+    needs neither. Every reason the window cannot open is a reason the
+    fallback still can.
+    """
+    import builtins
+
+    from motherbrain import gui
+
+    real_import = builtins.__import__
+
+    def no_tkinter(name, *a, **kw):
+        if name == "tkinter":
+            raise ImportError("No module named 'tkinter'")
+        return real_import(name, *a, **kw)
+
+    served = {}
+
+    def fake_serve(run_dir, corpus_dir, device, reason):
+        served["reason"] = reason
+        return 0
+
+    monkeypatch.setattr(builtins, "__import__", no_tkinter)
+    monkeypatch.setattr(gui, "run_in_browser", fake_serve)
+
+    assert gui.run("runs/default", "data/corpus") == 0
+    assert "Tkinter" in served["reason"]
+
+    # --no-web is the escape hatch for anyone who wants the old behaviour.
+    served.clear()
+    assert gui.run("runs/default", "data/corpus", web=False) == 1
+    assert not served
+
+
+def test_the_fallback_finds_a_port_that_is_free():
+    """Port 8000 is often taken; falling over on that would be absurd."""
+    import socket
+
+    from motherbrain.gui import _free_port
+
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        busy = taken.getsockname()[1]
+        taken.listen(1)
+        assert _free_port(busy) != busy
+
+    port = _free_port()
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", port))       # free, so this must not raise
+
+
 def test_every_command_is_reachable_from_the_window():
     """A command the parser knows but the window drops is a silent dead end.
 

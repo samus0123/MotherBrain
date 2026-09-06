@@ -597,7 +597,7 @@ def cmd_gui(args) -> int:
     from motherbrain.gui import run
 
     return run(args.run, args.corpus, args.device, args.max_tokens,
-               args.steps, args.grow)
+               args.steps, args.grow, web=args.web)
 
 
 def cmd_status(args) -> int:
@@ -2146,6 +2146,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--grow", type=int, default=1,
                    help="experts added per layer when applying a patch")
     s.add_argument("--device", default="auto")
+    s.add_argument("--web", action="store_true", default=None,
+                   help="skip the window and use the browser")
+    s.add_argument("--no-web", dest="web", action="store_false",
+                   help="never fall back to the browser; fail instead")
     s.set_defaults(func=cmd_gui)
 
     s = common(sub.add_parser("serve", help="expose the model over HTTP or HTTPS"))

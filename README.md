@@ -388,6 +388,18 @@ instruction to learn something.
 ## Starting the window
 
 ```bash
+mb gui
+```
+
+It opens a window where it can, and where it cannot — no Tkinter, no display,
+SSH, a headless box — it serves the same four options to your browser and
+opens it for you. There is no machine where this prints an error instead of
+giving you a MotherBrain. `--web` skips straight to the browser; `--no-web`
+insists on a window and fails if there is not one.
+
+If you would rather see what is wrong than have it worked around:
+
+```bash
 sh scripts/gui.sh
 ```
 
