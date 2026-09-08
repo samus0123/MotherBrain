@@ -1332,6 +1332,15 @@ def cmd_console(args) -> int:
         if not line:
             return 0
 
+        # Exact first: a definite answer is computed, not generated.
+        from motherbrain.logic import solve as _solve
+
+        exact = _solve(line)
+        if exact is not None:
+            print(exact.render() + "\n")
+            say(exact.value)
+            continue
+
         cmd = parse(line)
 
         if cmd.name in ("noop",):
