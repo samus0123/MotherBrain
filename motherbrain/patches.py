@@ -47,7 +47,7 @@ FFN_TARGETS = ("gate", "up", "down")
 
 # Modes that add parameters. The lineage's promise - every version larger
 # than the last - is checked against these.
-GROWING_MODES = ("grow", "sight")
+GROWING_MODES = ("grow", "sight", "hearing")
 
 
 @dataclass
@@ -75,6 +75,10 @@ class PatchConfig:
     vision_heads: int = 4
     image_size: int = 64
     patch_size: int = 16
+
+    # Only meaningful when mode == "hearing": how many layers were appended to
+    # an existing tower so it could hold sound and video as well as pictures.
+    extra_vision_layers: int = 2
 
 
 def _sample_fingerprint(model: nn.Module, legacy: bool) -> str:
@@ -171,11 +175,15 @@ class Version:
     image_size: int = 0
     patch_size: int = 0
 
-    # What the model could name in held-out images after this patch, out of
-    # images it had never seen. Nothing else in a lineage measures whether the
-    # model can actually see, so it is recorded rather than reported once and
-    # forgotten.
+    # What the model could name in held-out media after this patch, out of
+    # things it had never been shown. Nothing else in a lineage measures
+    # whether the model can actually perceive, so it is recorded rather than
+    # reported once and forgotten. Each is beside its own chance rate, because
+    # a number without one means nothing.
     sight_accuracy: float = 0.0
+    sound_accuracy: float = 0.0
+    video_accuracy: float = 0.0
+    extra_vision_layers: int = 0
 
     @property
     def filename(self) -> str:
@@ -190,7 +198,8 @@ class Version:
             vision_width=self.vision_width or 256,
             vision_heads=self.vision_heads or 4,
             image_size=self.image_size or 64,
-            patch_size=self.patch_size or 16)
+            patch_size=self.patch_size or 16,
+            extra_vision_layers=self.extra_vision_layers or 2)
 
 
 class LoRALinear(nn.Module):
@@ -282,6 +291,16 @@ def apply_patch(model: nn.Module, payload: dict, cfg: PatchConfig) -> int:
     first, exactly as it was when they were trained. That is why the mode is
     recorded with the version and replayed here.
     """
+    if cfg.mode == "hearing":
+        from motherbrain.growth import deepen_sight
+
+        deepen_sight(model, extra_layers=cfg.extra_vision_layers)
+        result = model.load_state_dict(payload, strict=False)
+        if result.unexpected_keys:
+            raise ValueError(
+                f"patch does not fit this model: {result.unexpected_keys[:3]}")
+        return cfg.extra_vision_layers
+
     if cfg.mode == "sight":
         from motherbrain.growth import add_sight
 
