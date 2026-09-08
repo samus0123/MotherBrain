@@ -2010,6 +2010,163 @@ def test_the_live_endpoints_answer(served):
     assert "could not read" in bad.json()["detail"]
 
 
+# ---- hearing and watching ----------------------------------------------------
+
+
+def test_generated_sounds_carry_what_their_captions_claim():
+    """A caption is only ground truth if the sound actually differs by it.
+
+    Nearest-centroid on raw spectrogram pixels is the crudest learner there
+    is; if it cannot separate the classes, the data is not learnable and the
+    tower would be training on nothing.
+    """
+    from motherbrain.mediadata import sound_pairs
+
+    train, test = sound_pairs(240, seed=7), sound_pairs(80, seed=707)
+
+    def separates(word_index, chance):
+        groups = {}
+        for tensor, caption in train:
+            groups.setdefault(caption.split()[word_index], []).append(
+                tensor.flatten())
+        centres = {k: torch.stack(v).mean(0) for k, v in groups.items()}
+        right = sum(
+            min(centres, key=lambda k: float((t.flatten() - centres[k]).pow(2).sum()))
+            == c.split()[word_index] for t, c in test)
+        return right / len(test)
+
+    # timbre is the strongest - a square wave stacks harmonics a sine has not
+    assert separates(2, 1 / 3) > 0.55, "timbre is not in the spectrogram"
+    assert separates(3, 1 / 3) > 0.40, "pitch is not in the spectrogram"
+
+
+def test_generated_clips_carry_their_motion():
+    """Same test for video. Nine cells at 64px measured exactly at chance,
+    which is how the frame count came down to four."""
+    from motherbrain.mediadata import video_pairs
+
+    train, test = video_pairs(240, seed=7), video_pairs(80, seed=707)
+    groups = {}
+    for tensor, caption in train:
+        groups.setdefault(caption.split()[1], []).append(tensor.flatten())
+    centres = {k: torch.stack(v).mean(0) for k, v in groups.items()}
+    right = sum(
+        min(centres, key=lambda k: float((t.flatten() - centres[k]).pow(2).sum()))
+        == c.split()[1] for t, c in test)
+    assert right / len(test) > 1.5 * (1 / 8), "colour is not visible in the sheet"
+
+
+def test_deepening_the_tower_keeps_what_it_could_already_see():
+    """New layers start as exact identities.
+
+    Anything else means learning to hear costs some of the sight already paid
+    for, and the loss would hide it - the number that falls is the training
+    loss, not the held-out sight accuracy.
+    """
+    from motherbrain.growth import add_sight, deepen_sight
+
+    torch.manual_seed(0)
+    model = MotherBrain(tiny()).eval()
+    add_sight(model, layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    with torch.no_grad():
+        for p in model.vision.parameters():
+            p.normal_(std=0.02)
+
+    image = torch.rand(1, 3, 32, 32)
+    idx = torch.tensor([[1, 2, 3]])
+    with torch.no_grad():
+        before, _ = model(idx, targets=None, images=image)
+
+    size = model.n_params()
+    cfg, trainable = deepen_sight(model, extra_layers=2)
+    assert model.n_params() > size, "deepening must add parameters"
+    assert cfg.vision_layers == 3
+    assert trainable, "the whole tower has to be trainable, old blocks included"
+
+    with torch.no_grad():
+        after, _ = model(idx, targets=None, images=image)
+    assert torch.equal(before, after), "deepening changed what it sees"
+
+    with pytest.raises(ValueError, match="no perception tower"):
+        deepen_sight(MotherBrain(tiny()))
+
+
+def test_a_hearing_patch_rebuilds_the_deeper_tower(served):
+    """The patch carries weights; the shape has to be replayed to load them."""
+    from motherbrain.cli import load_current
+    from motherbrain.growth import add_sight, deepen_sight
+    from motherbrain.patches import (PatchStore, Version, build_version,
+                                     weights_fingerprint)
+
+    run, _corpus = served
+    model, tok, _dev, _v = load_current(str(run), "cpu")
+    store = PatchStore(run)
+    store.set_base(weights_fingerprint(model), 0)
+
+    shape = dict(layers=1, width=32, heads=2, image_size=32, patch_size=16)
+    before_sight = model.n_params()
+    add_sight(model, **shape)
+    store.record(
+        Version(version=1, patch_id="sight01", parent=0, created_at=0.0,
+                doc_start=0, doc_end=0, n_documents=0, n_chars=0, n_tokens=0,
+                steps=1, rank=0, trainable_params=1, loss_before=1.0,
+                loss_after=0.5, mode="sight",
+                base_fingerprint=store.base_fingerprint,
+                params_before=before_sight, params_after=model.n_params(),
+                vision_layers=1, vision_width=32, vision_heads=2,
+                image_size=32, patch_size=16),
+        {n: t for n, t in model.state_dict().items() if n.startswith("vision.")})
+
+    before_hearing = model.n_params()
+    deepen_sight(model, extra_layers=2)
+    with torch.no_grad():
+        for p in model.vision.parameters():
+            p.normal_(std=0.02)
+    model.eval()
+
+    image = torch.rand(1, 3, 32, 32)
+    idx = torch.tensor([tok.encode("a red circle", bos=True)])
+    with torch.no_grad():
+        expected, _ = model(idx, targets=None, images=image)
+
+    store.record(
+        Version(version=2, patch_id="hear01", parent=1, created_at=0.0,
+                doc_start=0, doc_end=0, n_documents=0, n_chars=0, n_tokens=0,
+                steps=1, rank=0, trainable_params=1, loss_before=1.0,
+                loss_after=0.5, mode="hearing",
+                base_fingerprint=store.base_fingerprint,
+                params_before=before_hearing, params_after=model.n_params(),
+                vision_layers=3, vision_width=32, vision_heads=2,
+                image_size=32, patch_size=16, extra_vision_layers=2),
+        {n: t for n, t in model.state_dict().items() if n.startswith("vision.")})
+
+    rebuilt, _tok, version = build_version(str(run), device="cpu")
+    assert version == 2
+    assert rebuilt.cfg.vision_layers == 3
+    rebuilt.eval()
+    with torch.no_grad():
+        got, _ = rebuilt(idx, targets=None, images=image)
+    assert torch.allclose(expected, got, atol=2e-2)     # fp16 patch storage
+
+
+def test_each_sense_is_scored_against_its_own_captions():
+    """Asking whether a sound is "a red circle" is not a question about hearing."""
+    from motherbrain.mediadata import all_sound_captions, all_video_captions
+    from motherbrain.sight import all_captions, sense_sets
+
+    sets = sense_sets(32, 3, seed=1)
+    assert set(sets) == {"sight", "sound", "video"}
+    assert sets["sight"]["captions"] == all_captions()
+    assert sets["sound"]["captions"] == all_sound_captions()
+    assert sets["video"]["captions"] == all_video_captions()
+
+    # The three worlds must not share a vocabulary, or the choice is not forced.
+    assert not set(all_captions()) & set(all_sound_captions())
+    for name, data in sets.items():
+        assert len(data["pairs"]) == 3, name
+        assert data["pairs"][0][0].shape == (3, 32, 32), name
+
+
 # ---- exact answers ----------------------------------------------------------
 
 

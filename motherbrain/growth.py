@@ -165,6 +165,50 @@ def add_sight(model, layers: int = 4, width: int = 256, heads: int = 4,
     return cfg, list(tower.parameters())
 
 
+def deepen_sight(model, extra_layers: int = 2
+                 ) -> tuple[ModelConfig, list[nn.Parameter]]:
+    """Add layers to an existing perception tower.
+
+    Sight was trained on pictures alone. Teaching the same tower sound and
+    video is asking it to hold three worlds where it held one, and doing that
+    by retraining what is there would add no parameters - which the lineage
+    forbids, and rightly: a version that learns more should be a larger model,
+    not the same model rearranged.
+
+    So the tower grows. New blocks are appended, the whole tower is returned
+    as trainable, and the old blocks are included on purpose - they have to
+    make room for the new senses, and freezing them would leave the new layers
+    correcting a representation built for pictures only.
+    """
+    from motherbrain.vision import VisionBlock
+
+    tower = getattr(model, "vision", None)
+    if tower is None:
+        raise ValueError("this model has no perception tower; `mb sight` first")
+    if extra_layers < 1:
+        raise ValueError("deepening must add at least one layer")
+
+    cfg = ModelConfig.from_dict(model.cfg.to_dict())
+    device = next(model.parameters()).device
+    for _ in range(extra_layers):
+        block = VisionBlock(cfg.vision_width, cfg.vision_heads,
+                            dropout=cfg.dropout).to(device)
+        # Each new block starts as an exact identity, so deepening does not
+        # throw away what the tower could already see. A VisionBlock is two
+        # residual branches - attention through proj, and the MLP through fc2 -
+        # so zeroing both output projections makes it x -> x precisely, and
+        # gradient still flows into them from the first step.
+        with torch.no_grad():
+            block.proj.weight.zero_()
+            block.fc2.weight.zero_()
+        tower.blocks.append(block)
+
+    cfg.vision_layers = len(tower.blocks)
+    model.cfg = cfg
+    tower.cfg = cfg
+    return cfg, list(tower.parameters())
+
+
 @torch.no_grad()
 def release(model, n_new: int) -> None:
     """Let the newly added experts be routed to.

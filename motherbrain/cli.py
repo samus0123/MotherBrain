@@ -471,6 +471,59 @@ def cmd_think(args) -> int:
     return 0 if trace.succeeded else 1
 
 
+def cmd_hear(args) -> int:
+    """Teach the perception tower sound and video, as the next version."""
+    from motherbrain.sight import create_hearing_patch
+
+    def progress(info):
+        if info["step"] % 100 == 0:
+            print(f"  step {info['step']}/{info['total']}  "
+                  f"loss {info['loss']:.4f}", flush=True)
+
+    def on_eval(step, senses, score, improved):
+        parts = "  ".join(f"{k} {s['accuracy']:.1%} (chance {s['chance']:.1%})"
+                          for k, s in senses.items())
+        print(f"  at {step}: {parts}{'  <- best so far' if improved else ''}",
+              flush=True)
+
+    tower = None
+    if args.tower:
+        import torch
+
+        tower = torch.load(args.tower, map_location="cpu", weights_only=True)
+        print(f"loading an already-trained tower from {args.tower}")
+
+    version, result = create_hearing_patch(
+        args.run, device=args.device, steps=args.steps,
+        batch_size=args.batch_size, lr=args.lr,
+        extra_layers=args.extra_layers, n_each=args.n_each,
+        n_eval=args.n_eval, progress_cb=progress, on_eval=on_eval,
+        tower_state=tower)
+
+    print(f"\nv{version.parent} -> v{version.version}")
+    print(f"  deepened   the tower by {args.extra_layers} layer(s)")
+    print(f"  grew       {human(version.params_before)} -> "
+          f"{human(version.params_after)} "
+          f"(+{version.params_after - version.params_before:,} parameters)")
+    for sense in ("sight", "sound", "video"):
+        before = result["before"][sense]
+        after = result["after"][sense]
+        verdict = "" if after["accuracy"] > after["chance"] * 2 else \
+            "   NOT meaningfully above chance"
+        print(f"  {sense:<10} {before['accuracy']:.1%} -> {after['accuracy']:.1%} "
+              f"(chance {after['chance']:.1%}){verdict}")
+    print(f"  in effect  the model now serving is v{version.version}")
+
+    target = Path(args.export or merged_model_path(args.run))
+    try:
+        written = export_model(args.run, target, device=args.device,
+                               corpus_dir=args.corpus)
+        print(f"  exported   {target} ({written / 1e6:,.1f} MB)")
+    except Exception as exc:                              # noqa: BLE001
+        print(f"  warning: could not export to {target}: {exc}")
+    return 0
+
+
 def cmd_sight(args) -> int:
     """Give the current version sight, as the next version."""
     from motherbrain.sight import create_sight_patch
@@ -2144,6 +2197,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="also run the winner and report what it printed")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_think)
+
+    s = common(sub.add_parser(
+        "hear", help="teach the tower sound and video, as the next version"))
+    s.add_argument("--steps", type=int, default=4000)
+    s.add_argument("--batch-size", type=int, default=18)
+    s.add_argument("--lr", type=float, default=4e-4)
+    s.add_argument("--extra-layers", type=int, default=2,
+                   help="layers appended to the tower to hold the new senses")
+    s.add_argument("--n-each", type=int, default=1400,
+                   help="training examples generated per sense")
+    s.add_argument("--n-eval", type=int, default=96,
+                   help="held-out examples per sense")
+    s.add_argument("--tower", help="a trained tower to load instead of training")
+    s.add_argument("--export", help="where to write the merged model")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_hear)
 
     s = common(sub.add_parser(
         "sight", help="give the current version sight, as the next version"))
