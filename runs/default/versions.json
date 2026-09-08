@@ -1,6 +1,6 @@
 {
-  "current": 4,
-  "head": 4,
+  "current": 5,
+  "head": 5,
   "base_docs": 23904,
   "versions": [
     {
@@ -108,6 +108,40 @@
       "image_size": 64,
       "patch_size": 16,
       "sight_accuracy": 0.2552
+    },
+    {
+      "version": 5,
+      "patch_id": "29a5e1f6",
+      "parent": 4,
+      "created_at": 1788909104.716352,
+      "doc_start": 23908,
+      "doc_end": 23908,
+      "n_documents": 0,
+      "n_chars": 0,
+      "n_tokens": 0,
+      "steps": 4000,
+      "rank": 0,
+      "trainable_params": 5021184,
+      "loss_before": 0.0,
+      "loss_after": 0.0,
+      "sources": [
+        "rendered sounds and clips"
+      ],
+      "note": "hearing",
+      "base_fingerprint": "68d4a71f47aec78c5ad619e24514de58",
+      "mode": "hearing",
+      "grow_experts": 0,
+      "params_before": 50648984,
+      "params_after": 52222872,
+      "vision_layers": 6,
+      "vision_width": 256,
+      "vision_heads": 4,
+      "image_size": 64,
+      "patch_size": 16,
+      "sight_accuracy": 0.2266,
+      "sound_accuracy": 0.6328,
+      "video_accuracy": 0.0781,
+      "extra_vision_layers": 2
     }
   ],
   "base_fingerprint": "68d4a71f47aec78c5ad619e24514de58"
