@@ -78,6 +78,7 @@ def answer_about_self(kind: str, stats: dict) -> str:
         # moment a patch trained them - self-knowledge that hardcodes what it
         # knows goes stale silently, which is the worst way for it to be wrong.
         senses = []
+        working = 0
         for sense, what in (("sight", "images"), ("sound", "sounds"),
                             ("video", "clips")):
             accuracy = stats.get(f"{sense}_accuracy", 0.0)
@@ -85,6 +86,7 @@ def answer_about_self(kind: str, stats: dict) -> str:
             if not accuracy or not baseline:
                 continue
             if accuracy > baseline * 2:
+                working += 1
                 senses.append(f"{sense}: {accuracy:.1%} of held-out {what} "
                               f"named correctly against {baseline:.1%} chance, "
                               f"{accuracy / baseline:.0f} times chance")
@@ -96,8 +98,14 @@ def answer_about_self(kind: str, stats: dict) -> str:
             return ("I have a perception tower but nothing has measured it, "
                     "so I cannot tell you whether it works.")
 
-        return ("Yes, in narrow ways, and here is exactly how well:\n  "
-                + "\n  ".join(senses)
+        # Opening with "yes" when nothing clears its baseline is an oversell,
+        # and the numbers underneath do not undo a lead that already claimed
+        # the capability.
+        lead = ("Yes, in narrow ways, and here is exactly how well:"
+                if working else
+                "No, not really. A tower is attached and measured, and none of "
+                "it is meaningfully better than guessing:")
+        return (lead + "\n  " + "\n  ".join(senses)
                 + "\nThose were measured on generated worlds - coloured "
                   "shapes, tones with a pitch and a timbre, shapes moving in "
                   "one direction. Anything outside those worlds is outside "

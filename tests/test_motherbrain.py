@@ -2451,10 +2451,22 @@ def test_it_admits_when_it_cannot_see():
     assert answer.startswith("No")
     assert "mb sight" in answer
 
-    # And a tower that is attached but useless is described as useless.
-    useless = dict(blind, can_see=True, sight_accuracy=0.04)
+    # A tower that is attached but useless is described as useless - and the
+    # answer must not open with "yes" when nothing clears its baseline, since
+    # the numbers underneath do not undo a lead that already claimed it.
+    useless = dict(blind, can_see=True, sight_accuracy=0.04, sight_chance=0.031)
     _, answer = respond("can you see?", useless)
-    assert "NOT meaningfully above chance" in answer
+    assert answer.startswith("No, not really")
+    assert "not meaningfully better" in answer
+    assert "should not be believed" in answer
+
+    # One working sense among useless ones is still a yes, with the weak one
+    # named as weak.
+    mixed = dict(useless, sound_accuracy=0.633, sound_chance=0.028)
+    _, answer = respond("can you see?", mixed)
+    assert answer.startswith("Yes")
+    assert "23 times chance" in answer
+    assert "should not be believed" in answer
 
 
 # ---- sight ----------------------------------------------------------------
