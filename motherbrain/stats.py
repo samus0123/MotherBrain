@@ -33,8 +33,13 @@ def gather(run_dir, corpus_dir, model=None, device=None, steps: int = 0) -> dict
     versions = store.versions()
 
     grown = [v for v in versions if v.params_after]
-    sighted = [v for v in versions if v.mode == "sight"]
-    best_sight = max(sighted, key=lambda v: v.sight_accuracy, default=None)
+    # Any version that measured a sense counts, not only the one that first
+    # attached a tower. Filtering on mode == "sight" left `mb status` quoting
+    # v4's numbers after v5 had measured all three - visibly stale, and the
+    # kind of thing only running the thing shows.
+    perceiving = [v for v in versions
+                  if v.sight_accuracy or v.sound_accuracy or v.video_accuracy]
+    latest_senses = perceiving[-1] if perceiving else None
 
     out: dict = {
         "version": store.current,
@@ -66,14 +71,19 @@ def gather(run_dir, corpus_dir, model=None, device=None, steps: int = 0) -> dict
         out["params_at_v0_human"] = human(grown[0].params_before)
         out["growth"] = grown[-1].params_after - grown[0].params_before
 
-    if best_sight is not None:
-        out["sight_accuracy"] = best_sight.sight_accuracy
-        out["sight_version"] = best_sight.version
-        # 8 colours x 4 shapes: the forced-choice baseline the accuracy is
-        # measured against, carried so a display never has to hardcode it.
+    if latest_senses is not None:
+        from motherbrain.mediadata import (all_sound_captions,
+                                           all_video_captions)
         from motherbrain.sight import all_captions
 
+        out["sight_accuracy"] = latest_senses.sight_accuracy
+        out["sound_accuracy"] = latest_senses.sound_accuracy
+        out["video_accuracy"] = latest_senses.video_accuracy
+        out["sight_version"] = latest_senses.version
+        # The forced-choice baselines, carried so no display hardcodes them.
         out["sight_chance"] = 1 / len(all_captions())
+        out["sound_chance"] = 1 / len(all_sound_captions())
+        out["video_chance"] = 1 / len(all_video_captions())
 
     if model is not None:
         cfg = model.cfg
@@ -139,16 +149,23 @@ def render(s: dict, width: int = 66) -> str:
                                     f"vocab {s['vocab_size']:,}"))
 
     if s.get("can_see"):
-        chance = s.get("sight_chance", 0)
-        verdict = ("above chance" if s["sight_accuracy"] > chance * 2
-                   else "NOT above chance")
-        lines.append(row("sight", f"{human(s['vision_params'])} params, "
-                                  f"{s['visual_tokens']} visual tokens, "
-                                  f"{s['image_size']}px"))
-        lines.append(row("", f"names {s['sight_accuracy']:.1%} of held-out "
-                             f"images ({verdict}, chance {chance:.1%})"))
+        lines.append(row("perception", f"{human(s['vision_params'])} params, "
+                                       f"{s['visual_tokens']} tokens, "
+                                       f"{s['image_size']}px"))
+        # Each sense beside its own chance rate. A number without one means
+        # nothing, and one sense standing in for three hides the weak ones.
+        for sense, what in (("sight", "images"), ("sound", "sounds"),
+                            ("video", "clips")):
+            accuracy = s.get(f"{sense}_accuracy", 0.0)
+            chance = s.get(f"{sense}_chance", 0.0)
+            if not accuracy or not chance:
+                continue
+            verdict = (f"{accuracy / chance:.0f}x chance"
+                       if accuracy > chance * 2 else "NOT above chance")
+            lines.append(row("", f"{sense:<6} names {accuracy:5.1%} of "
+                                 f"held-out {what:<7} ({verdict})"))
     else:
-        lines.append(row("sight", "none — `mb sight` adds a vision tower"))
+        lines.append(row("perception", "none — `mb sight` adds a tower"))
 
     if s.get("growth"):
         lines.append(row("growth", f"{human(s['params_at_v0'])} -> "

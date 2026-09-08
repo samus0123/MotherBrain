@@ -237,6 +237,37 @@ def register_compat_routes(app, state, auth) -> None:
     def chat_completions(req: ChatRequest, _: None = Depends(auth)):
         if state.training.get("active"):
             raise HTTPException(409, "a training run is in progress; try again shortly")
+        # A question about itself has a real answer on disk. The window and
+        # the terminal answer those from state; the API generated prose at
+        # them, which is the same model being honest in two places and not in
+        # the third.
+        last = next((m for m in reversed(req.messages)
+                     if getattr(m, "role", "") == "user"), None)
+        if last is not None and not req.stream:
+            from motherbrain.chat import respond
+            from motherbrain.stats import gather
+
+            try:
+                said = content_to_text(last.content)
+                kind, answer = respond(
+                    said, gather(state.run_dir, state.corpus_dir,
+                                 model=state.model, device=state.device))
+            except Exception:                             # noqa: BLE001
+                kind, answer = "generate", ""
+            if kind == "fact":
+                _, counter, _, _ = state.snapshot()
+                return {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:24]}",
+                    "object": "chat.completion", "created": int(time.time()),
+                    "model": MODEL_ID,
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant",
+                                             "content": answer}}],
+                    "usage": {"prompt_tokens": len(counter.encode(said)),
+                              "completion_tokens": len(counter.encode(answer)),
+                              "total_tokens": len(counter.encode(said + answer))},
+                }
+
         prompt = build_chat_prompt(req.messages)
         model, _tok, _dev, _ = state.snapshot()
         image = None
