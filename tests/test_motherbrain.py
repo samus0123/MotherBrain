@@ -1971,6 +1971,166 @@ def test_the_trace_records_failures_as_well_as_the_answer():
     assert "answered" in trace.render()
 
 
+# ---- perception: images, sound, video ---------------------------------------
+
+
+def _wav(path, freq, seconds=0.5, rate=16000):
+    import math
+    import struct
+    import wave
+
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(b"".join(
+            struct.pack("<h", int(20000 * math.sin(2 * math.pi * freq * i / rate)))
+            for i in range(int(rate * seconds))))
+    return path
+
+
+def _gif(path, frames=6):
+    from PIL import Image
+
+    images = []
+    for i in range(frames):
+        im = Image.new("RGB", (32, 32), (10, 10, 20))
+        im.paste(Image.new("RGB", (8, 8), (60, 220, 120)), (2 + i * 4, 12))
+        images.append(im)
+    images[0].save(path, save_all=True, append_images=images[1:], duration=80)
+    return path
+
+
+def test_every_medium_becomes_the_same_shape(tmp_path):
+    """One tower reads all of it, so all of it has to arrive looking alike."""
+    from PIL import Image
+
+    from motherbrain.perception import perceive
+
+    png = tmp_path / "x.png"
+    Image.new("RGB", (200, 120), (200, 40, 40)).save(png)
+    wav = _wav(tmp_path / "x.wav", 440)
+    gif = _gif(tmp_path / "x.gif")
+
+    kinds = {}
+    for path in (png, wav, gif):
+        percept = perceive(path, size=64)
+        kinds[percept.kind] = percept
+        assert percept.tensor.shape == (1, 3, 64, 64), path.name
+        assert 0.0 <= percept.tensor.min() and percept.tensor.max() <= 1.0
+        assert percept.description
+        assert percept.display is not None, "there must be something to show"
+
+    assert set(kinds) == {"image", "audio", "video"}
+
+
+def test_the_spectrogram_actually_carries_pitch(tmp_path):
+    """Sound is read as a picture of itself, so the picture has to be of it.
+
+    If the spectrogram did not encode frequency, the audio path would be
+    wiring with nothing flowing through it - and it would look identical from
+    the outside.
+    """
+    from motherbrain.perception import perceive
+
+    low = perceive(_wav(tmp_path / "low.wav", 220), size=64).tensor[0, 0]
+    high = perceive(_wav(tmp_path / "high.wav", 880), size=64).tensor[0, 0]
+
+    def brightest_row(img):
+        return int(img.mean(dim=1).argmax())
+
+    # Row 0 is the top, and the image is flipped so high frequencies are up.
+    assert brightest_row(high) < brightest_row(low), \
+        "880Hz should sit above 220Hz in the spectrogram"
+    assert not torch.allclose(low, high), "two pitches produced the same picture"
+
+
+def test_unreadable_media_says_what_it_can_read(tmp_path):
+    """A refusal has to name the way forward, not just the failure."""
+    from motherbrain.perception import perceive
+
+    odd = tmp_path / "recording.flac"
+    odd.write_bytes(b"not really a flac")
+    with pytest.raises(ValueError, match="WAV"):
+        perceive(odd)
+
+    with pytest.raises(FileNotFoundError):
+        perceive(tmp_path / "nothing-here.png")
+
+
+def test_sound_and_video_reach_the_model_over_http(tmp_path):
+    """An editor sends media inline; a remote URL is still never fetched."""
+    import base64
+
+    from motherbrain.vision import load_data_uri
+
+    wav = _wav(tmp_path / "a.wav", 440)
+    gif = _gif(tmp_path / "a.gif")
+
+    for path, mime in ((wav, "audio/wav"), (gif, "video/gif")):
+        uri = f"data:{mime};base64," + base64.b64encode(path.read_bytes()).decode()
+        decoded = load_data_uri(uri, 32)
+        assert decoded is not None, mime
+        assert decoded.shape == (1, 3, 32, 32)
+
+    assert load_data_uri("https://example.com/clip.wav", 32) is None
+    assert load_data_uri("file:///etc/passwd", 32) is None
+
+
+# ---- answering honestly ------------------------------------------------------
+
+
+def test_facts_come_from_disk_and_the_rest_is_labelled():
+    """Never present generated text as a fact - the whole point of the module.
+
+    A question about itself has a real answer on disk. Anything else gets a
+    continuation, and the caller is told that is what it is.
+    """
+    from motherbrain.chat import CONTINUATION_NOTE, respond
+
+    stats = {"version": 4, "head": 4, "patches": 4, "total_params": 50_648_984,
+             "active_params": 31_774_616, "params_at_v0": 18_880_896,
+             "can_see": True, "sight_accuracy": 0.255, "sight_chance": 0.031,
+             "documents": 23_908, "tokens": 67_064_688}
+
+    for question in ("who are you?", "how big are you?", "can you see?",
+                     "what did you learn?", "what can you not do?",
+                     "what version are you?"):
+        kind, answer = respond(question, stats)
+        assert kind == "fact", question
+        assert answer, question
+
+    # The numbers in the answers are the numbers given, not invented ones.
+    _, size = respond("how many parameters?", stats)
+    assert "50,648,984" in size and "31,774,616" in size
+    _, sight = respond("can you see?", stats)
+    assert "25.5%" in sight and "3.1%" in sight
+
+    # Anything else is generation, and says so.
+    for question in ("write me a poem", "what is the capital of France?",
+                     "def fibonacci("):
+        kind, _ = respond(question, stats)
+        assert kind == "generate", question
+    assert "not an answer" in CONTINUATION_NOTE
+
+
+def test_it_admits_when_it_cannot_see():
+    """A model with no tower must not claim narrow sight it does not have."""
+    from motherbrain.chat import respond
+
+    blind = {"version": 3, "can_see": False, "total_params": 47_201_688,
+             "sight_accuracy": 0.0, "sight_chance": 0.031}
+    kind, answer = respond("can you see?", blind)
+    assert kind == "fact"
+    assert answer.startswith("No")
+    assert "mb sight" in answer
+
+    # And a tower that is attached but useless is described as useless.
+    useless = dict(blind, can_see=True, sight_accuracy=0.04)
+    _, answer = respond("can you see?", useless)
+    assert "NOT meaningfully above chance" in answer
+
+
 # ---- sight ----------------------------------------------------------------
 
 
