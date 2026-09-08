@@ -900,7 +900,19 @@ class App:
         # state rather than generating is the difference between a reply and a
         # convincing noise.
         from motherbrain.chat import CONTINUATION_NOTE, respond
+        from motherbrain.logic import solve
         from motherbrain.stats import gather
+
+        # Anything with a definite answer is computed, never generated. A model
+        # this size produces a wrong number with exactly the confidence of a
+        # right one, so the arithmetic never reaches it.
+        exact = solve(text)
+        if exact is not None:
+            self._emit(exact.value + "\n")
+            if exact.working:
+                self._emit(f"  {exact.working}\n", "note")
+            self._speak(exact.value[:200])
+            return
 
         try:
             summary = gather(self.run_dir, self.corpus_dir, model=self.model,

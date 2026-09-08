@@ -1971,6 +1971,106 @@ def test_the_trace_records_failures_as_well_as_the_answer():
     assert "answered" in trace.render()
 
 
+def test_the_live_endpoints_answer(served):
+    """/solve and /perceive are what a live feed talks to."""
+    import base64
+    import io
+
+    from fastapi.testclient import TestClient
+    from PIL import Image
+
+    from motherbrain.server import create_app
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+
+    exact = client.post("/solve", json={"text": "4271 * 88"})
+    assert exact.status_code == 200, exact.text
+    assert exact.json() == {"exact": True, "value": "375,848",
+                            "working": "computed, not generated: 4271 * 88",
+                            "kind": "arithmetic"}
+    assert client.post("/solve", json={"text": "write a poem"}).json() == {
+        "exact": False}
+
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 64), (220, 40, 40)).save(buf, format="PNG")
+    uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+    seen = client.post("/perceive", json={"data": uri})
+    assert seen.status_code == 200, seen.text
+    body = seen.json()
+    assert body["kind"] == "image"
+    assert body["received"][-1] == body["received"][-2]   # a square tensor
+    assert "can_see" in body and "note" in body or "best_guesses" in body
+
+    # Nonsense in, a reason out - not a traceback.
+    bad = client.post("/perceive", json={"data": "data:image/png;base64,!!!!"})
+    assert bad.status_code == 400
+    assert "could not read" in bad.json()["detail"]
+
+
+# ---- exact answers ----------------------------------------------------------
+
+
+def test_definite_questions_are_computed_not_generated():
+    """A model produces a wrong number as confidently as a right one.
+
+    That is the failure worth designing around: not that it cannot do
+    arithmetic, but that nothing in the output distinguishes the times it can.
+    So anything with a definite answer never reaches it.
+    """
+    from motherbrain.logic import solve
+
+    cases = {
+        "4271 * 88": "375,848",
+        "2^10": "1,024",
+        "sqrt(144) + 2^10": "1,036",
+        "(1+2)*3^2": "27",
+        "12 x 12": "144",
+        "255 in hex": "0xff",
+        "100 c to f": "212°F",
+    }
+    for question, expected in cases.items():
+        found = solve(question)
+        assert found is not None, question
+        assert found.value == expected, f"{question}: {found.value}"
+        assert found.working, "an exact answer must say where it came from"
+
+    assert "prime" in solve("is 7919 prime").value
+    assert "127" in solve("factors of 1234567").value
+    assert "7.456" in solve("12 km to miles").value
+    assert solve("sha256 of hello").value == (
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
+
+
+def test_no_exact_answer_means_none_not_a_guess():
+    """The whole value is that silence is possible. A solver that always
+    answers has only moved the confident wrongness somewhere else."""
+    from motherbrain.logic import solve
+
+    for question in ("write me a poem about the sea",
+                     "what is the capital of France?",
+                     "why is the sky blue",
+                     "def fibonacci(n):",
+                     ""):
+        assert solve(question) is None, question
+
+
+def test_the_calculator_is_not_an_eval():
+    """eval() on something somebody typed is arbitrary code execution."""
+    from motherbrain.logic import solve
+
+    for hostile in ("__import__('os').system('id') + 1",
+                    "open('/etc/passwd').read() * 2",
+                    "(lambda: 1)() + 1",
+                    "[].__class__.__mro__[1] + 1"):
+        assert solve(hostile) is None, hostile
+
+    # And it will not hang on a power that would take all day.
+    assert solve("9**999999999") is None
+
+
 # ---- perception: images, sound, video ---------------------------------------
 
 

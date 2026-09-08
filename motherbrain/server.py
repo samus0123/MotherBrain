@@ -51,6 +51,15 @@ class FeedRequest(BaseModel):
     source: str = "api"
 
 
+class SolveRequest(BaseModel):
+    text: str
+
+
+class PerceiveRequest(BaseModel):
+    data: str                     # a data: URI - image, audio or video
+    prompt: str = ""              # optional text to condition alongside
+
+
 class CommandRequest(BaseModel):
     text: str = ""
     max_tokens: int = Field(120, ge=1, le=4096)
@@ -255,6 +264,88 @@ def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
                                   steps=state.meta.get("step", 0))
         except Exception:                                 # noqa: BLE001
             pass
+        return out
+
+    class PerceiveRequest(BaseModel):
+        data: str                       # a data: URI - image, audio or video
+        prompt: str = ""                # optional text to condition alongside
+
+    @app.post("/solve")
+    def solve_endpoint(req: SolveRequest, _: None = Depends(auth)) -> dict:
+        """An exact answer, or nothing. Never a guess dressed as one."""
+        from motherbrain.logic import solve
+
+        found = solve(req.text)
+        if found is None:
+            return {"exact": False}
+        return {"exact": True, "value": found.value, "working": found.working,
+                "kind": found.kind}
+
+    @app.post("/perceive")
+    def perceive_endpoint(req: PerceiveRequest, _: None = Depends(auth)) -> dict:
+        """Read one frame or clip from a live feed and report what happened.
+
+        Deliberately not a completion endpoint. A live feed pushes frames far
+        faster than a 50M model can say anything useful about them, and
+        generating on every frame would produce a stream of confident
+        nonsense. This reports what was received and what the model can
+        actually tell you about it, which is currently very little - and says
+        so rather than inventing.
+        """
+        from motherbrain.vision import load_data_uri
+
+        model, tok, device, _ = state.snapshot()
+        if model is None:
+            raise HTTPException(503, "no model is loaded")
+
+        size = getattr(model.cfg, "image_size", 64)
+        tensor = load_data_uri(req.data, size)
+        if tensor is None:
+            raise HTTPException(
+                400, "could not read that. Images, WAV sound and GIF video "
+                     "work; other formats need ffmpeg on the server.")
+
+        can_see = getattr(model, "vision", None) is not None
+        out: dict[str, Any] = {
+            "received": list(tensor.shape),
+            "kind": ("audio" if req.data.startswith("data:audio/")
+                     else "video" if req.data.startswith("data:video/")
+                     else "image"),
+            "can_see": can_see,
+            "version": state.version,
+        }
+        if not can_see:
+            out["note"] = ("this version has no vision tower, so nothing was "
+                           "read from it. `mb sight` adds one.")
+            return out
+
+        # What the model actually makes of it: the likelihood it assigns to
+        # each caption it was trained on. Reporting the ranking rather than a
+        # sentence keeps it honest - these are scores, not statements.
+        try:
+            import torch
+
+            from motherbrain.reasoning import likelihood
+            from motherbrain.sight import all_captions, encode_batch
+
+            scores = []
+            image = tensor.to(device)
+            for caption in all_captions():
+                idx, targets = encode_batch(tok, [caption], device)
+                with torch.no_grad():
+                    logits, _ = model(idx, targets=targets, images=image)
+                    loss = torch.nn.functional.cross_entropy(
+                        logits.reshape(-1, logits.size(-1)),
+                        targets.reshape(-1), ignore_index=-100)
+                scores.append((float(loss), caption))
+            scores.sort()
+            out["best_guesses"] = [
+                {"caption": c, "loss": round(s, 4)} for s, c in scores[:3]]
+            out["note"] = ("scores, not statements. It was trained only on "
+                           "coloured shapes, so anything else is outside the "
+                           "world it knows.")
+        except Exception as exc:                          # noqa: BLE001
+            out["note"] = f"could not score it: {exc}"
         return out
 
     # ---- generation -------------------------------------------------------
@@ -722,6 +813,14 @@ UI_HTML = """<!doctype html>
   #statsblock .v { color:var(--text); }
   #statsblock .bar { letter-spacing:-1px; }
   #statsblock .warn { color:var(--warn); }
+  #livepanel { display:flex; flex-direction:column; gap:10px; align-items:center;
+    width:min(560px,92vw); }
+  #livepanel[hidden] { display:none; }
+  #livevideo { width:100%; max-width:420px; border-radius:8px;
+    border:1px solid var(--line); background:#000; }
+  #livecanvas { display:none; }
+  #liveseen { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px;
+    color:var(--muted); white-space:pre-wrap; text-align:left; width:100%; }
 </style>
 </head>
 <body>
@@ -740,6 +839,9 @@ UI_HTML = """<!doctype html>
     <button class="choice" data-mode="update">
       <b>4 · Apply new knowledge as a patch (update)</b>
       <span>ascend to the next version, and grow</span></button>
+    <button class="choice" data-mode="live">
+      <b>5 · Show MotherBrain a live feed</b>
+      <span>your camera or microphone, in this browser</span></button>
   </div>
   <div class="why" id="voice-why"></div>
   <div id="statsblock">connecting…</div>
@@ -752,6 +854,21 @@ UI_HTML = """<!doctype html>
       <button class="choice" id="progback">back</button>
     </div>
     <div class="why" id="progout"></div>
+  </div>
+
+  <div id="livepanel" hidden>
+    <div class="feedrow">
+      <button class="choice go" id="livecam">use the camera</button>
+      <button class="choice" id="livemic">use the microphone</button>
+      <button class="choice" id="livestop">stop</button>
+      <button class="choice" id="liveback">back</button>
+    </div>
+    <video id="livevideo" autoplay playsinline muted hidden></video>
+    <canvas id="livecanvas" hidden></canvas>
+    <div class="why" id="liveout">Nothing is sent anywhere but your own
+      machine: the page talks to the MotherBrain you started, and the frames
+      stop when you press stop.</div>
+    <div id="liveseen"></div>
   </div>
 
   <div id="feedpanel" hidden>
@@ -1096,15 +1213,18 @@ $('feedlater').onclick = () => setMode('text');
 // context, and words in the signature pull the body towards the same subject.
 const Q = '"'.repeat(3);
 
+const PANELS = ['feedpanel', 'programpanel', 'livepanel'];
 function showPanel(which) {
   document.querySelector('.choices').hidden = true;
   $('voice-why').hidden = true;
-  $(which).hidden = false;
-  $(which === 'feedpanel' ? 'feedtext' : 'progwant').focus();
+  PANELS.forEach(p => { $(p).hidden = (p !== which); });
+  // The live panel has nothing to type into; focusing a hidden input there
+  // would move the caret somewhere invisible.
+  const focusOn = {feedpanel: 'feedtext', programpanel: 'progwant'}[which];
+  if (focusOn) $(focusOn).focus();
 }
 function hidePanels() {
-  $('feedpanel').hidden = true;
-  $('programpanel').hidden = true;
+  PANELS.forEach(p => { $(p).hidden = true; });
   $('voice-why').hidden = false;
   document.querySelector('.choices').hidden = false;
 }
@@ -1163,10 +1283,144 @@ async function doUpdate() {
 status(true);
 setInterval(() => { if (!$('ask').hidden) status(true); }, 15000);
 
+// ---- the live feed ---------------------------------------------------------
+//
+// getUserMedia is the only camera-and-microphone route that works on every
+// operating system with nothing installed, which is why the live feed lives
+// in the browser rather than in the window. Frames go to the MotherBrain you
+// started and nowhere else.
+
+let liveStream = null;
+let liveTimer = null;
+let liveRecorder = null;
+
+function liveSay(text) {
+  const box = $('liveseen');
+  box.textContent = (text + String.fromCharCode(10) + box.textContent).slice(0, 1400);
+}
+
+async function sendPercept(dataUri, label) {
+  try {
+    const r = await fetch('/perceive', {method: 'POST', headers: H(),
+                                        body: JSON.stringify({data: dataUri})});
+    if (!r.ok) { liveSay(label + ': ' + r.status + ' ' + (await r.text()).slice(0, 120)); return; }
+    const j = await r.json();
+    let line = label + ': ' + j.kind + ' ' + (j.received || []).join('x');
+    if (j.best_guesses && j.best_guesses.length) {
+      line += '  ->  ' + j.best_guesses.map(g => g.caption).join(' | ');
+    } else if (j.note) {
+      line += '  ->  ' + j.note;
+    }
+    liveSay(line);
+  } catch (e) { liveSay(label + ': ' + e); }
+}
+
+function stopLive() {
+  if (liveTimer) { clearInterval(liveTimer); liveTimer = null; }
+  if (liveRecorder && liveRecorder.state !== 'inactive') liveRecorder.stop();
+  liveRecorder = null;
+  if (liveStream) { liveStream.getTracks().forEach(t => t.stop()); liveStream = null; }
+  $('livevideo').hidden = true;
+  liveSay('stopped.');
+}
+
+async function startCamera() {
+  stopLive();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    liveSay('this browser has no camera access. Chrome, Edge, Firefox and '
+            + 'Safari all do, but only over https or on localhost.');
+    return;
+  }
+  try {
+    liveStream = await navigator.mediaDevices.getUserMedia({video: true});
+  } catch (e) {
+    liveSay('camera refused: ' + e.name + '. Allow it in the address bar, or '
+            + 'check nothing else is using it.');
+    return;
+  }
+  const v = $('livevideo');
+  v.srcObject = liveStream;
+  v.hidden = false;
+  liveSay('camera on. Sending a frame every 2 seconds.');
+
+  const canvas = $('livecanvas');
+  liveTimer = setInterval(() => {
+    if (!liveStream || v.videoWidth === 0) return;
+    canvas.width = 64; canvas.height = 64;
+    canvas.getContext('2d').drawImage(v, 0, 0, 64, 64);
+    sendPercept(canvas.toDataURL('image/png'), 'frame');
+  }, 2000);
+}
+
+async function startMic() {
+  stopLive();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    liveSay('this browser has no microphone access.');
+    return;
+  }
+  try {
+    liveStream = await navigator.mediaDevices.getUserMedia({audio: true});
+  } catch (e) {
+    liveSay('microphone refused: ' + e.name);
+    return;
+  }
+  // The server reads WAV, and MediaRecorder produces webm or mp4, so the
+  // samples are decoded here and a WAV is written by hand. It is a few lines
+  // and it means no ffmpeg on the far end.
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const source = ctx.createMediaStreamSource(liveStream);
+  const node = ctx.createScriptProcessor ? ctx.createScriptProcessor(4096, 1, 1) : null;
+  if (!node) { liveSay('this browser cannot capture raw audio samples.'); return; }
+  let chunks = [];
+  node.onaudioprocess = e => {
+    chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  };
+  source.connect(node);
+  node.connect(ctx.destination);
+  liveSay('microphone on. Sending a second of sound every 2 seconds.');
+
+  liveTimer = setInterval(() => {
+    if (!chunks.length) return;
+    const total = chunks.reduce((n, c) => n + c.length, 0);
+    const all = new Float32Array(total);
+    let at = 0;
+    chunks.forEach(c => { all.set(c, at); at += c.length; });
+    chunks = [];
+    sendPercept(wavDataUri(all, ctx.sampleRate), 'sound');
+  }, 2000);
+}
+
+function wavDataUri(samples, rate) {
+  const bytes = 44 + samples.length * 2;
+  const buf = new ArrayBuffer(bytes);
+  const view = new DataView(buf);
+  const put = (at, s) => { for (let i = 0; i < s.length; i++) view.setUint8(at + i, s.charCodeAt(i)); };
+  put(0, 'RIFF'); view.setUint32(4, bytes - 8, true); put(8, 'WAVE');
+  put(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true); view.setUint32(24, rate, true);
+  view.setUint32(28, rate * 2, true); view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true); put(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
+  }
+  let binary = '';
+  const raw = new Uint8Array(buf);
+  for (let i = 0; i < raw.length; i++) binary += String.fromCharCode(raw[i]);
+  return 'data:audio/wav;base64,' + btoa(binary);
+}
+
+$('livecam').onclick = startCamera;
+$('livemic').onclick = startMic;
+$('livestop').onclick = stopLive;
+$('liveback').onclick = () => { stopLive(); hidePanels(); };
+
 let pendingVoice = false;
 document.querySelectorAll('.choice[data-mode]').forEach(b => {
   b.onclick = () => {
     const m = b.dataset.mode;
+    if (m === 'live') return showPanel('livepanel');
     if (m === 'make') return showPanel('programpanel');
     if (m === 'feed') return showPanel('feedpanel');
     if (m === 'update') return doUpdate();
