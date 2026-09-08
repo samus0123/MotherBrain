@@ -70,20 +70,38 @@ def answer_about_self(kind: str, stats: dict) -> str:
 
     if kind == "sight":
         if not can_see:
-            return ("No. I have no vision tower in this version. `mb sight` "
-                    "adds one.")
-        verdict = ("which is meaningfully above chance"
-                   if accuracy > chance * 2 else
-                   "which is NOT meaningfully above chance, so I should not be "
-                   "believed about pictures")
-        return (f"Yes, in a narrow way. Shown an image I have never seen, I "
-                f"name it correctly {accuracy:.1%} of the time against a "
-                f"{chance:.1%} baseline, {verdict}. That was measured on "
-                f"coloured shapes, which is the only visual world I was "
-                f"trained on. Sound reaches me as a spectrogram and video as a "
-                f"grid of frames, through the same tower - those paths work, "
-                f"but nothing has trained me on them, so I cannot tell you "
-                f"what a sound or a clip contains.")
+            return ("No. I have no perception tower in this version. "
+                    "`mb sight` adds one.")
+
+        # Read every sense from state. This answer once said sound and video
+        # were untrained, which was true when it was written and false the
+        # moment a patch trained them - self-knowledge that hardcodes what it
+        # knows goes stale silently, which is the worst way for it to be wrong.
+        senses = []
+        for sense, what in (("sight", "images"), ("sound", "sounds"),
+                            ("video", "clips")):
+            accuracy = stats.get(f"{sense}_accuracy", 0.0)
+            baseline = stats.get(f"{sense}_chance", 0.0)
+            if not accuracy or not baseline:
+                continue
+            if accuracy > baseline * 2:
+                senses.append(f"{sense}: {accuracy:.1%} of held-out {what} "
+                              f"named correctly against {baseline:.1%} chance, "
+                              f"{accuracy / baseline:.0f} times chance")
+            else:
+                senses.append(f"{sense}: {accuracy:.1%} against {baseline:.1%} "
+                              f"chance, which is not meaningfully better - I "
+                              f"should not be believed about {what}")
+        if not senses:
+            return ("I have a perception tower but nothing has measured it, "
+                    "so I cannot tell you whether it works.")
+
+        return ("Yes, in narrow ways, and here is exactly how well:\n  "
+                + "\n  ".join(senses)
+                + "\nThose were measured on generated worlds - coloured "
+                  "shapes, tones with a pitch and a timbre, shapes moving in "
+                  "one direction. Anything outside those worlds is outside "
+                  "what I was trained on, and I would be guessing.")
 
     if kind == "learned":
         return (f"My base was trained on {stats.get('documents', 0):,} "
@@ -101,7 +119,9 @@ def answer_about_self(kind: str, stats: dict) -> str:
                 "disk rather than generate, and those you can rely on.")
 
     if kind == "identity":
-        sight = "can see, narrowly" if can_see else "text only"
+        heard = stats.get("sound_accuracy", 0.0)
+        sight = ("can see and hear, narrowly" if can_see and heard
+                 else "can see, narrowly" if can_see else "text only")
         return (f"MotherBrain: a mixture-of-experts transformer, v{version}, "
                 f"{total:,} parameters, {sight}. Trained from nothing on this "
                 f"machine, and grown by patches rather than retrained.")

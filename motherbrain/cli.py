@@ -713,7 +713,7 @@ def cmd_status(args) -> int:
     versions = store.versions()
     print("lineage")
     print(f"  v0 base" + (f" + {len(versions)} patch(es)" if versions else ""))
-    grown = [v for v in versions if v.mode == "grow" and v.params_after]
+    grown = [v for v in versions if v.params_after and v.params_before]
     if grown:
         print(f"  grown {human(grown[0].params_before)} -> "
               f"{human(grown[-1].params_after)} across {len(grown)} patch(es)")
@@ -722,13 +722,25 @@ def cmd_status(args) -> int:
     if store.base_fingerprint:
         print(f"  base fingerprint: {store.base_fingerprint}")
 
-    sighted = [v for v in versions if v.mode == "sight"]
-    if sighted:
-        best = max(sighted, key=lambda v: v.sight_accuracy)
-        print(f"  sight      v{best.version}, naming {best.sight_accuracy:.1%} of "
-              f"held-out images (chance 3.1%)")
+    # The newest version that measured anything, not the one that first
+    # attached a tower - otherwise this quotes numbers a later patch replaced.
+    perceiving = [v for v in versions
+                  if v.sight_accuracy or v.sound_accuracy or v.video_accuracy]
+    if perceiving:
+        from motherbrain.stats import gather
+
+        senses = gather(args.run, args.corpus)
+        latest = perceiving[-1]
+        print(f"  perception v{latest.version}:")
+        for sense, what in (("sight", "images"), ("sound", "sounds"),
+                            ("video", "clips")):
+            accuracy = senses.get(f"{sense}_accuracy", 0.0)
+            chance = senses.get(f"{sense}_chance", 0.0)
+            if accuracy and chance:
+                print(f"    {sense:<6} {accuracy:5.1%} of held-out {what:<7} "
+                      f"(chance {chance:.1%})")
     else:
-        print("  sight      none yet (run `mb sight` to add a vision tower)")
+        print("  perception none yet (run `mb sight`, then `mb hear`)")
 
     pending = corpus.n_documents - store.consumed_docs()
     if pending > 0:
@@ -1392,6 +1404,23 @@ def cmd_console(args) -> int:
         if exact is not None:
             print(exact.render() + "\n")
             say(exact.value)
+            continue
+
+        # Then anything MotherBrain knows about itself, read from disk. This
+        # was in the window and nowhere else, so the terminal answered "who
+        # are you?" with generated prose - fluent, and untrue.
+        from motherbrain.chat import respond as _respond
+        from motherbrain.stats import gather as _gather
+
+        try:
+            _kind, _answer = _respond(
+                line, _gather(args.run, args.corpus, model=model,
+                              device=device))
+        except Exception:                                 # noqa: BLE001
+            _kind, _answer = "generate", ""
+        if _kind == "fact":
+            print(_answer + "\n")
+            say(_answer)
             continue
 
         cmd = parse(line)

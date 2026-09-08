@@ -2010,6 +2010,75 @@ def test_the_live_endpoints_answer(served):
     assert "could not read" in bad.json()["detail"]
 
 
+def test_every_surface_answers_from_state_not_prose(served):
+    """The same model was honest in the window and made things up in the
+    terminal and over HTTP. One place knowing itself is not self-knowledge."""
+    import inspect
+
+    from fastapi.testclient import TestClient
+
+    from motherbrain import cli, gui
+    from motherbrain.server import create_app
+
+    for where, source in (("window", inspect.getsource(gui.App._do)),
+                          ("terminal", inspect.getsource(cli.cmd_console))):
+        assert "from motherbrain.chat import" in source, \
+            f"the {where} never asks what it knows about itself"
+        assert "from motherbrain.logic import" in source, \
+            f"the {where} generates answers it could compute"
+
+    run, corpus = served
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   auto_patch=False))
+    reply = client.post("/v1/chat/completions", json={
+        "model": "motherbrain",
+        "messages": [{"role": "user", "content": "how many parameters?"}],
+        "max_tokens": 40})
+    assert reply.status_code == 200, reply.text
+    said = reply.json()["choices"][0]["message"]["content"]
+    assert "parameters" in said and "," in said, said
+
+
+def test_self_knowledge_is_read_not_hardcoded():
+    """It once said sound was untrained. That was true when written and false
+    the moment a patch trained it - the worst way for it to be wrong."""
+    from motherbrain.chat import answer_about_self
+
+    trained = {"can_see": True,
+               "sight_accuracy": 0.227, "sight_chance": 0.031,
+               "sound_accuracy": 0.633, "sound_chance": 0.028,
+               "video_accuracy": 0.078, "video_chance": 0.005}
+    answer = answer_about_self("sight", trained)
+    for sense in ("sight", "sound", "video"):
+        assert sense in answer, sense
+    assert "63.3%" in answer and "22.7%" in answer
+    assert "nothing has trained" not in answer
+
+    # A sense that has not been measured is simply absent, never assumed.
+    partial = {"can_see": True, "sight_accuracy": 0.227, "sight_chance": 0.031}
+    answer = answer_about_self("sight", partial)
+    assert "sight" in answer and "sound:" not in answer
+
+    # And a tower that scores near chance is described as unreliable.
+    weak = dict(trained, sound_accuracy=0.03)
+    assert "should not be believed" in answer_about_self("sight", weak)
+
+
+def test_growth_counts_every_kind_of_patch():
+    """`mb status` counted only mode == "grow", so it reported the model as
+    47.2M across 3 patches when it was 52.2M across 5."""
+    import inspect
+
+    from motherbrain import cli, stats
+
+    status = inspect.getsource(cli.cmd_status)
+    assert 'v.mode == "grow"' not in status, \
+        "growth is being counted by mode again"
+    gathered = inspect.getsource(stats.gather)
+    assert 'v.mode == "sight"' not in gathered, \
+        "senses are being read from one mode again"
+
+
 # ---- hearing and watching ----------------------------------------------------
 
 
