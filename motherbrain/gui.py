@@ -896,7 +896,24 @@ class App:
                            f"loss {v.loss_before:.3f} -> {v.loss_after:.3f}\n", "note")
             return
 
-        # Anything else: the model continues it.
+        # A question about itself has a real answer on disk. Answering it from
+        # state rather than generating is the difference between a reply and a
+        # convincing noise.
+        from motherbrain.chat import CONTINUATION_NOTE, respond
+        from motherbrain.stats import gather
+
+        try:
+            summary = gather(self.run_dir, self.corpus_dir, model=self.model,
+                             device=self.dev)
+            reply_kind, reply = respond(text, summary)
+        except Exception:                                 # noqa: BLE001
+            reply_kind, reply = "generate", ""
+
+        if reply_kind == "fact":
+            self._emit(reply + "\n")
+            self._speak(reply[:300])
+            return
+
         image = self._load_image()
         produced = []
         for piece in stream(self.model, self.tok, self.dev, text,
@@ -904,6 +921,7 @@ class App:
             produced.append(piece)
             self._emit(piece)
         self._emit("\n")
+        self._emit(CONTINUATION_NOTE + "\n", "note")
         self._speak("".join(produced)[:300])
 
     def _clear_view(self) -> None:
@@ -929,9 +947,10 @@ class App:
     def _load_image(self):
         if not self.image_path or getattr(self.model, "vision", None) is None:
             return None
-        from motherbrain.vision import load_image
+        from motherbrain.perception import perceive
 
-        return load_image(self.image_path, self.model.cfg.image_size).to(self.dev)
+        return perceive(self.image_path,
+                        self.model.cfg.image_size).tensor.to(self.dev)
 
     # ---- option 3: teach --------------------------------------------------
 
@@ -1199,15 +1218,57 @@ class App:
         from tkinter import filedialog
 
         path = filedialog.askopenfilename(
-            title="Look at an image",
-            filetypes=[("Images", "*.png *.jpg *.jpeg *.gif *.bmp *.webp"),
+            title="Look at, or listen to, a file",
+            filetypes=[("Anything MotherBrain can perceive",
+                        "*.png *.jpg *.jpeg *.gif *.bmp *.webp *.wav *.mp4 *.mov"),
+                       ("Images", "*.png *.jpg *.jpeg *.bmp *.webp"),
+                       ("Sound", "*.wav"),
+                       ("Video", "*.gif *.mp4 *.mov *.mkv *.webm"),
                        ("All files", "*.*")])
         if not path:
             return
+        self.run_worker(self._perceive_file, path)
+
+    def _perceive_file(self, path: str) -> None:
+        """Read a file of any kind, and show what the model will be reading."""
+        from motherbrain.perception import perceive
+
+        try:
+            percept = perceive(path, getattr(self.model.cfg, "image_size", 64))
+        except (ValueError, FileNotFoundError) as exc:
+            self._emit(f"{exc}\n", "bad")
+            return
         self.image_path = path
+        self.bridge.post(self._show_percept, percept, path)
+
+    def _show_percept(self, percept, path: str) -> None:
+        """Display it. Sound becomes its spectrogram, video a contact sheet.
+
+        Seeing what the model is reading is the only way to tell whether it is
+        reading anything - especially for sound, where the picture is the
+        whole of what reaches the tower.
+        """
         self.image_btn.config(text=Path(path).name[:10])
-        self.say_note(f"looking at {Path(path).name}. The next thing you send "
-                      f"is conditioned on it.\n")
+        self.write(f"\n{percept.description}\n", "note")
+        self.clear_extra()
+
+        try:
+            from PIL import ImageTk
+
+            preview = percept.display.resize((160, 160))
+            self._preview = ImageTk.PhotoImage(preview)   # kept, or Tk drops it
+            holder = self.tk.Label(self.extra, image=self._preview,
+                                   bg=PALETTE["panel"], bd=0)
+            holder.pack(side="left", padx=(0, 10))
+        except Exception as exc:                          # noqa: BLE001
+            self.say_note(f"(cannot show it here: {exc})\n")
+
+        self.action("Stop looking at it", self.forget_image)
+        if getattr(self.model, "vision", None) is None:
+            self.write("this version has no vision tower, so it cannot read "
+                       "that. `mb sight` adds one.\n", "bad")
+        else:
+            self.say_note("the next thing you send is conditioned on it.\n")
 
 
 def _free_port(preferred: int = 8000) -> int:

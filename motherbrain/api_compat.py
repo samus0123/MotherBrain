@@ -118,9 +118,12 @@ def content_to_images(content: Any, size: int) -> list:
     for part in content:
         if not isinstance(part, dict):
             continue
-        url = part.get("image_url")
+        # Images, sound and video all arrive the same way and all end up as
+        # one square tensor, so one loop reads the lot.
+        url = (part.get("image_url") or part.get("audio_url")
+               or part.get("video_url") or part.get("input_audio"))
         if isinstance(url, dict):
-            url = url.get("url")
+            url = url.get("url") or url.get("data")
         if isinstance(url, str):
             decoded = load_data_uri(url, size)
             if decoded is not None:

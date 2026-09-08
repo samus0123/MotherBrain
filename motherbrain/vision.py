@@ -148,13 +148,37 @@ def load_data_uri(uri: str, size: int) -> torch.Tensor | None:
     """
     import base64
 
-    if not uri.startswith("data:image/"):
+    if not uri.startswith(("data:image/", "data:audio/", "data:video/")):
         return None
     _head, _, encoded = uri.partition(",")
     if not encoded:
         return None
+    raw = base64.b64decode(encoded, validate=False)
+    if uri.startswith("data:image/"):
+        try:
+            return load_image_bytes(raw, size)
+        except Exception:                                 # noqa: BLE001
+            return None
+
+    # Sound and video are written to a temporary file because the decoders
+    # for them - wave, Pillow's GIF reader, ffmpeg - all take a path.
+    import tempfile
+
+    from motherbrain.perception import perceive
+
+    suffix = ".wav" if uri.startswith("data:audio/") else ".gif"
+    if "mp4" in uri[:40]:
+        suffix = ".mp4"
     try:
-        return load_image_bytes(base64.b64decode(encoded), size)
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as fh:
+            fh.write(raw)
+            path = fh.name
+        try:
+            return perceive(path, size).tensor
+        finally:
+            import os
+
+            os.unlink(path)
     except Exception:                                     # noqa: BLE001
         return None
 

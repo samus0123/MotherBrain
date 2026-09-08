@@ -2030,7 +2030,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="divide the logits of tokens already seen; small models "
                         "loop without this (1.0 disables)")
     s.add_argument("--model", help="run an exported model file instead of a run dir")
-    s.add_argument("--image", help="an image to look at (needs a vision tower)")
+    s.add_argument("--image", dest="image",
+                   help="an image, sound (.wav) or video (.gif) to perceive")
     s.set_defaults(func=cmd_chat)
 
     s = common(sub.add_parser("status", help="what is on disk, and what to run next"))
