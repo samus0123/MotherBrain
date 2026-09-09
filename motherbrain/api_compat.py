@@ -248,10 +248,16 @@ def register_compat_routes(app, state, auth) -> None:
             from motherbrain.stats import gather
 
             try:
+                from motherbrain.chat import consider
+
                 said = content_to_text(last.content)
-                kind, answer = respond(
-                    said, gather(state.run_dir, state.corpus_dir,
-                                 model=state.model, device=state.device))
+                considered = consider(said, state.run_dir)
+                if considered is not None:
+                    kind, answer = considered
+                else:
+                    kind, answer = respond(
+                        said, gather(state.run_dir, state.corpus_dir,
+                                     model=state.model, device=state.device))
             except Exception:                             # noqa: BLE001
                 kind, answer = "generate", ""
             if kind == "fact":

@@ -144,6 +144,57 @@ def answer_about_self(kind: str, stats: dict) -> str:
     return ""
 
 
+def consider(text: str, run_dir) -> tuple[str, str] | None:
+    """Knowledge before generation: was this a statement, or a question?
+
+    A thing MotherBrain was told is a thing it can answer from, exactly and
+    with its working shown. Checked before the model is consulted, because the
+    model would answer the same question fluently and without reference to
+    anything it was told.
+    """
+    from motherbrain.knowledge import (Knowledge, parse_question,
+                                       parse_statement)
+
+    stripped = text.strip()
+    if not stripped:
+        return None
+
+    if stripped.lower().startswith(("forget ", "unlearn ")):
+        base = Knowledge(run_dir)
+        what = stripped.split(" ", 1)[1]
+        return ("fact", f"Forgotten: {what}" if base.forget(what)
+                else f"I was never told that: {what}")
+
+    if stripped.lower() in ("what do you know", "what do you know?",
+                            "what have you been told"):
+        return "fact", Knowledge(run_dir, create=False).summary()
+
+    asked = parse_question(stripped)
+    if asked is not None:
+        base = Knowledge(run_dir, create=False)
+        if base.facts or base.rules:
+            answer = base.ask(*asked)
+            if answer.known:
+                return "fact", answer.render()
+            # Nothing follows. Say so only if it plausibly should have - if
+            # nothing at all is known, this was not really a question for the
+            # knowledge base.
+            return "fact", answer.render()
+        return None
+
+    statement = parse_statement(stripped)
+    if statement is not None and not stripped.endswith("?"):
+        base = Knowledge(run_dir)
+        base.tell(stripped)
+        kind = "rule" if type(statement).__name__ == "Rule" else "fact"
+        known, _ = base.closure()
+        extra = len(known) - len(base.facts)
+        tail = (f" {extra} thing(s) now follow from what I have been told."
+                if extra else "")
+        return "fact", f"Noted, as a {kind}: {statement}.{tail}"
+    return None
+
+
 def respond(text: str, stats: dict) -> tuple[str, str]:
     """(kind, answer). kind is "fact" when this is knowledge, not generation.
 
