@@ -2079,6 +2079,124 @@ def test_growth_counts_every_kind_of_patch():
         "senses are being read from one mode again"
 
 
+# ---- knowing things ----------------------------------------------------------
+
+
+def test_it_derives_what_follows_rather_than_predicting_it(tmp_path):
+    """The difference between knowing and sounding right.
+
+    A language model can produce "Socrates is mortal" because that sentence is
+    likely. This has to produce it because it follows - which is the same
+    outward behaviour until you say something the training data never did.
+    """
+    from motherbrain.knowledge import Knowledge, parse_question
+
+    base = Knowledge(tmp_path)
+    for said in ("bloop is a zorb", "all zorbs are fizzy",
+                 "all fizzy things are loud"):
+        assert base.tell(said) is not None, said
+
+    subject, obj = parse_question("is bloop fizzy?")
+    answer = base.ask(subject, obj)
+    assert answer.known and answer.holds
+    assert any("zorb" in step for step in answer.steps)
+
+    # Two hops, neither of which any corpus ever contained.
+    answer = base.ask(*parse_question("is bloop loud?"))
+    assert answer.known and answer.holds
+
+    # And what does not follow is not asserted.
+    answer = base.ask(*parse_question("is bloop heavy?"))
+    assert not answer.known
+    assert "do not know" in answer.render()
+
+
+def test_retracting_a_premise_retracts_what_stood_on_it(tmp_path):
+    """Derived facts are recomputed, never stored, so nothing is orphaned."""
+    from motherbrain.knowledge import Knowledge, parse_question
+
+    base = Knowledge(tmp_path)
+    base.tell("socrates is a man")
+    base.tell("all men are mortal")
+    assert base.ask(*parse_question("is socrates mortal?")).holds
+
+    assert base.forget("socrates is a man")
+    after = base.ask(*parse_question("is socrates mortal?"))
+    assert not after.known, "the conclusion outlived its premise"
+
+    assert not base.forget("socrates is a man"), "forgetting twice must fail"
+
+
+def test_irregular_plurals_do_not_break_the_first_example(tmp_path):
+    """"All men are mortal" has to fire on "socrates is a man".
+
+    Stripping a trailing s turns "men" into "men", so the rule never matched
+    and the canonical example of inference silently returned "I do not know".
+    """
+    from motherbrain.knowledge import Knowledge, parse_question, singular
+
+    assert singular("men") == "man"
+    assert singular("people") == "person"
+    assert singular("cities") == "city"
+    assert singular("boxes") == "box"
+    assert singular("man") == "man"
+
+    base = Knowledge(tmp_path)
+    base.tell("socrates is a man")
+    base.tell("all men are mortal")
+    assert base.ask(*parse_question("is socrates mortal?")).holds
+
+
+def test_articles_are_not_part_of_a_name(tmp_path):
+    """Told "a raven is a bird", asked about "raven" - the same thing."""
+    from motherbrain.knowledge import Knowledge, parse_question
+
+    base = Knowledge(tmp_path)
+    base.tell("a raven is a bird")
+    base.tell("all birds can fly")
+    assert base.ask(*parse_question("can a raven fly?")).holds
+    assert base.ask(*parse_question("can raven fly?")).holds
+
+
+def test_being_told_the_opposite_is_believed_over_a_rule(tmp_path):
+    """An explicit denial beats what a general rule would have concluded."""
+    from motherbrain.knowledge import Knowledge, parse_question
+
+    base = Knowledge(tmp_path)
+    base.tell("zeus is a man")
+    base.tell("all men are mortal")
+    base.tell("zeus is not mortal")
+    answer = base.ask(*parse_question("is zeus mortal?"))
+    assert answer.known and not answer.holds
+    assert "told" in answer.render()
+
+
+def test_knowledge_survives_a_restart(tmp_path):
+    """It is kept beside the weights, and outlives the process like they do."""
+    from motherbrain.knowledge import Knowledge, parse_question
+
+    first = Knowledge(tmp_path)
+    first.tell("ada is a mathematician")
+    first.tell("all mathematicians are careful")
+
+    second = Knowledge(tmp_path)          # a fresh object, as a restart gives
+    assert second.ask(*parse_question("is ada careful?")).holds
+
+
+def test_nonsense_is_not_quietly_stored(tmp_path):
+    """A parser that guesses puts things in that were never said, and a wrong
+    fact propagates through every rule that touches it."""
+    from motherbrain.knowledge import Knowledge, parse_statement
+
+    for line in ("", "!!!", "why is the sky blue",
+                 "def fibonacci(n): return n"):
+        assert parse_statement(line) is None, line
+
+    base = Knowledge(tmp_path)
+    assert base.tell("why is the sky blue") is None
+    assert not base.facts and not base.rules
+
+
 # ---- hearing and watching ----------------------------------------------------
 
 

@@ -1409,8 +1409,19 @@ def cmd_console(args) -> int:
         # Then anything MotherBrain knows about itself, read from disk. This
         # was in the window and nowhere else, so the terminal answered "who
         # are you?" with generated prose - fluent, and untrue.
+        from motherbrain.chat import consider as _consider
         from motherbrain.chat import respond as _respond
         from motherbrain.stats import gather as _gather
+
+        # Anything it was told, and anything that follows from it.
+        try:
+            _considered = _consider(line, args.run)
+        except Exception:                                 # noqa: BLE001
+            _considered = None
+        if _considered is not None:
+            print(_considered[1] + "\n")
+            say(_considered[1])
+            continue
 
         try:
             _kind, _answer = _respond(

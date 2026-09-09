@@ -899,7 +899,7 @@ class App:
         # A question about itself has a real answer on disk. Answering it from
         # state rather than generating is the difference between a reply and a
         # convincing noise.
-        from motherbrain.chat import CONTINUATION_NOTE, respond
+        from motherbrain.chat import CONTINUATION_NOTE, consider, respond
         from motherbrain.logic import solve
         from motherbrain.stats import gather
 
@@ -912,6 +912,15 @@ class App:
             if exact.working:
                 self._emit(f"  {exact.working}\n", "note")
             self._speak(exact.value[:200])
+            return
+
+        try:
+            considered = consider(text, self.run_dir)
+        except Exception:                                 # noqa: BLE001
+            considered = None
+        if considered is not None:
+            self._emit(considered[1] + "\n")
+            self._speak(considered[1][:300])
             return
 
         try:
