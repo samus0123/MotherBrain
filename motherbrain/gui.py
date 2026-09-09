@@ -1306,16 +1306,51 @@ def _free_port(preferred: int = 8000) -> int:
     return preferred
 
 
-def run_in_browser(run_dir: str, corpus_dir: str, device: str,
-                   reason: str) -> int:
-    """The window could not open, so serve the same thing to a browser.
+def lan_addresses(port: int) -> list[str]:
+    """Addresses another machine on this network could actually use.
+
+    Printing 0.0.0.0 is useless - nobody can type it. This finds what the
+    machine looks like from outside by asking the routing table which local
+    address it would use to reach the internet, without sending anything.
+    """
+    import socket
+
+    found = []
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.settimeout(0.2)
+        probe.connect(("192.0.2.1", 53))       # reserved, never routed
+        found.append(probe.getsockname()[0])
+        probe.close()
+    except OSError:
+        pass
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None,
+                                       socket.AF_INET):
+            address = info[4][0]
+            if address not in found and not address.startswith("127."):
+                found.append(address)
+    except OSError:
+        pass
+    return [f"http://{a}:{port}" for a in found]
+
+
+def run_in_browser(run_dir: str, corpus_dir: str, device: str, reason: str,
+                   host: str = "127.0.0.1", api_key: str | None = None,
+                   insecure: bool = False) -> int:
+    """Serve the same four options to a browser - this one, or another machine.
 
     `mb gui` means "give me a graphical MotherBrain". Refusing because this
     particular machine has no Tkinter, or no display, answers a question
     nobody asked: the browser console has the same four options and needs
-    neither. So the command falls back to it rather than failing, and says
-    what it did.
+    neither. So the command falls back to it rather than failing.
+
+    Over a network it goes through the same gate `mb serve` does. A key is
+    generated rather than demanded when none is given - refusing outright
+    teaches people to pass --insecure, which is worse than handing them a
+    good key and putting it in the link.
     """
+    import secrets
     import threading
     import time
     import webbrowser
@@ -1323,6 +1358,7 @@ def run_in_browser(run_dir: str, corpus_dir: str, device: str,
     try:
         import uvicorn
 
+        from motherbrain.security import check_exposure
         from motherbrain.server import create_app
     except ImportError as exc:
         from motherbrain.cli import platform_commands
@@ -1335,37 +1371,71 @@ def run_in_browser(run_dir: str, corpus_dir: str, device: str,
               file=sys.stderr)
         return 1
 
+    public = host not in ("127.0.0.1", "::1", "localhost")
+    generated = False
+    if public and not api_key and not insecure:
+        api_key = secrets.token_urlsafe(24)
+        generated = True
+
+    for warning in check_exposure(host, api_key, tls=False, insecure=insecure):
+        print(f"warning: {warning}")
+
     port = _free_port()
-    url = f"http://127.0.0.1:{port}"
+    query = f"?key={api_key}" if api_key else ""
+    local = f"http://127.0.0.1:{port}{query}"
+
     print(f"no window here ({reason}).")
-    print(f"opening MotherBrain in your browser instead: {url}")
-    print("the same four options, and nothing to install. ctrl-c to stop.\n")
+    if public:
+        print("serving MotherBrain to this network.\n")
+        print(f"  on this machine   {local}")
+        for address in lan_addresses(port):
+            print(f"  from anywhere     {address}{query}")
+        if generated:
+            print(f"\n  key               {api_key}")
+            print("  generated for this run, and already in the links above.")
+            print("  it is not saved: the next run makes a new one.")
+        print("\n  plaintext: anything fed or generated crosses the network in")
+        print("  the clear. `mb cert`, then `mb serve --tls-cert/--tls-key`,")
+        print("  if that matters where you are running this.")
+    else:
+        print(f"opening MotherBrain in your browser instead: {local}")
+        print("the same four options, and nothing to install.")
+    print("\nctrl-c to stop.\n")
 
     def open_when_up():
         # Give uvicorn a moment to bind before pointing a browser at it.
         time.sleep(1.5)
         try:
-            if not webbrowser.open(url):
-                print(f"could not open a browser; go to {url} yourself.")
+            if not webbrowser.open(local):
+                print(f"could not open a browser; go to {local} yourself.")
         except Exception:                                 # noqa: BLE001
-            print(f"could not open a browser; go to {url} yourself.")
+            print(f"could not open a browser; go to {local} yourself.")
 
-    threading.Thread(target=open_when_up, daemon=True).start()
-    app = create_app(run_dir=run_dir, corpus_dir=corpus_dir, device=device)
-    uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
+    if not public:
+        threading.Thread(target=open_when_up, daemon=True).start()
+    app = create_app(run_dir=run_dir, corpus_dir=corpus_dir, device=device,
+                     api_key=api_key)
+    uvicorn.run(app, host=host, port=port, log_level="warning")
     return 0
 
 
 def run(run_dir: str, corpus_dir: str, device: str = "auto",
         max_tokens: int = 120, steps: int = 100, grow: int = 1,
-        web: bool | None = None) -> int:
+        web: bool | None = None, host: str = "127.0.0.1",
+        api_key: str | None = None, insecure: bool = False) -> int:
     """Open MotherBrain's interface: a window if this machine has one.
 
     Falls back to the browser rather than failing, because every reason a
-    window cannot open here is a reason the browser console still can.
+    window cannot open here is a reason the browser console still can. Asked
+    for a network address there is no falling back to do - a window on this
+    machine is not what was wanted - so it serves directly.
     """
-    if web:
-        return run_in_browser(run_dir, corpus_dir, device, "you asked for it")
+    public = host not in ("127.0.0.1", "::1", "localhost")
+    if web or public:
+        return run_in_browser(
+            run_dir, corpus_dir, device,
+            "serving to the network" if public else "you asked for it",
+            host=host, api_key=api_key, insecure=insecure)
 
     try:
         import tkinter as tk
@@ -1383,7 +1453,8 @@ def run(run_dir: str, corpus_dir: str, device: str = "auto",
             print(f"no display to open a window on ({exc}).", file=sys.stderr)
             return 1
         return run_in_browser(run_dir, corpus_dir, device,
-                              "there is no display")
+                              "there is no display", host=host,
+                              api_key=api_key, insecure=insecure)
 
     App(root, run_dir, corpus_dir, device, max_tokens, steps, grow)
     root.mainloop()

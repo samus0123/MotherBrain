@@ -442,6 +442,34 @@ machine. In that last case it points you at `mb serve` and a browser.
 
 `mb gui` directly works too, once those are in place.
 
+## Reaching it from another machine
+
+```bash
+mb gui --network
+```
+
+It serves the same four options to your network and prints an address you can
+type into a phone or another laptop, with a key already in the link:
+
+```
+  on this machine   http://127.0.0.1:8000?key=jsk4VpIL...
+  from anywhere     http://192.168.1.42:8000?key=jsk4VpIL...
+
+  key               jsk4VpIL...
+  generated for this run, and already in the links above.
+  it is not saved: the next run makes a new one.
+```
+
+The key is generated rather than demanded. Refusing outright teaches people to
+pass `--insecure`, which is worse than handing them a good key — so the
+friendly path is the safe one and there is nothing to choose between.
+`--api-key` sets your own, `--host` picks an interface, and `--insecure`
+allows no key at all, deliberately.
+
+It is **plaintext**. Anything fed or generated crosses the network in the
+clear, key included. On a network you do not control, run `mb cert` and serve
+with `mb serve --tls-cert --tls-key` instead.
+
 ## How do I run it?
 
 Two commands, from a clean clone. The weights are committed, so there is

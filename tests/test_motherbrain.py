@@ -2079,6 +2079,65 @@ def test_growth_counts_every_kind_of_patch():
         "senses are being read from one mode again"
 
 
+def test_going_public_is_carried_through_to_the_server(monkeypatch):
+    """Asked for a network address, there is no window to fall back to."""
+    from motherbrain import gui
+
+    captured = {}
+    monkeypatch.setattr(gui, "run_in_browser",
+                        lambda *a, **kw: (captured.update(kw), 0)[1])
+
+    assert gui.run("runs/default", "data/corpus", host="0.0.0.0") == 0
+    assert captured["host"] == "0.0.0.0"
+
+    captured.clear()
+    gui.run("runs/default", "data/corpus", web=True)
+    assert captured["host"] == "127.0.0.1", "a local run must stay local"
+
+
+def test_a_public_address_without_a_key_is_still_refused():
+    """--insecure has to remain a deliberate act, not a default."""
+    from motherbrain.security import check_exposure
+
+    with pytest.raises(SystemExit, match="refusing to bind"):
+        check_exposure("0.0.0.0", api_key=None, tls=False, insecure=False)
+
+    warnings = check_exposure("0.0.0.0", api_key=None, tls=False, insecure=True)
+    assert any("plaintext" in w for w in warnings)
+    assert check_exposure("127.0.0.1", None, tls=False, insecure=False) == []
+
+
+def test_the_printed_address_is_one_somebody_could_type():
+    """Printing 0.0.0.0 is useless - nobody can put that in a phone."""
+    from motherbrain.gui import lan_addresses
+
+    for address in lan_addresses(8000):
+        assert address.startswith("http://")
+        assert address.endswith(":8000")
+        assert "0.0.0.0" not in address
+        assert not address.startswith("http://127.")
+
+
+def test_the_link_it_prints_is_the_link_that_works(served):
+    """A generated key is only useful if the page can carry it."""
+    from fastapi.testclient import TestClient
+
+    from motherbrain.server import UI_HTML, create_app
+
+    run, corpus = served
+    key = "a-key-long-enough-to-be-real"
+    client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
+                                   api_key=key, auto_patch=False))
+
+    assert client.get("/status").status_code == 401
+    assert client.get("/status", headers={"X-API-Key": "wrong"}).status_code == 401
+    assert client.get("/status", headers={"X-API-Key": key}).status_code == 200
+
+    # The page reads its key from the query string; that is what makes the
+    # printed link work when it is opened on another machine.
+    assert "URLSearchParams(location.search).get('key')" in UI_HTML
+
+
 # ---- knowing things ----------------------------------------------------------
 
 

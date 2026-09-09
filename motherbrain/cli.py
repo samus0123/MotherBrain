@@ -649,8 +649,13 @@ def cmd_gui(args) -> int:
     """Open the desktop window."""
     from motherbrain.gui import run
 
+    # --network is the plain-English spelling of --host 0.0.0.0; it exists
+    # because "make it work over the network" is what people actually want and
+    # 0.0.0.0 is not a thing anyone should have to know.
+    host = "0.0.0.0" if args.network else args.host
     return run(args.run, args.corpus, args.device, args.max_tokens,
-               args.steps, args.grow, web=args.web)
+               args.steps, args.grow, web=args.web, host=host,
+               api_key=args.api_key, insecure=args.insecure)
 
 
 def cmd_status(args) -> int:
@@ -2295,6 +2300,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="skip the window and use the browser")
     s.add_argument("--no-web", dest="web", action="store_false",
                    help="never fall back to the browser; fail instead")
+    s.add_argument("--network", action="store_true",
+                   help="reach it from other machines (same as --host 0.0.0.0)")
+    s.add_argument("--host", default="127.0.0.1",
+                   help="interface to serve on when not opening a window")
+    s.add_argument("--api-key", default=os.environ.get("MB_API_KEY"),
+                   help="require this key; one is generated if you go public "
+                        "without giving one")
+    s.add_argument("--insecure", action="store_true",
+                   help="allow a public address with no key at all")
     s.set_defaults(func=cmd_gui)
 
     s = common(sub.add_parser("serve", help="expose the model over HTTP or HTTPS"))
