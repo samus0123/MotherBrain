@@ -4737,3 +4737,89 @@ def test_it_reads_every_language_it_claims_to():
     source = inspect.getsource(cli.cmd_languages)
     assert "corpus.documents()" in source, "the census is not a census"
     assert "Reading is not learning" in source
+
+
+def test_a_new_patch_keeps_every_patch_before_it_and_adds_parameters(tmp_path):
+    """Growth is cumulative: v3 is the base plus patch one plus patch two
+    plus patch three, and every one of them is still on disk. A patch that
+    replaced its predecessor would make the lineage a lie."""
+    from motherbrain.data import Corpus
+    from motherbrain.patches import PatchConfig, PatchStore, build_version, create_patch
+    from motherbrain.train import TrainConfig, save_checkpoint
+
+    run = tmp_path / "run"
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text("the mother brain awakens and learns " * 60, "seed")
+    tok, _ = corpus.prepare(vocab_size=320, verbose=False)
+    cfg = tiny(vocab_size=tok.vocab_size, max_seq_len=32)
+    save_checkpoint(run / "checkpoint.pt", MotherBrain(cfg), None, 1, cfg,
+                    TrainConfig(), [])
+    tok.save(str(run / "tokenizer.json"))
+
+    sizes, versions = [], []
+    for round_number in (1, 2):
+        corpus.add_text(f"round {round_number}: " + "grow " * 200,
+                        f"feed{round_number}")
+        version = create_patch(
+            str(run), str(tmp_path / "corpus"),
+            PatchConfig(mode="grow", grow_experts=1, steps=2),
+            note=f"round {round_number}", device="cpu")
+        assert version is not None, f"round {round_number} learned nothing"
+        versions.append(version)
+        sizes.append(version.params_after)
+
+    # Both patches are still there, in order, with the lineage recording it.
+    files = sorted((run / "patches").glob("*.pt"))
+    assert len(files) == 2, [f.name for f in files]
+    store = PatchStore(str(run), create=False)
+    lineage = store.versions()
+    assert [v.version for v in lineage] == [1, 2]
+    assert lineage[1].parent == 1, "the second patch forgot the first"
+
+    # And the model got bigger, not merely different.
+    assert sizes[1] > sizes[0] > versions[0].params_before, sizes
+    assert versions[1].params_before == sizes[0], \
+        "the second patch was applied to the wrong starting point"
+
+    # Rebuilding from the base replays both, and lands on the larger model.
+    model, _tok, current = build_version(str(run), device="cpu")
+    assert current == 2
+    assert model.n_params() == sizes[1]
+
+
+def test_applying_a_patch_updates_a_running_board_in_place(tmp_path, served):
+    """No restart, no reinstall. The board swaps the model it is serving and
+    throws away the batching engine built around the old weights."""
+    import asyncio
+    import inspect
+
+    from motherbrain.bbs import Board, option_patch
+
+    source = inspect.getsource(option_patch)
+    assert "board.load" in source, "the board keeps serving the old weights"
+    assert "_engine = None" in source, \
+        "the engine still holds the model that was replaced"
+    assert "refresh_stats" in source, "the stats would go on reporting the old"
+    assert "nlp.forget_index" in source, "the corpus grew and the index did not"
+
+    run, corpus = served
+    board = Board(str(run), str(corpus), device="cpu")
+    board.load()
+    first = board.model.n_params()
+
+    async def swap():
+        # Whatever the engine was, a reload has to leave a fresh one.
+        from motherbrain.inference import Engine
+        from motherbrain.tokenizer import EOS_ID
+
+        board._engine = Engine(board.model, board.tok, board.torch_device,
+                               eos_id=EOS_ID)
+        old = board._engine
+        await asyncio.to_thread(board.load)
+        await old.stop()
+        board._engine = None
+        assert board.engine is not old, "the new model is served by the old engine"
+        await board._engine.stop()
+
+    asyncio.run(swap())
+    assert board.model.n_params() == first
