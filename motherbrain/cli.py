@@ -1487,42 +1487,27 @@ def cmd_console(args) -> int:
         if not line:
             return 0
 
-        # Exact first: a definite answer is computed, not generated.
-        from motherbrain.logic import solve as _solve
-
-        exact = _solve(line)
-        if exact is not None:
-            print(exact.render() + "\n")
-            say(exact.value)
-            continue
-
-        # Then anything MotherBrain knows about itself, read from disk. This
-        # was in the window and nowhere else, so the terminal answered "who
-        # are you?" with generated prose - fluent, and untrue.
-        from motherbrain.chat import consider as _consider
-        from motherbrain.chat import respond as _respond
+        # One pipeline, the same one the board and the window use: read the
+        # sentence, then answer it from something true - computed, told,
+        # read off its own state, or quoted from what it has actually read.
+        # Generation is what happens when none of those has anything, and it
+        # arrives labelled.
+        from motherbrain import nlp as _nlp
         from motherbrain.stats import gather as _gather
 
-        # Anything it was told, and anything that follows from it.
         try:
-            _considered = _consider(line, args.run)
+            _found = _nlp.answer(line, run_dir=args.run,
+                                 corpus_dir=args.corpus,
+                                 stats=_gather(args.run, args.corpus,
+                                               model=model, device=device))
         except Exception:                                 # noqa: BLE001
-            _considered = None
-        if _considered is not None:
-            print(_considered[1] + "\n")
-            say(_considered[1])
+            _found = None
+        if _found is not None and _found.source != "none":
+            print(_found.render() + "\n")
+            say(_found.text)
             continue
-
-        try:
-            _kind, _answer = _respond(
-                line, _gather(args.run, args.corpus, model=model,
-                              device=device))
-        except Exception:                                 # noqa: BLE001
-            _kind, _answer = "generate", ""
-        if _kind == "fact":
-            print(_answer + "\n")
-            say(_answer)
-            continue
+        if _found is not None:
+            print(_found.text)
 
         cmd = parse(line)
 

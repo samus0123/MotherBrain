@@ -407,6 +407,7 @@ class Board:
         self._stats_at = 0.0
         self._engine = None
         self.max_batch = 8
+        self.indexed = 0
         self.name = BOARD_NAME
         self.new_user_password: str | None = None
         # A caller from the machine the board runs on is the sysop. On a
@@ -646,6 +647,18 @@ class Board:
         self._stats_at = time.monotonic()
         return self._stats
 
+    async def read_the_corpus(self) -> None:
+        """Index what it has read, so it can quote it. Off the event loop.
+
+        A board that did this on the first question would make that caller
+        wait eight seconds and nobody else, which is the kind of thing that
+        looks like a fault rather than a cost.
+        """
+        from motherbrain import nlp
+
+        index = await asyncio.to_thread(nlp.corpus_index, self.corpus_dir)
+        self.indexed = len(index)
+
     async def stats_keeper(self, every: float = 120.0) -> None:
         """Keep the cache warm for as long as the board is up."""
         while True:
@@ -678,34 +691,42 @@ class Board:
         finally:
             self.waiting -= 1
 
-    async def answer(self, text: str, caller: Caller) -> tuple[str, str]:
-        """The honest answering order: computed, known, self, then generated.
+    async def answer(self, text: str, caller: Caller,
+                     generate: bool = False) -> tuple[str, str]:
+        """Computed, told, read off its own state, quoted - then, and only
+        then, generated.
 
-        Exactly what `mb console` does, in the same order, for the same
-        reason - a definite answer is never generated when it can be worked
-        out - and the caller is told which of the four this was.
+        Exactly what the terminal, the window and the browser do, in the
+        same order, for the same reason: a definite answer is never
+        generated when it can be worked out, and a caller is always told
+        which of the five this was.
         """
-        from motherbrain.chat import CONTINUATION_NOTE, consider, respond
-        from motherbrain.logic import solve
+        from motherbrain import nlp
 
-        exact = await asyncio.to_thread(solve, text)
-        if exact is not None:
-            return "exact", exact.render()
+        # One pipeline, off the event loop: it reads the sentence, works out
+        # what is being asked, and composes a reply out of something that is
+        # actually true - computed, told, read off its own state, or quoted
+        # from what it has read. The sampler is not in that list.
+        found = await asyncio.to_thread(
+            nlp.answer, text, run_dir=self.run_dir,
+            corpus_dir=self.corpus_dir, stats=self.stats())
+        if found.source != "none":
+            return found.source, found.render()
+        if not generate:
+            # "I do not know" is the answer. Following it with fluent prose
+            # about nothing takes it back, and the prose is the part people
+            # remember.
+            return "none", found.text
 
-        try:
-            considered = await asyncio.to_thread(consider, text, self.run_dir)
-        except Exception:                                 # noqa: BLE001
-            considered = None
-        if considered is not None:
-            return "known", considered[1]
+        # Asked for explicitly - by the Oracle door, whose whole purpose is
+        # showing what the model does on its own.
+        from motherbrain.chat import CONTINUATION_NOTE
 
-        kind, said = respond(text, self.stats())
-        if kind == "fact":
-            return "self", said
-
-        produced = await self.generate(text)
-        return "generated", (produced.strip() or "(nothing)") + \
-            f"\n\n{CONTINUATION_NOTE}"
+        produced = (await self.generate(text)).strip()
+        if not produced:
+            return "none", found.text
+        return "generated", f"{found.text}\n\n{produced}\n\n" \
+                            f"{CONTINUATION_NOTE}"
 
     async def name_image(self, tensor) -> list[tuple[float, str]]:
         """What the perception tower makes of one image, best first.
@@ -1527,6 +1548,10 @@ async def option_patch(caller: Caller) -> None:
         await caller.line(f"  {A.HR}nothing was learned.{A.RESET}")
     else:
         await asyncio.to_thread(board.load)
+        from motherbrain import nlp
+
+        nlp.forget_index()                        # the corpus grew
+        asyncio.create_task(board.read_the_corpus())
         if board._engine is not None:
             await board._engine.stop()
             board._engine = None                  # the next call builds one
@@ -3452,6 +3477,7 @@ async def run_board(board: Board, host: str = "127.0.0.1",
         await session(reader, writer, board)
 
     keeper = asyncio.create_task(board.stats_keeper())
+    reader = asyncio.create_task(board.read_the_corpus())
     server = await asyncio.start_server(handle, host, port)
     where = ", ".join(str(s.getsockname()[:2]) for s in server.sockets or [])
     print(f"  answering telnet on {where}")
@@ -3460,6 +3486,7 @@ async def run_board(board: Board, host: str = "127.0.0.1",
             await server.serve_forever()
     finally:
         keeper.cancel()
+        reader.cancel()
 
 
 def port_advice(port: int, exc: OSError) -> str:

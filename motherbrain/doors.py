@@ -356,7 +356,8 @@ async def oracle(caller) -> None:
         question = await caller.ask(f"  {A.HM}ask> {A.RESET}", limit=400)
         if not question.strip():
             return
-        source, text = await caller.board.answer(question, caller)
+        source, text = await caller.board.answer(question, caller,
+                                                 generate=True)
         await caller.line("")
         await caller.line(f"  {_label(source)}")
         for line in A.wrap(text, caller.columns - 6):
@@ -368,6 +369,10 @@ _LABELS = {
     "exact": f"{A.HG}[COMPUTED]{A.RESET} - arithmetic, done exactly, not guessed.",
     "known": f"{A.HG}[KNOWN]{A.RESET} - follows from something it was told.",
     "self": f"{A.HC}[FROM ITS OWN STATE]{A.RESET} - read off disk, true today.",
+    "read": f"{A.HC}[QUOTED]{A.RESET} - sentences it has actually read, "
+            f"word for word, not a summary of them.",
+    "social": f"{A.GREY}[CIVIL]{A.RESET} - nothing to work out.",
+    "none": f"{A.HY}[NOT KNOWN]{A.RESET} - and saying so is the answer.",
     "generated": f"{A.HY}[GENERATED]{A.RESET} - a continuation of your words, "
                  f"not an answer to them.",
 }

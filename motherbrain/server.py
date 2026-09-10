@@ -281,6 +281,33 @@ def create_app(run_dir: str = "runs/default", corpus_dir: str = "data/corpus",
         return {"exact": True, "value": found.value, "working": found.working,
                 "kind": found.kind}
 
+    @app.post("/ask")
+    def ask_endpoint(req: SolveRequest, _: None = Depends(auth)) -> dict:
+        """The language pipeline: a reply, and where it came from.
+
+        The same four sources the terminal, the window and the board answer
+        from, in the same order, and `source` is the field that matters -
+        an answer whose provenance a caller cannot see is a guess with good
+        manners.
+        """
+        from motherbrain import nlp
+
+        model, _tok, device, _version = state.snapshot()
+        summary = None
+        try:
+            from motherbrain.stats import gather
+
+            summary = gather(state.run_dir, state.corpus_dir, model=model,
+                             device=device)
+        except Exception:                                 # noqa: BLE001
+            summary = None
+
+        found = nlp.answer(req.text, run_dir=state.run_dir,
+                           corpus_dir=state.corpus_dir, stats=summary)
+        return {"source": found.source, "text": found.text,
+                "evidence": found.evidence,
+                "known": found.source != "none"}
+
     @app.post("/perceive")
     def perceive_endpoint(req: PerceiveRequest, _: None = Depends(auth)) -> dict:
         """Read one frame or clip from a live feed and report what happened.

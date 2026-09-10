@@ -2086,12 +2086,22 @@ def test_every_surface_answers_from_state_not_prose(served):
     from motherbrain import cli, gui
     from motherbrain.server import create_app
 
+    # Both used to import chat and logic directly, and drifted apart. They
+    # go through the one language pipeline now, which calls both - so the
+    # assertion is that they use it, not that they reimplement it.
     for where, source in (("window", inspect.getsource(gui.App._do)),
                           ("terminal", inspect.getsource(cli.cmd_console))):
-        assert "from motherbrain.chat import" in source, \
-            f"the {where} never asks what it knows about itself"
-        assert "from motherbrain.logic import" in source, \
-            f"the {where} generates answers it could compute"
+        assert "nlp.answer" in source, \
+            f"the {where} answers without reading the sentence first"
+
+    from motherbrain import nlp
+    pipeline = inspect.getsource(nlp.answer)
+    assert "from motherbrain.logic import solve" in pipeline, \
+        "the pipeline generates answers it could compute"
+    assert "from motherbrain.chat import consider" in pipeline, \
+        "the pipeline never asks what it was told"
+    assert "answer_about_self" in pipeline, \
+        "the pipeline never asks what it knows about itself"
 
     run, corpus = served
     client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
@@ -4314,3 +4324,156 @@ def test_the_classic_doors_are_the_classics():
     fresh = doors._wyrm_new("SOMEBODY")
     assert fresh["turns"] == doors.WYRM_TURNS
     assert fresh["level"] == 1 and fresh["gold"] == 0
+
+
+# ---- natural language -------------------------------------------------------
+
+def test_it_reads_a_sentence_before_answering_it():
+    """A tagger that guesses makes the parser downstream confidently wrong,
+    so the closed classes are listed and the rest is decided by shape."""
+    from motherbrain import nlp
+
+    tagged = dict(nlp.tag(nlp.tokenise("the model runs quickly")))
+    assert tagged["the"] == "DET"
+    assert tagged["runs"] in ("VERB", "NOUN")
+    assert tagged["quickly"] == "ADV"
+
+    for text, kind in [("What is a modem?", "question"),
+                       ("hello", "greeting"),
+                       ("thanks", "thanks"),
+                       ("The brain learns.", "statement"),
+                       ("can you see", "question"),
+                       ("why not", "question")]:
+        assert nlp.analyse(text).kind == kind, text
+
+    asked = nlp.analyse("how many parameters do you have")
+    assert asked.wh == "how" and asked.about_self
+    assert "parameter" in asked.keywords, asked.keywords
+
+    # The lemmatiser must not mangle adjectives - "conscious" is not
+    # "consciou", and every keyword match downstream depends on it.
+    assert nlp.lemma("conscious", "ADJ") == "conscious"
+    assert nlp.lemma("parameters") == "parameter"
+    assert nlp.lemma("running", "VERB") == "run"
+    assert nlp.lemma("children") == "child"
+
+
+def test_it_composes_english_rather_than_fragments():
+    """Agreement is where a generated sentence gives itself away."""
+    from motherbrain import nlp
+
+    assert nlp.agree("it", "be") == "is"
+    assert nlp.agree("they", "be") == "are"
+    assert nlp.agree("I", "be") == "am"
+    assert nlp.agree("model", "run") == "runs"
+    assert nlp.agree("models", "run") == "run"
+    assert nlp.agree("it", "try") == "tries"
+    assert nlp.agree("it", "watch") == "watches"
+
+    assert nlp.article("modem") == "a"
+    assert nlp.article("apple") == "an"
+    assert nlp.article("hour") == "an"
+    assert nlp.article("user") == "a", "'an user' is how you spot a machine"
+
+    assert nlp.sentence("  the  cat sat ") == "The cat sat."
+    assert nlp.sentence("already right.") == "Already right."
+    assert nlp.join(["sight", "sound", "video"]) == "sight, sound and video"
+    assert nlp.join(["one"]) == "one"
+
+
+def test_it_says_it_does_not_know(tmp_path):
+    """The whole design turns on this being a real answer rather than a
+    failure to produce one."""
+    from motherbrain import nlp
+
+    found = nlp.answer("what is a blorptrix", run_dir=str(tmp_path))
+    assert found.source == "none"
+    assert "do not know" in found.text
+    assert "blorptrix" in found.text, "it did not say what it did not know"
+
+    # And it never quietly produces prose in place of the admission.
+    assert not found.evidence
+
+
+def test_the_pipeline_prefers_the_certain_source(tmp_path):
+    """Computed, then told, then its own state, then quoted. In that order,
+    because that is the order of certainty."""
+    from motherbrain import nlp
+    from motherbrain.knowledge import Knowledge
+
+    run = tmp_path / "run"
+    run.mkdir()
+
+    assert nlp.answer("hello").source == "social"
+    assert nlp.answer("what is 6 * 7", run_dir=str(run)).source == "exact"
+    assert "42" in nlp.answer("what is 6 * 7", run_dir=str(run)).text
+
+    base = Knowledge(str(run))
+    base.tell("a modem is a device")
+    base.tell("all devices need power")
+    told = nlp.answer("what is a modem", run_dir=str(run))
+    assert told.source == "known"
+    assert "device" in told.text and "power" in told.text
+
+    state = {"version": 5, "total_params": 52_222_872,
+             "active_params": 33_348_504, "params_at_v0": 18_880_896,
+             "patches": 5}
+    mine = nlp.answer("how many parameters do you have", run_dir=str(run),
+                      stats=state)
+    assert mine.source == "self" and "52,222,872" in mine.text
+
+
+def test_retrieval_quotes_and_never_paraphrases(tmp_path):
+    """Grounding an answer in something it has read is only honest if you
+    can be shown the sentence, exactly as it was written."""
+    from motherbrain import nlp
+    from motherbrain.data import Corpus
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text(
+        "A modem converts digital data into an analogue signal. "
+        "The signal travels over a telephone line. "
+        "This third sentence is about something else entirely.", "seed")
+    nlp.forget_index()
+
+    index = nlp.corpus_index(str(tmp_path / "corpus"))
+    assert len(index) >= 3
+    # The inverted index must only offer sentences that could match.
+    assert index.candidates(["bicycle"]) == []
+    assert index.candidates(["modem"])
+
+    found = nlp.answer("what is a modem", corpus_dir=str(tmp_path / "corpus"))
+    assert found.source == "read"
+    assert found.evidence, "it claimed to quote and quoted nothing"
+    quoted = found.evidence[0].strip('"')
+    assert quoted in ("A modem converts digital data into an analogue signal.",
+                      "The signal travels over a telephone line."), quoted
+    nlp.forget_index()
+
+
+def test_every_face_answers_through_the_same_pipeline():
+    """Four faces that disagree about what is true are four programs."""
+    import inspect
+
+    from motherbrain import bbs, cli, gui
+
+    for name, source in (("board", inspect.getsource(bbs.Board.answer)),
+                         ("terminal", inspect.getsource(cli.cmd_console)),
+                         ("window", inspect.getsource(gui.App._do))):
+        assert "nlp.answer" in source, f"the {name} answers its own way"
+
+    from motherbrain.server import create_app
+    assert "ask_endpoint" in inspect.getsource(create_app)
+
+
+def test_it_describes_itself_as_what_it_is():
+    """It is an artificial intelligence system, and the honest way to say so
+    is to name the parts rather than the word."""
+    from motherbrain.chat import answer_about_self
+
+    said = answer_about_self("identity", {"version": 5,
+                                          "total_params": 52_222_872})
+    assert "artificial intelligence" in said
+    for part in ("knowledge base", "calculator", "perception", "reasoning"):
+        assert part in said, f"it did not mention its {part}"
+    assert "labelled" in said, "it did not say answers carry their source"
