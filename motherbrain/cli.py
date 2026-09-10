@@ -888,7 +888,8 @@ def cmd_console(args) -> int:
         # --mode names the same four things, plus the older text/voice spellings
         # of option 2 that scripts already pass.
         action = {"feed": "learn", "learn": "learn", "update": "apply",
-                  "apply": "apply", "make": "make"}.get(args.mode, "do")
+                  "apply": "apply", "make": "make",
+                  "gui": "gui"}.get(args.mode, "do")
         mode = args.mode if args.mode in ("text", "voice") else "text"
         cap = Capability()
         if mode == "voice":
@@ -1366,6 +1367,17 @@ def cmd_console(args) -> int:
                 print(f"> {heard}")
                 return heard
         return input(prompt)
+
+    if action == "gui":
+        # Option 5 is not a mode of this console - it is the other one. Hand
+        # over to the window and give back whatever it gives back, so `mb
+        # console` and `mb gui` end the same way.
+        from motherbrain.gui import run as run_window
+
+        print("opening MotherBrain's window...\n")
+        return run_window(args.run, args.corpus, args.device,
+                          max_tokens=args.max_tokens, steps=args.steps,
+                          grow=args.grow)
 
     if action == "learn":
         learn_new_information()
@@ -2173,7 +2185,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="where applying a patch writes the model "
                         "(default: models/motherbrain.pt)")
     s.add_argument("--mode",
-                   choices=["ask", "make", "do", "learn", "apply",
+                   choices=["ask", "make", "do", "learn", "apply", "gui",
                             "text", "voice", "feed", "update"],
                    default="ask",
                    help="ask at startup (default), or go straight to one")

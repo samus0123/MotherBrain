@@ -143,6 +143,7 @@ MENU = """What would you like to do?
   2  Tell MotherBrain what to do                      (text or voice)
   3  Teach MotherBrain something new
   4  Apply new knowledge as a patch (update)
+  5  Run the GUI                                      (a window, not this)
 """
 
 # What each answer means. Digits are the documented way in; the words exist
@@ -159,6 +160,9 @@ _CHOICES = {
 
     "4": "apply", "apply": "apply", "patch": "apply", "update": "apply",
     "grow": "apply", "ascend": "apply", "version": "apply",
+
+    "5": "gui", "gui": "gui", "window": "gui", "graphical": "gui",
+    "desktop": "gui", "run the gui": "gui", "interface": "gui",
 }
 
 # Two answers name a way of talking as well as a task, and mean it.
@@ -169,9 +173,9 @@ _IMPLIED_MODE = {"voice": "voice", "speak": "voice", "talk": "voice",
 def choose_start(default: str = "do") -> tuple[str, str, Capability]:
     """Show the opening menu and return (action, mode, capability).
 
-    The action is "make", "do", "learn" or "apply" - the four options, in
+    The action is "make", "do", "learn", "apply" or "gui" - the options, in
     order. The mode is "text" or "voice", and only options 1 and 2 ask for it,
-    because teaching and patching are not conversations.
+    because teaching, patching and opening a window are not conversations.
 
     Choosing voice on a machine that cannot hear falls back to text and says
     why. Honouring the choice matters more than pretending to.
@@ -180,7 +184,7 @@ def choose_start(default: str = "do") -> tuple[str, str, Capability]:
     print(MENU)
 
     try:
-        answer = input("choose [1-4, default 2] ").strip().lower()
+        answer = input("choose [1-5, default 2] ").strip().lower()
     except (EOFError, KeyboardInterrupt, OSError):
         # Not interactive - piped input, a scheduled run, no terminal at all.
         print()
