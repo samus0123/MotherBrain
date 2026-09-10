@@ -516,7 +516,7 @@ def forget_index() -> None:
 
 
 def answer(text: str, *, run_dir=None, corpus_dir=None, stats=None,
-           ground: bool = True) -> Answer:
+           ground: bool = True, model=None, journal: bool = True) -> Answer:
     """Read the sentence, find evidence, and compose an English reply.
 
     The order is the order of certainty: arithmetic that can be computed,
@@ -538,7 +538,7 @@ def answer(text: str, *, run_dir=None, corpus_dir=None, stats=None,
 
         exact = solve(u.text)
         if exact is not None:
-            return Answer("exact", exact.render())
+            return _kept(Answer("exact", exact.render()), u, run_dir, journal)
     except Exception:                                     # noqa: BLE001
         pass
 
@@ -561,9 +561,12 @@ def answer(text: str, *, run_dir=None, corpus_dir=None, stats=None,
     #    to it means answering "I do not know" about the one subject it has
     #    complete information on.
     if u.about_self:
+        introspected = _about_myself(u, model, stats, run_dir)
+        if introspected is not None:
+            return _kept(introspected, u, run_dir, journal)
         mine = from_state()
         if mine is not None:
-            return mine
+            return _kept(mine, u, run_dir, journal)
 
     # 3. Anything it was told, or that follows from it.
     if run_dir is not None:
@@ -572,13 +575,14 @@ def answer(text: str, *, run_dir=None, corpus_dir=None, stats=None,
 
             considered = consider(u.text, run_dir)
             if considered is not None:
-                return Answer("known", considered[1])
+                return _kept(Answer("known", considered[1]), u, run_dir,
+                             journal)
         except Exception:                                 # noqa: BLE001
             pass
 
     mine = from_state()
     if mine is not None:
-        return mine
+        return _kept(mine, u, run_dir, journal)
 
     # 4. Anything it has actually read. Quoted, attributed to the corpus,
     #    and never paraphrased - paraphrasing is where a retrieval system
@@ -587,10 +591,95 @@ def answer(text: str, *, run_dir=None, corpus_dir=None, stats=None,
         found = search(u.keywords, corpus_index(corpus_dir))
         if found:
             lead = _lead_in(u)
-            return Answer("read", lead,
-                          [f'"{line}"' for _score, line in found])
+            return _kept(Answer("read", lead,
+                                [f'"{line}"' for _score, line in found]),
+                         u, run_dir, journal)
 
-    return Answer("none", _admit(u))
+    return _kept(Answer("none", _admit(u)), u, run_dir, journal)
+
+
+def _about_myself(u: Utterance, model, stats, run_dir) -> Answer | None:
+    """A question about how it works, answered by reading its own source.
+
+    This is the part that makes the self-knowledge more than a status
+    page. The program ships its own code and can open it, so "how do you
+    answer questions" is answered by finding the module that answers
+    questions and quoting what that module says about itself - which
+    cannot go stale, and cannot be a plausible invention about a codebase
+    the model has never seen.
+    """
+    from motherbrain import aware
+
+    lowered = u.text.lower()
+
+    if any(phrase in lowered for phrase in (
+            "what do you get wrong", "what are you bad at",
+            "what do you not know", "what don't you know",
+            "what have you failed", "what can't you answer",
+            "where do you fail")):
+        return Answer("self", _shortcomings(stats, run_dir))
+
+    if any(phrase in lowered for phrase in (
+            "what are you made of", "how are you built", "how many parts",
+            "what is inside you", "what are you made from")):
+        parts = aware.architecture(model)
+        if parts:
+            total = parts[-1].parameters
+            body = ", ".join(
+                f"{p.name} {p.share(total) * 100:.0f}%"
+                for p in parts if p.name != "total")
+            return Answer("self", sentence(
+                f"{total:,} parameters, and this is where they are: {body}. "
+                f"The full account is on the self-knowledge screen"))
+
+    if any(phrase in lowered for phrase in (
+            "how do you", "how does it work", "how do you work",
+            "how are you able", "explain yourself", "how were you built")):
+        found = aware.introspect(u.text)
+        if found is not None:
+            where, text = found
+            # The title line and the paragraph under it: the first line
+            # alone is a heading, and the whole file is a lecture.
+            paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+            quoted = "\n".join(paragraphs[:2])
+            return Answer("self",
+                          f"That is {where}, and I can read it. What that "
+                          f"file says about itself:",
+                          [line for line in quoted.split("\n")])
+    return None
+
+
+def _shortcomings(stats, run_dir) -> str:
+    """What it is bad at, from measurements and from its own failures."""
+    from motherbrain import aware
+
+    lines = ["Measured, and in its own words:"]
+    for sense in aware.senses(stats or {}):
+        if sense["accuracy"]:
+            lines.append(f"  {sense['sense']}: {sense['accuracy'] * 100:.1f}% "
+                         f"- {sense['verdict']}")
+    lines.append("  text: I complete it. I do not follow instructions in it, "
+                 "and I never did.")
+    if run_dir is not None:
+        book = aware.journal_for(run_dir)
+        if book.entries:
+            lines.append(f"  I have failed to answer {book.total()} "
+                         f"question(s). The ones that keep coming back:")
+            for entry in book.worst(4):
+                lines.append(f"    {entry['asked']}x  {entry['question'][:60]}")
+    return "\n".join(lines)
+
+
+def _kept(found: Answer, u: Utterance, run_dir, journal: bool) -> Answer:
+    """Record a question it could not answer, so the gap is a fact."""
+    if journal and run_dir is not None and found.source == "none":
+        try:
+            from motherbrain import aware
+
+            aware.journal_for(run_dir).record(u.text, found.source)
+        except Exception:                                 # noqa: BLE001
+            pass
+    return found
 
 
 def _lead_in(u: Utterance) -> str:

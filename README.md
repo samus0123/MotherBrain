@@ -505,6 +505,7 @@ copied the directory to.
 | `mb call` | a telnet client, for machines that ship without one |
 | `mb usb` | the whole thing, portable, on a drive |
 | `mb languages` | which programming languages it has actually read |
+| `mb self` | what it can establish about itself, and what it cannot |
 | `mb chat` | one prompt, one completion, nothing else |
 | `mb status` | what is on disk and what to run next |
 
@@ -1387,6 +1388,50 @@ mb patch                             # learn it
 Reading is not learning. A document in the corpus changes nothing until a
 patch is applied, and the two are separate steps because they are separate
 things.
+
+## What it knows about itself
+
+`mb self`, or `S` on the board. It is not consciousness — nothing in
+MotherBrain experiences anything, and no amount of code would change that.
+It is the other thing the phrase means for software: a system that holds an
+accurate model of itself and can answer from it.
+
+**What it is made of.** Walked from the live module tree, not read off the
+config — those have disagreed here before, when a patch added experts and a
+config-derived count went on describing the model it was built from. Every
+parameter is attributed:
+
+```
+  embedding        6,291,456   12.0%  ██
+                16,384 tokens x 384, and the same matrix writes the output back out (tied)
+  experts         28,311,552   54.2%  █████████████
+                3 per mixture layer on 8 of 8 layers, 1 of them run per token
+  perception       5,021,184    9.6%  ██
+  total           52,222,872
+```
+
+**How it works.** It ships its own source and can open it. Asked how it does
+arithmetic, it finds `motherbrain/logic.py` and reads out what that file says
+about itself — which cannot go stale, and cannot be a plausible invention
+about a codebase the model has never seen.
+
+**Where it came from.** Every version, what each patch cost and what it
+bought, from v0's 18.9M to v5's 52.2M.
+
+**What it is bad at.** Measured, beside the chance rate, with a verdict that
+follows from the number: `sight 22.7% (7x chance) — above chance, and wrong
+most of the time`. That rule lives in one place so no screen can drift into
+optimism.
+
+**What it does not know.** Every question it could not answer is written
+down, counted, and reported back. Ask it about a word that does not exist and
+it says so; ask it later what it gets wrong and that question is in the list.
+That is the part that makes this more than a status page — a system that
+cannot tell you where it fell short has a brochure, not a model of itself.
+
+None of it is generated. A test asserts the self-report never reaches for the
+sampler, because a model of yourself assembled by a sampler is not a model of
+yourself.
 
 ## Honest limits
 
