@@ -1,5 +1,8 @@
 torch>=2.0
 numpy>=1.24
+# Needed by everything that sees: the shapes the perception tower was
+# trained on are drawn with it, and images are read with it.
+Pillow>=10.0
 fastapi>=0.110
 uvicorn[standard]>=0.27
 pydantic>=2.0

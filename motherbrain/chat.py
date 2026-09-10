@@ -152,8 +152,8 @@ def consider(text: str, run_dir) -> tuple[str, str] | None:
     model would answer the same question fluently and without reference to
     anything it was told.
     """
-    from motherbrain.knowledge import (Knowledge, parse_question,
-                                       parse_statement)
+    from motherbrain.knowledge import (Knowledge, parse_about,
+                                       parse_question, parse_statement)
 
     stripped = text.strip()
     if not stripped:
@@ -180,6 +180,17 @@ def consider(text: str, run_dir) -> tuple[str, str] | None:
             # nothing at all is known, this was not really a question for the
             # knowledge base.
             return "fact", answer.render()
+        return None
+
+    subject = parse_about(stripped)
+    if subject is not None:
+        base = Knowledge(run_dir, create=False)
+        if base.facts or base.rules:
+            found = base.about(subject)
+            if found.known:
+                return "fact", found.render()
+        # Nothing held about it: this is a question for the model, not a
+        # place to say "I do not know" about a subject nobody mentioned.
         return None
 
     statement = parse_statement(stripped)

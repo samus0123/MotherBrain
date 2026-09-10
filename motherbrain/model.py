@@ -73,7 +73,7 @@ class Attention(nn.Module):
         self.wv = nn.Linear(cfg.d_model, cfg.n_kv_heads * cfg.head_dim, bias=False)
         self.wo = nn.Linear(cfg.n_heads * cfg.head_dim, cfg.d_model, bias=False)
 
-    def forward(self, x, cos, sin, cache: dict | None = None):
+    def forward(self, x, cos, sin, cache: dict | None = None, mask=None):
         b, t, _ = x.shape
         q = self.wq(x).view(b, t, self.n_heads, self.head_dim).transpose(1, 2)
         k = self.wk(x).view(b, t, self.n_kv_heads, self.head_dim).transpose(1, 2)
@@ -93,12 +93,23 @@ class Attention(nn.Module):
 
         # With a cache the query is short and the keys are long, so the plain
         # causal mask no longer lines up; only mask when we have a full block.
-        is_causal = t > 1
-        out = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=is_causal,
-        )
+        #
+        # `mask`, when given, replaces that entirely. It is what makes batched
+        # inference possible: prompts of different lengths are padded to a
+        # common width, and the mask is what stops a row attending to the
+        # padding beside it. RoPE needs no adjustment for the padding because
+        # it encodes relative position - shifting a whole row by the same
+        # amount leaves every difference between its positions unchanged.
+        if mask is not None:
+            out = F.scaled_dot_product_attention(
+                q, k, v, attn_mask=mask,
+                dropout_p=self.dropout if self.training else 0.0)
+        else:
+            out = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=t > 1,
+            )
         out = out.transpose(1, 2).contiguous().view(b, t, -1)
         return self.wo(out)
 
@@ -204,8 +215,8 @@ class Block(nn.Module):
         self.ffn = MoE(cfg) if self.is_moe else SwiGLU(cfg.d_model, cfg.d_ff)
         self.drop = nn.Dropout(cfg.dropout)
 
-    def forward(self, x, cos, sin, cache=None):
-        x = x + self.drop(self.attn(self.attn_norm(x), cos, sin, cache))
+    def forward(self, x, cos, sin, cache=None, mask=None):
+        x = x + self.drop(self.attn(self.attn_norm(x), cos, sin, cache, mask))
         x = x + self.drop(self.ffn(self.ffn_norm(x)))
         return x
 
@@ -279,7 +290,7 @@ class MotherBrain(nn.Module):
 
     def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None,
                 caches: list | None = None, offset: int = 0,
-                images: torch.Tensor | None = None):
+                images: torch.Tensor | None = None, mask=None):
         """Run the model. `images` prepends visual tokens to the sequence.
 
         Once an image has been through the vision tower it is a run of vectors
@@ -304,7 +315,8 @@ class MotherBrain(nn.Module):
         cos, sin = self._rope(x.shape[1], offset, x.device, torch.float32)
 
         for i, block in enumerate(self.blocks):
-            x = block(x, cos, sin, caches[i] if caches is not None else None)
+            x = block(x, cos, sin, caches[i] if caches is not None else None,
+                      mask)
         x = self.norm(x)
 
         # The visual positions were context, not something to predict.

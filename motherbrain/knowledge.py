@@ -33,12 +33,20 @@ class Fact:
     relation: str
     object: str
 
+    # A rule is told in the plural ("all devices need power") and a fact
+    # derived from it is about one thing, so the verb has to come back to the
+    # singular or a correct derivation reads as broken English.
+    _AGREES = {"have": "has", "need": "needs", "cannot": "cannot",
+               "like": "likes", "know": "knows", "own": "owns",
+               "use": "uses", "contain": "contains", "beat": "beats"}
+
     def __str__(self) -> str:
         if self.relation == "is":
             return f"{self.subject} is {self.object}"
         if self.relation == "is a":
             return f"{self.subject} is a {self.object}"
-        return f"{self.subject} {self.relation} {self.object}"
+        verb = self._AGREES.get(self.relation, self.relation)
+        return f"{self.subject} {verb} {self.object}"
 
     def as_list(self) -> list[str]:
         return [self.subject, self.relation, self.object]
@@ -74,12 +82,15 @@ class Derivation:
     holds: bool
     known: bool                      # False means "nothing follows either way"
     steps: list[str] = field(default_factory=list)
+    # An open question ("what is a modem") is not a yes/no question, and
+    # answering one with "Yes." reads as a machine that did not understand it.
+    lead: str = ""
 
     def render(self) -> str:
         if not self.known:
             return ("I do not know. Nothing I have been told settles it, and I "
                     "will not guess.")
-        head = "Yes." if self.holds else "No."
+        head = self.lead or ("Yes." if self.holds else "No.")
         if not self.steps:
             return head
         return head + "\n  " + "\n  ".join(self.steps)
@@ -203,6 +214,31 @@ _QUESTION = re.compile(
     r"(?:an?\s+)?(?P<object>[\w -]+?)\??$"
     r"|^(?:can|does)\s+(?:an?\s+)?(?P<subject2>[\w -]+?)\s+"
     r"(?P<object2>[\w -]+?)\??$")
+
+
+# An open question: not "is a modem a device" but "what is a modem" - tell
+# me everything you have about this one thing. It is the first thing anybody
+# types after telling it something, and answering it with generated prose is
+# precisely the dishonesty this module exists to avoid.
+_ABOUT = re.compile(
+    r"^(?:what(?:'?s| is| are)\s+(?:an?\s+)?(?P<a>[\w -]+?)"
+    r"|(?:tell me|what do you know)\s+about\s+(?:an?\s+)?(?P<b>[\w -]+?)"
+    r"|who\s+(?:is|was)\s+(?P<c>[\w -]+?))\??$", re.IGNORECASE)
+
+
+def parse_about(text: str) -> str | None:
+    """The subject of an open question, or None if it is not one."""
+    m = _ABOUT.match(_tidy(text).strip())
+    if not m:
+        return None
+    name = m.group("a") or m.group("b") or m.group("c") or ""
+    name = _bare(name)
+    # "what is it", "what are you" - pronouns are not subjects it holds
+    # facts about, and answering them from the knowledge base would be worse
+    # than passing them on.
+    if name in ("it", "this", "that", "you", "i", "me", "there", "the time"):
+        return None
+    return name or None
 
 
 def parse_question(text: str):
@@ -331,6 +367,28 @@ class Knowledge:
         return Derivation(False, False)
 
     # -- reporting --
+
+    def about(self, name: str) -> Derivation:
+        """Everything held about one subject, told and derived, with reasons."""
+        name = _bare(name)
+        known, because = self.closure()
+        told, follows = [], []
+        for fact in sorted(known, key=str):
+            if singular(fact.subject) != singular(name):
+                continue
+            if fact in self.facts:
+                told.append(f"I was told {fact}.")
+            else:
+                follows.append(f"{because[fact]}, so {fact}.")
+        # A rule about the thing itself is worth saying even with no facts.
+        for rule in self.rules:
+            if singular(rule.when) == singular(name):
+                told.append(f"I was told {rule}.")
+        if not told and not follows:
+            return Derivation(False, False)
+        return Derivation(True, True, told + follows,
+                          lead=f"Here is everything I have been told about "
+                               f"{name}, and what follows from it.")
 
     def summary(self) -> str:
         known, because = self.closure()
