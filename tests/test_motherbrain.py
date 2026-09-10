@@ -4477,3 +4477,80 @@ def test_it_describes_itself_as_what_it_is():
     for part in ("knowledge base", "calculator", "perception", "reasoning"):
         assert part in said, f"it did not mention its {part}"
     assert "labelled" in said, "it did not say answers carry their source"
+
+
+# ---- the USB drive ----------------------------------------------------------
+
+def test_a_usb_drive_carries_everything_and_leaves_nothing(tmp_path, served):
+    """The promise is that the computer is as it was when you pull it out."""
+    from motherbrain.usb import build
+
+    run, corpus = served
+    drive = tmp_path / "drive"
+    build(drive, str(run), str(corpus), device="cpu")
+
+    for name in ("MOTHERBRAIN.bat", "MOTHERBRAIN.command", "motherbrain.sh",
+                 "autorun.inf", "START HERE.txt"):
+        assert (drive / name).is_file(), f"{name} is not on the drive"
+    assert (drive / "MotherBrain" / "motherbrain" / "bbs.py").is_file()
+    assert (drive / "MotherBrain" / "runs" / "default" / "tokenizer.json"
+            ).is_file()
+
+    # Everything the program writes has to be pointed back at the drive.
+    for launcher in ("MOTHERBRAIN.bat", "motherbrain.sh"):
+        text = (drive / launcher).read_text()
+        assert "MB_WORKSPACE" in text, f"{launcher} does not set the workspace"
+        assert "PYTHONPYCACHEPREFIX" in text, \
+            f"{launcher} leaves bytecode on the host"
+        assert "PIP_CACHE_DIR" in text, f"{launcher} leaves a pip cache behind"
+        assert ".venv" in text, f"{launcher} does not build on the drive"
+
+    # A shell script with CRLF in it dies with "bad interpreter".
+    assert b"\r\n" not in (drive / "motherbrain.sh").read_bytes()
+    assert b"\r\n" not in (drive / "MOTHERBRAIN.command").read_bytes()
+    assert b"\r\n" in (drive / "MOTHERBRAIN.bat").read_bytes(), \
+        "a .bat with bare LF confuses older cmd.exe"
+
+    import os
+    assert os.access(drive / "motherbrain.sh", os.X_OK)
+    assert os.access(drive / "MOTHERBRAIN.command", os.X_OK)
+
+
+def test_the_drive_is_honest_about_not_opening_itself(tmp_path, served):
+    """AutoRun on removable media has been off since 2011 and no file on a
+    drive can turn it back on. Saying otherwise on the tin is the one thing
+    that would make this untrustworthy."""
+    from motherbrain.usb import build
+
+    run, corpus = served
+    drive = tmp_path / "drive"
+    build(drive, str(run), str(corpus), device="cpu")
+
+    text = (drive / "START HERE.txt").read_text()
+    assert "No, and nothing on this drive can make it." in text
+    assert "2011" in text and "Conficker" in text
+
+    # And the opt-in installers say what they will do, and can be undone.
+    for name in ("windows", "linux", "macos"):
+        suffix = "cmd" if name == "windows" else "sh"
+        installer = drive / "autostart" / f"{name}-install.{suffix}"
+        undo = drive / "autostart" / f"{name}-uninstall.{suffix}"
+        assert installer.is_file() and undo.is_file(), name
+        body = installer.read_text()
+        assert "changes this" in body.lower() or "changes THIS" in body, \
+            f"{name} does not say whose machine it changes"
+        assert "uninstall" in body, f"{name} does not point at its undo"
+
+
+def test_the_board_carries_every_console_option():
+    """The board is the console plus a board, not a different program."""
+    from motherbrain.bbs import BOARD_COMMANDS, CONSOLE_OPTIONS, HANDLERS
+    from motherbrain.voice import MENU
+
+    for key, label in CONSOLE_OPTIONS:
+        assert key in HANDLERS, f"option {key} is on the menu and does nothing"
+        assert label in MENU, f"{label} is not the console's wording"
+
+    # And chatting with it is one of the board's own commands.
+    letters = {key for key, _label, _sl in BOARD_COMMANDS}
+    assert "C" in letters and HANDLERS["C"].__name__ == "chat_with_motherbrain"

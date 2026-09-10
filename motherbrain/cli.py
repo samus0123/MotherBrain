@@ -829,6 +829,72 @@ def cmd_bootstrap(args) -> int:
 # console
 
 
+def cmd_wait(args) -> int:
+    """Wait until something is listening on a port, then return.
+
+    The USB launchers start the board and dial it. Dialling a socket that
+    has not finished binding yet fails, and a launcher that fails on the
+    first run of the day is a launcher nobody trusts again.
+    """
+    import socket
+    import time as _time
+
+    deadline = _time.time() + args.timeout
+    while _time.time() < deadline:
+        try:
+            with socket.create_connection((args.host, args.port), 1.0):
+                return 0
+        except OSError:
+            _time.sleep(0.3)
+    print(f"nothing answered on {args.host}:{args.port} within "
+          f"{args.timeout:.0f}s", file=sys.stderr)
+    return 1
+
+
+def cmd_usb(args) -> int:
+    """Lay out a complete, portable MotherBrain on a USB drive."""
+    from motherbrain.usb import build, size_on_disk
+
+    dest = Path(args.dest).expanduser()
+    if dest.exists() and any(dest.iterdir()) and not args.force:
+        existing = dest / "MotherBrain"
+        if not existing.exists():
+            print(f"{dest} is not empty and has no MotherBrain on it "
+                  f"already.\n"
+                  f"Pass --force if you meant this one.", file=sys.stderr)
+            return 1
+
+    print(f"Building MotherBrain on {dest} ...")
+    done = build(dest, args.run, args.corpus, device=args.device,
+                 with_corpus=args.with_corpus, label=args.label)
+    for item in done:
+        print(f"  {item}")
+
+    total = size_on_disk(dest)
+    print(f"\n{total / 1e6:,.0f} MB on the drive.\n")
+    print("On the drive now:")
+    print("  MOTHERBRAIN.bat        Windows: double-click it")
+    print("  MOTHERBRAIN.command    macOS: double-click it")
+    print("  motherbrain.sh         Linux: run it")
+    print("  START HERE.txt         what it is, and what it will not do")
+    print("  autostart/             opt-in installers, one per platform")
+    print()
+    print("It will not open by itself when you plug it in, and nothing on a")
+    print("drive can make it: Windows switched AutoRun off for removable")
+    print("media in 2011, macOS never had it, and Linux only offers to open")
+    print("a file manager. The drive gets a name and an icon, opening it")
+    print("puts the launcher in front of you, and autostart/ sets up the")
+    print("real thing on a machine you own, once, knowingly.")
+    return 0
+
+
+def cmd_call(args) -> int:
+    """Dial a bulletin board. Windows and macOS ship without a telnet client."""
+    from motherbrain.client import call
+
+    return call(args.host, args.port, terminal=args.term)
+
+
 def cmd_doors(args) -> int:
     """Play the board's door games at this keyboard, with no board."""
     from motherbrain.localterm import play
@@ -2348,6 +2414,35 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--export", help="where to write the merged model")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_sight)
+
+    s = common(sub.add_parser(
+        "usb", help="put a complete, portable MotherBrain on a USB drive"))
+    s.add_argument("dest", help="the drive, e.g. /media/usb or E:\\")
+    s.add_argument("--with-corpus", action="store_true",
+                   help="also copy the corpus. Large, and only needed to "
+                        "learn something new or to quote what it has read")
+    s.add_argument("--label", default="MOTHERBRAIN",
+                   help="the drive's name in Explorer and Finder")
+    s.add_argument("--force", action="store_true",
+                   help="write into a directory that already has things in it")
+    s.add_argument("--device", default="cpu")
+    s.set_defaults(func=cmd_usb)
+
+    s = sub.add_parser(
+        "wait", help="wait until a port answers (the USB launchers use it)")
+    s.add_argument("port", type=int, default=23, nargs="?")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--timeout", type=float, default=180.0)
+    s.set_defaults(func=cmd_wait)
+
+    s = sub.add_parser(
+        "call", help="dial a bulletin board (a telnet client, built in)")
+    s.add_argument("host", nargs="?", default="127.0.0.1")
+    s.add_argument("port", nargs="?", type=int, default=23)
+    s.add_argument("--term", default="xterm-256color",
+                   help="terminal type to announce. `ansi-bbs` asks for code "
+                        "page 437, as a period client would")
+    s.set_defaults(func=cmd_call)
 
     s = common(sub.add_parser(
         "doors", help="play the BBS door games here, without the BBS"))
