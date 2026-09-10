@@ -327,6 +327,8 @@ class Board:
         self._node = 0
         self._stats: dict = {}
         self._stats_at = 0.0
+        self._engine = None
+        self.max_batch = 8
 
     # -- storage --------------------------------------------------------------
 
@@ -394,27 +396,28 @@ class Board:
 
     async def generate(self, prompt: str, max_tokens: int | None = None,
                        temperature: float = 0.8) -> str:
-        """Continue a prompt, off the event loop so other nodes keep moving."""
+        """Continue a prompt, through the batching engine.
+
+        Callers arrive independently, so on a busy board several are waiting
+        on the model at any moment. Running them one after another costs one
+        generation each; running them in one batch costs about one
+        generation for the lot, because the arithmetic is the same matrices
+        either way. That is the difference between a board that seats eight
+        and one that seats hundreds.
+        """
         if self.model is None:
             return ""
 
-        def work() -> str:
-            import torch
+        from motherbrain.inference import Request
 
-            from motherbrain.tokenizer import EOS_ID
-
-            ids = torch.tensor([self.tok.encode(prompt, bos=True)],
-                               device=self.torch_device)
-            out = []
-            for token in self.model.generate(
-                    ids, max_new_tokens=max_tokens or self.max_tokens,
-                    temperature=temperature, top_k=40, top_p=0.95,
-                    repetition_penalty=1.15, eos_id=EOS_ID):
-                out.append(self.tok.decode([token]))
-            return "".join(out)
-
-        async with self.busy():
-            return await asyncio.to_thread(work)
+        self.waiting += 1
+        try:
+            return await self.engine.submit(Request(
+                prompt, max_new_tokens=max_tokens or self.max_tokens,
+                temperature=temperature, top_k=40, top_p=0.95,
+                repetition_penalty=1.15))
+        finally:
+            self.waiting -= 1
 
     async def answer(self, text: str, caller: Caller) -> tuple[str, str]:
         """The honest answering order: computed, known, self, then generated.
@@ -488,6 +491,19 @@ class Board:
                 yield
         finally:
             self.waiting -= 1
+
+    @property
+    def engine(self):
+        """The batching engine, made on first use so it binds this loop."""
+        from motherbrain.inference import Engine
+
+        if self._engine is None:
+            from motherbrain.tokenizer import EOS_ID
+
+            self._engine = Engine(self.model, self.tok, self.torch_device,
+                                  eos_id=EOS_ID, max_batch=self.max_batch)
+            self._engine.start()
+        return self._engine
 
     def queued(self) -> int:
         """How many callers are ahead of you for the model. Nought, usually."""
@@ -1030,7 +1046,10 @@ async def option_patch(caller: Caller) -> None:
         await caller.line(f"  {A.HR}nothing was learned.{A.RESET}")
     else:
         await asyncio.to_thread(board.load)
-        await board.refresh_stats()
+        if board._engine is not None:
+            await board._engine.stop()
+            board._engine = None                  # the next call builds one
+        await board.refresh_stats()               # around the new weights
         from motherbrain.stats import human
         await caller.line(f"  {A.HG}v{version.parent} -> v{version.version}"
                           f"{A.RESET}: {human(version.params_before)} -> "

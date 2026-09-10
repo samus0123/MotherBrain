@@ -829,6 +829,61 @@ def cmd_bootstrap(args) -> int:
 # console
 
 
+def cmd_infer(args) -> int:
+    """Run MotherBrain as an inference model: many prompts, batched.
+
+    `mb chat` is one prompt for a person to watch. This is the other job -
+    a file of prompts, or a benchmark - where what matters is that all of
+    them are through the model as quickly as the arithmetic allows, and
+    that the number is printed rather than claimed.
+    """
+    import json as _json
+
+    from motherbrain.inference import run
+    from motherbrain.tokenizer import EOS_ID
+
+    prompts: list[str] = list(args.prompt or [])
+    if args.file:
+        text = Path(args.file).expanduser().read_text(encoding="utf-8")
+        prompts += [line for line in text.splitlines() if line.strip()]
+    if not prompts and not sys.stdin.isatty():
+        prompts += [line for line in sys.stdin.read().splitlines()
+                    if line.strip()]
+    if args.repeat > 1:
+        prompts = prompts * args.repeat
+    if not prompts:
+        print("no prompts. Pass them as arguments, with --file, or on stdin:\n"
+              "    mb infer 'def add(' 'class Widget'\n"
+              "    mb infer --file prompts.txt --batch-size 16\n"
+              "    printf 'def a(\\ndef b(\\n' | mb infer", file=sys.stderr)
+        return 1
+
+    model, tok, device, version = load_current(args.run, args.device)
+    print(f"v{version}, {human(model.n_params())} parameters, on {device}",
+          file=sys.stderr)
+
+    outputs, measured = run(
+        model, tok, prompts, device, batch_size=args.batch_size,
+        max_new_tokens=args.max_tokens, temperature=args.temperature,
+        top_k=args.top_k, top_p=args.top_p,
+        repetition_penalty=args.repetition_penalty,
+        eos_id=None if args.ignore_eos else EOS_ID)
+
+    if args.json:
+        for prompt, completion in zip(prompts, outputs):
+            print(_json.dumps({"prompt": prompt, "completion": completion}))
+    else:
+        rule = "─" * 60
+        for prompt, completion in zip(prompts, outputs):
+            print(rule)
+            print(f"{prompt}{completion}")
+        print(rule)
+    print(measured.render(), file=sys.stderr)
+    print("These are continuations, not answers. A base model completes text.",
+          file=sys.stderr)
+    return 0
+
+
 def cmd_bbs(args) -> int:
     """Answer the telephone: MotherBrain as a 1980s bulletin board."""
     from motherbrain.bbs import serve
@@ -2303,6 +2358,28 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_sight)
 
     s = common(sub.add_parser(
+        "infer", help="run many prompts through the model at once, and time it"))
+    s.add_argument("prompt", nargs="*", help="prompts to complete")
+    s.add_argument("--file", help="a file of prompts, one per line")
+    s.add_argument("--batch-size", type=int, default=8,
+                   help="prompts per forward pass. Larger is faster until "
+                        "memory runs out")
+    s.add_argument("--max-tokens", type=int, default=120)
+    s.add_argument("--temperature", type=float, default=0.8,
+                   help="0 for greedy, which is reproducible")
+    s.add_argument("--top-k", type=int, default=40)
+    s.add_argument("--top-p", type=float, default=0.95)
+    s.add_argument("--repetition-penalty", type=float, default=1.0)
+    s.add_argument("--repeat", type=int, default=1,
+                   help="run the same prompts N times, to benchmark")
+    s.add_argument("--ignore-eos", action="store_true",
+                   help="generate the full budget even past the end token")
+    s.add_argument("--json", action="store_true",
+                   help="one JSON object per line, for a pipeline")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_infer)
+
+    s = common(sub.add_parser(
         "bbs", help="run MotherBrain as a telnet bulletin board (port 23)"))
     s.add_argument("--host", default="127.0.0.1",
                    help="interface to answer on. Loopback by default: telnet "
@@ -2400,6 +2477,14 @@ def main(argv=None) -> int:
             stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError, OSError):
             pass
+
+    # `mb` on its own opens the menu. A program whose job is to start
+    # MotherBrain should start it, not answer "run me" with a list of flags -
+    # and this is what a desktop shortcut or a double-click passes.
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:
+        argv = ["console"]
 
     args = build_parser().parse_args(argv)
     try:

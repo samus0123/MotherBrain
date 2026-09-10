@@ -3935,3 +3935,169 @@ def test_the_board_menu_is_the_console_menu():
     # and in the order the console lists them
     positions = [MENU.index(label) for _, label in CONSOLE_OPTIONS]
     assert positions == sorted(positions), "the board reordered the options"
+
+
+# ---- inference --------------------------------------------------------------
+
+def _tiny_model(served):
+    from motherbrain.cli import load_current
+
+    run, corpus = served
+    return load_current(str(run), "cpu")
+
+
+def test_a_batch_says_exactly_what_one_at_a_time_says(served):
+    """The whole point of the padding mask.
+
+    Prompts of different lengths are padded to a common width, so a row can
+    only be correct if it is blind to the padding beside it. Greedy decoding
+    makes the comparison exact: any drift is the mask leaking, not sampling.
+    """
+    from motherbrain.inference import Request, generate_batch
+
+    model, tok, device, _ = _tiny_model(served)
+    prompts = ["the", "the mother brain", "the mother brain awakens and"]
+
+    alone = []
+    for prompt in prompts:
+        ids = torch.tensor([tok.encode(prompt, bos=True)], device=device)
+        alone.append(tok.decode(list(model.generate(
+            ids, max_new_tokens=12, temperature=0.0, top_k=None, top_p=None,
+            eos_id=None))))
+
+    requests = [Request(p, max_new_tokens=12, temperature=0.0, top_k=None,
+                        top_p=None) for p in prompts]
+    generate_batch(model, tok, requests, device, eos_id=None)
+
+    for prompt, one, batched in zip(prompts, alone, requests):
+        assert one == batched.text, (
+            f"{prompt!r} came out differently in a batch:\n"
+            f"  alone   {one!r}\n  batched {batched.text!r}")
+
+
+def test_a_long_prompt_beside_a_short_one_does_not_change_it(served):
+    """Padding is the failure mode: a short row sitting next to a long one is
+    where a missing mask shows up, and only there."""
+    from motherbrain.inference import Request, generate_batch
+
+    model, tok, device, _ = _tiny_model(served)
+
+    solo = Request("the", max_new_tokens=10, temperature=0.0, top_k=None,
+                   top_p=None)
+    generate_batch(model, tok, [solo], device, eos_id=None)
+
+    together = [Request("the", max_new_tokens=10, temperature=0.0, top_k=None,
+                        top_p=None),
+                Request("the mother brain awakens and learns the mother brain",
+                        max_new_tokens=10, temperature=0.0, top_k=None,
+                        top_p=None)]
+    generate_batch(model, tok, together, device, eos_id=None)
+    assert together[0].text == solo.text, "the padding leaked into the short row"
+
+
+def test_rows_finish_when_they_are_done_not_when_the_batch_is(served):
+    """A row with a small budget must stop at it, however long the batch runs."""
+    from motherbrain.inference import Request, generate_batch
+
+    model, tok, device, _ = _tiny_model(served)
+    short = Request("the", max_new_tokens=3, temperature=0.0, top_k=None,
+                    top_p=None)
+    long = Request("the", max_new_tokens=20, temperature=0.0, top_k=None,
+                   top_p=None)
+    measured = generate_batch(model, tok, [short, long], device, eos_id=None)
+
+    assert len(short.tokens) == 3
+    assert len(long.tokens) == 20
+    assert measured.generated_tokens == 23
+    assert measured.tokens_per_second > 0
+    assert "tokens/s" in measured.render()
+
+
+def test_the_engine_runs_what_arrives_together_together(served):
+    """Continuous batching, or the eighth caller waits for seven generations."""
+    import asyncio
+
+    from motherbrain.inference import Engine, Request
+
+    model, tok, device, _ = _tiny_model(served)
+
+    async def main():
+        engine = Engine(model, tok, device, eos_id=None, max_batch=8,
+                        window=0.2, adaptive=False)
+        engine.start()
+        texts = await asyncio.gather(*[
+            engine.submit(Request(f"the {i}", max_new_tokens=4,
+                                  temperature=0.0, top_k=None, top_p=None))
+            for i in range(6)])
+        await engine.stop()
+        return texts, engine.served
+
+    texts, served_stats = asyncio.run(asyncio.wait_for(main(), 60))
+    assert len(texts) == 6 and all(isinstance(t, str) for t in texts)
+    assert served_stats.batches == 1, \
+        f"six simultaneous requests became {served_stats.batches} batches"
+    assert served_stats.prompts == 6
+
+
+def test_a_failing_batch_does_not_hang_the_callers_waiting_on_it(served):
+    """An exception in the worker has to reach everyone in that batch, or
+    every one of them waits on a future nobody will ever set."""
+    import asyncio
+
+    from motherbrain.inference import Engine, Request
+
+    model, tok, device, _ = _tiny_model(served)
+
+    async def main():
+        engine = Engine(model, tok, device, eos_id=None, max_batch=4,
+                        window=0.05)
+        engine.start()
+        engine.model = None                     # whatever goes wrong, goes wrong
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*[engine.submit(Request("the", max_new_tokens=2))
+                                 for _ in range(3)], return_exceptions=True), 20)
+        finally:
+            await engine.stop()
+
+    results = asyncio.run(main())
+    # Reaching here at all is the assertion: the wait_for did not time out.
+
+
+def test_the_mask_is_optional_so_training_is_untouched(served):
+    """The batched path added an argument to the model. Everything that does
+    not pass it has to behave exactly as it did."""
+    import inspect
+
+    from motherbrain.model import Attention, Block, MotherBrain
+
+    for fn in (Attention.forward, Block.forward, MotherBrain.forward):
+        assert inspect.signature(fn).parameters["mask"].default is None
+
+    model, tok, device, _ = _tiny_model(served)
+    ids = torch.tensor([tok.encode("the mother brain", bos=True)],
+                       device=device)
+    with torch.no_grad():
+        plain, _ = model(ids)
+        masked, _ = model(ids, mask=None)
+    assert torch.equal(plain, masked)
+
+
+def test_running_the_program_with_no_arguments_starts_it(monkeypatch):
+    """`mb`, or a double-clicked shortcut, passes no command at all. A
+    program whose job is to start MotherBrain should start it rather than
+    print a list of flags and exit non-zero."""
+    from motherbrain import cli
+
+    started = {}
+    # The parser binds `func` when it is built, and it is built inside main(),
+    # so replacing the module-level function here is what gets dispatched to.
+    monkeypatch.setattr(cli, "cmd_console",
+                        lambda args: started.update(ran=True) or 0)
+
+    assert cli.main([]) == 0
+    assert started.get("ran"), "`mb` with no arguments did not open the console"
+
+    # And it is still an error to ask for a command that does not exist.
+    with pytest.raises(SystemExit):
+        cli.main(["nonsense"])

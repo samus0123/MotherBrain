@@ -486,16 +486,30 @@ nothing to train first:
 
 ```bash
 pip install -e .        # installs deps and the `mb` command
-mb gui                  # a window; or mb console, or mb serve
+mb                      # the menu; or mb gui, or mb bbs
 ```
+
+`mb` with no command opens the console menu. So does `python -m motherbrain`,
+which needs nothing installed at all — useful on a machine you have just
+copied the directory to.
 
 | command | what you get |
 | --- | --- |
-| `mb gui` | a desktop window: the four options as buttons, voice, images |
-| `mb console` | the same four options in the terminal |
+| `mb` / `mb console` | the five options, in this terminal |
+| `mb gui` | a desktop window: the same options as buttons, voice, images |
+| `mb bbs` | a 1980s bulletin board, on telnet. `telnet 127.0.0.1 23` |
 | `mb serve` | HTTP for your IDEs, and a browser console at `/` |
+| `mb infer` | many prompts at once, batched, with the throughput printed |
 | `mb chat` | one prompt, one completion, nothing else |
 | `mb status` | what is on disk and what to run next |
+
+On Windows the same four, without installing:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install.ps1
+powershell -ExecutionPolicy Bypass -File scripts\gui.ps1     # the window
+powershell -ExecutionPolicy Bypass -File scripts\bbs.ps1     # the board
+```
 
 `mb bootstrap` is a different thing: it starts a **new** lineage from your own
 corpus, replacing the committed one. You want it only if you are training your
@@ -1169,6 +1183,94 @@ spacing before a new definition. What it does not write is *correct* code, and
 at this size it will not. It is a real language model that has learned the
 shape of Python from 53M tokens; it is not a coding assistant. Scale and
 corpus are the only cure, and `mb train` is how you apply them.
+
+## The bulletin board
+
+`mb bbs` answers telnet on port 23 with MotherBrain as a 1980s BBS. The main
+menu is the console's, unchanged; around it is the board.
+
+```bash
+mb bbs                    # loopback, port 23 (needs root, see below)
+mb bbs --port 2323        # no privilege needed
+sh scripts/bbs.sh 2323    # the same, and it explains itself if it cannot
+
+telnet 127.0.0.1 2323     # then call it
+```
+
+Port 23 is privileged on every Unix and needs an elevated prompt on Windows.
+Three ways up, best first: use `--port 2323`; give your Python the capability
+(`sudo setcap 'cap_net_bind_service=+ep' "$(readlink -f "$(which python3)")"`);
+or run the board as root. `scripts/bbs.sh` and `scripts/bbs.ps1` print
+whichever of those applies to the machine you are on.
+
+| key | what it is |
+| --- | --- |
+| `1`–`5` | the five things MotherBrain does. The console's menu, in order |
+| `C` | chat, with every answer labelled computed / known / from state / generated |
+| `T` | teleconference: rooms across nodes, `/join /who /me /ask` |
+| `D` | five doors: HAMURABI, GUESS, THE MAZE, THE ORACLE, TURING |
+| `F` | the file area, over real XMODEM — or base64 for a plain telnet |
+| `M` `O` | message base and the one-liner wall |
+| `A` | the gallery: a picture in ANSI, and what the perception tower makes of it |
+| `S` `W` `L` `P` | system info, who is online, last callers, page the sysop |
+| `!` | settings — including a baud rate, if you want 2400 back |
+
+It is graphical the way a board was: sixteen colours and the IBM PC's block
+glyphs. A period client that announces itself (SyncTERM, NetRunner, mTelnet)
+gets code page 437; anything else gets UTF-8. Window size and terminal type
+come from the protocol, so the screens are drawn to the width you actually
+have.
+
+**TURING** is the door worth playing. It answers your question twice — once
+from what MotherBrain can actually establish about itself, once by generating
+— and asks which is which. The generated one reads better every time. That is
+the whole problem with a model this size presented as an assistant, and
+playing it is faster than being told.
+
+**What a caller cannot do** is anything that touches the machine the board
+runs on. Running programs, reading files and shell commands are refused
+outright — the same set `mb serve` refuses, for the same reason. Applying a
+patch (option 4) trains the model and is the sysop's key alone. Telnet is
+plaintext and always was, so the board binds loopback unless `--password` is
+given, and going wider goes through the same gate `mb serve` uses.
+
+Measured: 120 callers logged in in 2.6 seconds and the board answered the next
+request instantly. The sockets were never the problem — the model is, which is
+what `mb infer` is about.
+
+## Inference
+
+`mb chat` is one prompt for a person to watch appear. `mb infer` is the other
+job: many prompts through the model as fast as the arithmetic allows.
+
+```bash
+mb infer "def add(" "class Widget" --max-tokens 40
+mb infer --file prompts.txt --batch-size 16 --json
+printf 'def a(\ndef b(\n' | mb infer --repeat 10      # a benchmark
+```
+
+Prompts are left-padded to a common width and a mask keeps each row from
+attending to the padding beside it. RoPE needs no adjustment for that padding
+because it encodes relative position — shifting a whole row by the same amount
+leaves every difference between its positions unchanged.
+
+Measured on this 52.2M model, on a CPU, eight prompts of 32 tokens each:
+
+```
+one at a time :  256 tokens in 2.06s   (124.5 tokens/s)
+batched       :  256 tokens in 0.41s   (617.8 tokens/s)   5.0x
+```
+
+The output is identical either way, and a test asserts that under greedy
+decoding — an inference path that is quick and disagrees with the model it is
+serving is not serving that model.
+
+The board uses the same engine. Requests arriving close together are run
+together, so several callers cost about what one costs. The window it waits
+scales with how long the last batch took: two per cent of a generation to
+halve the number of generations is a trade worth making, and on a fast device
+it stays near zero by itself. What it does not yet do is admit a new request
+into a batch already running — that is the next real gain, and it is not here.
 
 ## Honest limits
 
