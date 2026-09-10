@@ -929,8 +929,12 @@ def cmd_languages(args) -> int:
     if missing and args.missing:
         print(f"\n  never seen: {', '.join(missing)}")
     print(f"\nFeed it more with:  mb feed --path /some/source/tree")
-    print("Then `mb patch` to learn it. Reading is not learning; a "
-          "document\nin the corpus changes nothing until a patch is applied.")
+    print("Then `mb patch` to train on it.\n")
+    print("Reading and training are different things here. What it reads it "
+          "can quote\nback at once, and what you tell it as a fact it keeps "
+          "and reasons from at once.\nWhat does not change until a patch is "
+          "applied is the network: weights only\nmove when an optimiser "
+          "runs, and that is what option 4 and `mb patch` do.")
     return 0
 
 
