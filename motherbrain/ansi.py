@@ -326,3 +326,87 @@ def picture_tensor(tensor, width: int = 60, colours: int = 256) -> str:
         return grid[0][y][x], grid[1][y][x], grid[2][y][x]
 
     return _cells(pixel, width, height, colours)
+
+
+# ---- the vintage look -------------------------------------------------------
+#
+# A 1987 menu did not look like a tidy box. It had a shaded header made of
+# ░▒▓█, a title in a colour that cycled, entries in two colours so the key
+# stood out from the description, a drop shadow under every panel, and a
+# double rule across the bottom with the time left on it. That was the
+# house style of the whole scene, and it is what makes a screen read as a
+# board rather than as a program with borders.
+
+SHADOW = "\x1b[0;30m"          # the shade a panel casts, in dark grey
+
+
+def fade(width: int, palette: tuple[str, ...] = (HB, HC, C, B)) -> str:
+    """The shaded strip that topped a menu: ░ into ▒ into ▓ into █."""
+    step = max(1, width // 4)
+    parts = []
+    for i, glyph in enumerate("░▒▓█"):
+        run = step if i < 3 else width - 3 * step
+        parts.append(palette[i % len(palette)] + glyph * run)
+    return "".join(parts) + RESET
+
+
+def banner(title: str, width: int = 78, subtitle: str = "") -> list[str]:
+    """A menu header the way a board drew one: shading, then the title."""
+    out = [fade(width)]
+    label = f"  {title}  "
+    pad_left = max(0, (width - width_of(label)) // 2)
+    out.append(f"{HB}{'▓' * pad_left}{bg('blue')}{HW}{BOLD}{label}"
+               f"{RESET}{HB}{'▓' * (width - pad_left - width_of(label))}"
+               f"{RESET}")
+    if subtitle:
+        out.append(centre(f"{C}{subtitle}{RESET}", width))
+    out.append(f"{B}{'▀' * width}{RESET}")
+    return out
+
+
+def panel(title: str, lines: list[str], width: int = 74,
+          frame: str = HB, head: str = HY, shadow: bool = True) -> list[str]:
+    """A framed panel with a drop shadow, as every ANSI menu had.
+
+    The shadow is two characters wide on the right and one row deep,
+    drawn in dark grey - which on a black terminal is exactly the effect a
+    1990 artist was after and costs nothing but two columns.
+    """
+    body = box(title, lines, width=width, frame=frame, head=head,
+               style=DOUBLE)
+    if not shadow:
+        return body
+    out = [body[0] + f"{SHADOW}▖{RESET}"]
+    for line in body[1:]:
+        out.append(line + f"{SHADOW}██{RESET}")
+    out.append(" " * 2 + f"{SHADOW}{'▀' * (width)}{RESET}")
+    return out
+
+
+def entry(key: str, label: str, note: str = "", available: bool = True,
+          key_colour: str = HY, label_colour: str = HW,
+          note_colour: str = GREY) -> str:
+    """One menu line: `[K] Label   note`, with the key in its own colour.
+
+    Brackets rather than a bare letter, because that is what a board used
+    and because it is what makes a menu scannable: the eye finds the
+    bracket, not the word.
+    """
+    if not available:
+        return f"{GREY} {key}  {label}{RESET}"
+    line = f"{key_colour}[{HW}{key}{key_colour}]{RESET} {label_colour}{label}"
+    if note:
+        line = f"{line}  {note_colour}{note}"
+    return line + RESET
+
+
+def status(left: str, right: str, width: int = 78,
+           ground: str = "blue") -> str:
+    """The bar along the bottom: who you are on the left, time on the right."""
+    gap = max(1, width - width_of(left) - width_of(right) - 2)
+    return (f"{bg(ground)}{HW} {left}{' ' * gap}{HY}{right} {RESET}")
+
+
+def marquee(text: str, width: int = 78) -> str:
+    """A colour-cycled headline, centred, the way a board titled a screen."""
+    return centre(gradient(text.upper()), width)

@@ -18,11 +18,72 @@ import numpy as np
 
 from motherbrain.tokenizer import BOS_ID, EOS_ID, Tokenizer
 
-TEXT_SUFFIXES = {
-    ".txt", ".md", ".rst", ".json", ".jsonl", ".csv", ".tsv", ".log", ".yaml", ".yml",
-    ".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".c", ".h", ".cpp", ".hpp", ".rs",
-    ".go", ".rb", ".sh", ".sql", ".html", ".css", ".toml", ".ini", ".cfg", ".tex",
+# Every language MotherBrain will take in, by the extension it arrives
+# under. The list is long on purpose: "teach it all programming languages"
+# is a corpus problem, not a model problem, and a corpus that silently
+# skipped Haskell because nobody had put ".hs" in a set would have made it
+# look like the model could not learn Haskell.
+#
+# The name beside each suffix is what the census reports, so a person can
+# see what it has actually read rather than what it was pointed at.
+LANGUAGES = {
+    ".py": "Python", ".pyx": "Cython", ".pyi": "Python",
+    ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript",
+    ".ts": "TypeScript", ".tsx": "TypeScript", ".jsx": "JavaScript",
+    ".java": "Java", ".kt": "Kotlin", ".kts": "Kotlin", ".scala": "Scala",
+    ".groovy": "Groovy", ".clj": "Clojure", ".cljs": "Clojure",
+    ".c": "C", ".h": "C", ".cpp": "C++", ".cc": "C++", ".cxx": "C++",
+    ".hpp": "C++", ".hh": "C++", ".m": "Objective-C", ".mm": "Objective-C",
+    ".cs": "C#", ".fs": "F#", ".fsx": "F#", ".vb": "Visual Basic",
+    ".rs": "Rust", ".go": "Go", ".zig": "Zig", ".d": "D", ".nim": "Nim",
+    ".v": "V", ".cr": "Crystal", ".odin": "Odin",
+    ".rb": "Ruby", ".pl": "Perl", ".pm": "Perl", ".php": "PHP",
+    ".lua": "Lua", ".tcl": "Tcl", ".r": "R", ".jl": "Julia",
+    ".hs": "Haskell", ".lhs": "Haskell", ".ml": "OCaml", ".mli": "OCaml",
+    ".ex": "Elixir", ".exs": "Elixir", ".erl": "Erlang", ".hrl": "Erlang",
+    ".elm": "Elm", ".purs": "PureScript", ".rkt": "Racket",
+    ".scm": "Scheme", ".ss": "Scheme", ".lisp": "Lisp", ".el": "Emacs Lisp",
+    ".f": "Fortran", ".f90": "Fortran", ".f95": "Fortran",
+    ".for": "Fortran",
+    ".pas": "Pascal", ".pp": "Pascal", ".ada": "Ada", ".adb": "Ada",
+    ".cob": "COBOL", ".cbl": "COBOL", ".bas": "BASIC", ".asm": "Assembly",
+    ".s": "Assembly", ".S": "Assembly", ".vhd": "VHDL", ".sv": "SystemVerilog",
+    ".swift": "Swift", ".dart": "Dart", ".sol": "Solidity",
+    ".sh": "Shell", ".bash": "Shell", ".zsh": "Shell", ".fish": "Shell",
+    ".ps1": "PowerShell", ".psm1": "PowerShell", ".bat": "Batch",
+    ".cmd": "Batch", ".awk": "AWK", ".sed": "sed",
+    ".sql": "SQL", ".psql": "SQL", ".hql": "SQL",
+    ".html": "HTML", ".htm": "HTML", ".css": "CSS", ".scss": "SCSS",
+    ".sass": "Sass", ".less": "Less", ".vue": "Vue", ".svelte": "Svelte",
+    ".json": "JSON", ".jsonl": "JSON", ".yaml": "YAML", ".yml": "YAML",
+    ".toml": "TOML", ".ini": "INI", ".cfg": "INI", ".xml": "XML",
+    ".proto": "Protocol Buffers", ".graphql": "GraphQL", ".gql": "GraphQL",
+    ".tf": "Terraform", ".hcl": "HCL", ".dockerfile": "Dockerfile",
+    ".mk": "Make", ".cmake": "CMake", ".gradle": "Gradle",
+    ".tex": "TeX", ".md": "Markdown", ".rst": "reStructuredText",
+    ".txt": "text", ".csv": "data", ".tsv": "data", ".log": "text",
 }
+
+# Files with no extension that are source all the same.
+NAMED_LANGUAGES = {
+    "Makefile": "Make", "makefile": "Make", "GNUmakefile": "Make",
+    "Dockerfile": "Dockerfile", "Containerfile": "Dockerfile",
+    "Rakefile": "Ruby", "Gemfile": "Ruby", "Vagrantfile": "Ruby",
+    "CMakeLists.txt": "CMake", "SConstruct": "Python", "BUILD": "Bazel",
+    "WORKSPACE": "Bazel",
+}
+
+TEXT_SUFFIXES = set(LANGUAGES)
+
+
+def language_of(path) -> str:
+    """What language a file is, by its name. "unknown" if it is not source."""
+    from pathlib import Path as _Path
+
+    path = _Path(path)
+    if path.name in NAMED_LANGUAGES:
+        return NAMED_LANGUAGES[path.name]
+    return LANGUAGES.get(path.suffix.lower(), "unknown")
 
 TOKEN_DTYPE = np.uint32
 
@@ -100,7 +161,10 @@ class Corpus:
         files = chars = 0
         walker = path.rglob("*") if recursive else path.glob("*")
         for p in sorted(walker):
-            if not p.is_file() or p.suffix.lower() not in TEXT_SUFFIXES:
+            if not p.is_file():
+                continue
+            if (p.suffix.lower() not in TEXT_SUFFIXES
+                    and p.name not in NAMED_LANGUAGES):
                 continue
             if any(part in {".git", "node_modules", "__pycache__", ".venv"}
                    for part in p.parts):
