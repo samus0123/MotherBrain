@@ -85,9 +85,17 @@ def _eval(node):
     raise ValueError("not arithmetic")
 
 
+# How a person asks for a sum. Stripped before parsing, because
+# ast.parse("what is 17 * 23") is a syntax error and the answer to a
+# question you can compute exactly should never be generated instead.
+_ASKED = re.compile(
+    r"^(?:what(?:'?s| is| are)|how much is|how many is|calculate|compute|"
+    r"work out|evaluate|solve|tell me)\s+", re.IGNORECASE)
+
+
 def calculate(text: str) -> Result | None:
     """Work out an arithmetic expression, exactly."""
-    expression = text.strip().rstrip("=?").strip()
+    expression = _ASKED.sub("", text.strip(), count=1).rstrip("=?").strip()
     if not expression or not re.search(
             r"[\d)]\s*[-+*/%^]|\d\s+x\s+\d|\bsqrt|\bsin|\bcos|\blog|\bfactorial",
             expression):

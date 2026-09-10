@@ -829,6 +829,17 @@ def cmd_bootstrap(args) -> int:
 # console
 
 
+def cmd_bbs(args) -> int:
+    """Answer the telephone: MotherBrain as a 1980s bulletin board."""
+    from motherbrain.bbs import serve
+
+    return serve(args.run, args.corpus, args.device, host=args.host,
+                 port=args.port, password=args.password,
+                 sysop_password=args.sysop_password, insecure=args.insecure,
+                 max_callers=args.nodes, max_tokens=args.max_tokens,
+                 steps=args.steps, grow=args.grow)
+
+
 def cmd_console(args) -> int:
     """An interactive console: tell MotherBrain what to do, one line at a time.
 
@@ -2290,6 +2301,32 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--export", help="where to write the merged model")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_sight)
+
+    s = common(sub.add_parser(
+        "bbs", help="run MotherBrain as a telnet bulletin board (port 23)"))
+    s.add_argument("--host", default="127.0.0.1",
+                   help="interface to answer on. Loopback by default: telnet "
+                        "is plaintext, so going wider is a deliberate act")
+    s.add_argument("--port", type=int, default=23,
+                   help="23 is telnet's port and needs privilege; 2323 does "
+                        "not")
+    s.add_argument("--password", default=os.environ.get("MB_BBS_PASSWORD"),
+                   help="asked of every caller; required to face a network")
+    s.add_argument("--sysop-password",
+                   default=os.environ.get("MB_BBS_SYSOP"),
+                   help="the key to option 4, which trains the model. Without "
+                        "one, only callers from this machine are the sysop")
+    s.add_argument("--insecure", action="store_true",
+                   help="face a network with no password. Do not")
+    s.add_argument("--nodes", type=int, default=512,
+                   help="how many callers may be connected at once")
+    s.add_argument("--max-tokens", type=int, default=120)
+    s.add_argument("--steps", type=int, default=100,
+                   help="training steps when the sysop applies a patch")
+    s.add_argument("--grow", type=int, default=1,
+                   help="experts added per layer when applying a patch")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_bbs)
 
     s = common(sub.add_parser(
         "workspace",

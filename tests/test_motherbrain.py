@@ -3549,3 +3549,389 @@ def test_every_action_is_refused_over_http(served):
         result = client.post("/command", json={"text": text}).json()
         assert result["kind"] == "error", f"{name} was not refused"
         assert "never over the network" in result["text"]
+
+
+# ---- the bulletin board -----------------------------------------------------
+
+def test_telnet_negotiation_never_loops():
+    """Two machines that re-affirm settled options shout IAC until the socket
+    fills. Answering a confirmation is what starts that."""
+    from motherbrain.telnet import (DO, IAC, OPT_ECHO, OPT_NAWS, OPT_TTYPE,
+                                    WILL, Telnet)
+
+    tn = Telnet()
+    opening = tn.start()
+    assert bytes([IAC, WILL, OPT_ECHO]) in opening
+    assert bytes([IAC, DO, OPT_NAWS]) in opening
+
+    # The client confirms what the board already offered. Silence is correct.
+    assert tn.feed(bytes([IAC, DO, OPT_ECHO])).reply == b""
+    assert tn.feed(bytes([IAC, WILL, OPT_NAWS])).reply == b""
+
+    # Something never offered is declined, once.
+    reply = tn.feed(bytes([IAC, WILL, 99])).reply
+    assert reply == bytes([IAC, 254, 99])
+    assert tn.feed(bytes([IAC, WILL, 99])).reply == b""
+
+    # A terminal type that means "period client" picks the period encoding.
+    from motherbrain.telnet import prefers_cp437
+    got = tn.feed(bytes([IAC, 250, OPT_TTYPE, 0]) + b"SyncTERM"
+                  + bytes([IAC, 240]))
+    assert got.terminal == "SyncTERM" and prefers_cp437(got.terminal)
+    assert not prefers_cp437("xterm-256color")
+
+
+def test_telnet_commands_split_across_packets_still_parse():
+    """A three-byte IAC DO can arrive one byte per segment, and often does."""
+    from motherbrain.telnet import DO, IAC, OPT_SGA, Telnet
+
+    whole = Telnet()
+    whole.start()
+    expected = whole.feed(bytes([IAC, DO, OPT_SGA])).reply
+
+    dribbled = Telnet()
+    dribbled.start()
+    out = b"".join(dribbled.feed(bytes([b])).reply
+                   for b in (IAC, DO, OPT_SGA))
+    assert out == expected
+
+    # And 255 in the data is doubled on the wire, once on the way out.
+    from motherbrain.telnet import escape
+    assert escape(b"\xff\x01") == b"\xff\xff\x01"
+    assert Telnet().feed(b"a\xff\xffb").data == b"a\xffb"
+
+
+def test_a_window_size_that_is_nonsense_is_ignored():
+    """NAWS arrives from whatever is at the far end; 0 columns would divide
+    every layout on the board by zero."""
+    from motherbrain.telnet import IAC, OPT_NAWS, SB, SE, Telnet
+
+    tn = Telnet()
+    tn.feed(bytes([IAC, SB, OPT_NAWS, 0, 0, 0, 0, IAC, SE]))
+    assert (tn.columns, tn.rows) == (80, 24), "it took a zero-width screen"
+    tn.feed(bytes([IAC, SB, OPT_NAWS, 0, 132, 0, 43, IAC, SE]))
+    assert (tn.columns, tn.rows) == (132, 43)
+
+
+def test_xmodem_sends_a_file_its_own_receiver_gets_back():
+    """A transfer protocol you cannot run against a receiver is a guess."""
+    import os
+
+    from motherbrain import xmodem
+
+    for size in (1, 127, 128, 1025, 9000):
+        data = os.urandom(size)
+        sender = xmodem.Sender(data)
+        receiver = xmodem.Receiver(crc=True)
+        out = sender.begin(receiver.start()[0])
+        for _ in range(500):
+            if out is None:
+                break
+            acks = receiver.feed(out)
+            if not acks:
+                break
+            for byte in acks:
+                out = sender.answer(byte)
+            if receiver.done:
+                break
+        assert receiver.done, f"{size} bytes never finished"
+        assert receiver.file(size) == data, f"{size} bytes came back wrong"
+
+
+def test_xmodem_resends_a_block_that_was_naked():
+    """NAK means "again". A sender that advances on NAK drops data silently."""
+    from motherbrain import xmodem
+
+    sender = xmodem.Sender(b"A" * 3000)
+    first = sender.begin(xmodem.CRC_REQUEST)
+    again = sender.answer(xmodem.NAK)
+    assert again == first, "a NAK advanced the block instead of repeating it"
+    nxt = sender.answer(xmodem.ACK)
+    assert nxt != first
+
+    # And the checksum variant is what a receiver asking with NAK gets.
+    plain = xmodem.Sender(b"hello")
+    block = plain.begin(xmodem.NAK)
+    assert plain.crc is False
+    assert len(block) == 3 + 128 + 1
+
+
+def test_ansi_measures_width_without_counting_escapes():
+    """Every panel on the board is padded to a column count. Counting colour
+    codes as characters is how a box comes out ragged."""
+    from motherbrain import ansi as A
+
+    coloured = f"{A.HY}hello{A.RESET}"
+    assert A.width_of(coloured) == 5
+    assert A.width_of(A.pad(coloured, 20)) == 20
+    assert A.visible(A.truncate(coloured, 3)) == "hel"
+
+    for line in A.box("TITLE", [coloured, "x" * 200], width=40):
+        assert A.width_of(line) == 40, repr(A.visible(line))
+
+
+def test_the_logo_is_drawable_on_a_1987_client():
+    """The board offers code page 437 to period clients. A logo drawn with
+    glyphs CP437 does not have would arrive as question marks."""
+    from motherbrain.ansi import _LOGO, SHADE, logo
+
+    _LOGO.encode("cp437")
+    SHADE.encode("cp437")
+    for style in ("┌┐└┘─│├┤", "╔╗╚╝═║╠╣"):
+        style.encode("cp437")
+    assert "\x1b[" in logo()
+
+
+def test_a_picture_needs_no_imaging_library():
+    """The gallery draws from the tensor it already has. Requiring Pillow to
+    turn numbers into coloured blocks would break the half of the board that
+    always works when the optional half is missing."""
+    from motherbrain import ansi as A
+
+    tensor = torch.zeros(3, 32, 32)
+    tensor[0, 8:24, 8:24] = 1.0
+    art = A.picture_tensor(tensor, width=24, colours=256)
+    rows = art.split("\n")
+    assert len(rows) == 12, "two pixels to a cell, so half as many rows"
+    assert all(A.width_of(r) == 24 for r in rows)
+    assert "\x1b[38;5;" in art
+
+    sixteen = A.picture_tensor(tensor, width=24, colours=16)
+    assert "38;5;" not in sixteen, "256-colour escapes sent to a 16-colour client"
+
+
+def test_the_maze_can_always_be_walked_out_of():
+    """Recursive backtracking makes a perfect maze; a caller trapped at the
+    start by a generator bug would look like the door had crashed."""
+    from motherbrain.doors import build_maze, draw_maze
+
+    for seed in range(8):
+        grid = build_maze(9, 6, seed=seed)
+        start, exit_at = (1, 1), (2 * 9 - 1, 2 * 6 - 1)
+        seen = {start}
+        stack = [start]
+        while stack:
+            x, y = stack.pop()
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, ny = x + dx, y + dy
+                if (0 <= ny < len(grid) and 0 <= nx < len(grid[0])
+                        and grid[ny][nx] and (nx, ny) not in seen):
+                    seen.add((nx, ny))
+                    stack.append((nx, ny))
+        assert exit_at in seen, f"seed {seed} walled the exit off"
+
+    drawn = draw_maze(build_maze(4, 3, seed=1), (1, 1), (7, 5))
+    assert "@@" in drawn and "><" in drawn
+
+
+def test_the_file_area_never_offers_what_it_should_not(tmp_path):
+    """A caller picks a number off a list; the list is what has to be safe."""
+    from motherbrain.bbs import listing
+
+    root = tmp_path / "area"
+    (root / ".git").mkdir(parents=True)
+    (root / ".ssh").mkdir()
+    (root / "sub").mkdir()
+    (root / "fine.txt").write_text("ok")
+    (root / "sub" / "also.txt").write_text("ok")
+    (root / ".git" / "secret.txt").write_text("no")
+    (root / ".ssh" / "id_rsa").write_text("no")
+    (root / "server.key").write_text("no")
+
+    names = {p.name for p in listing({"roots": [root], "globs": ["*"]})}
+    assert names == {"fine.txt", "also.txt"}, names
+
+    # A symlink pointing out of the root is resolved and then refused.
+    outside = tmp_path / "outside.txt"
+    outside.write_text("no")
+    try:
+        (root / "escape.txt").symlink_to(outside)
+    except OSError:
+        return
+    names = {p.name for p in listing({"roots": [root], "globs": ["*"]})}
+    assert "outside.txt" not in names and "escape.txt" not in names
+
+
+def test_a_handle_cannot_become_a_path(tmp_path):
+    """Handles name a directory in the file area. Callers choose them."""
+    from motherbrain.bbs import _safe_name
+
+    for nasty in ("../../etc", "a/b", "..", "", "  ", "C:\\windows"):
+        safe = _safe_name(nasty)
+        assert "/" not in safe and "\\" not in safe and safe not in ("", ".", "..")
+        assert (tmp_path / safe).resolve().parent == tmp_path.resolve()
+
+
+def test_the_board_refuses_everything_that_touches_the_machine():
+    """`mb console` runs shell commands because you already have a shell.
+    A telnet caller does not, and giving them one is the whole hole."""
+    import inspect
+
+    from motherbrain import bbs
+    from motherbrain.commands import LOCAL_ONLY, parse
+
+    source = inspect.getsource(bbs.option_do)
+    assert "LOCAL_ONLY" in source, "the refusal is no longer by the shared set"
+    for text in ("sh rm -rf /", "run evil.py", "cat /etc/passwd",
+                 "delete everything", "write /etc/hosts"):
+        assert parse(text).name in LOCAL_ONLY, text
+
+
+class _Dialler:
+    """A telnet client, enough of one to log in to the board."""
+
+    def __init__(self, reader, writer) -> None:
+        self.reader, self.writer, self.seen = reader, writer, ""
+
+    async def read(self, seconds: float = 2.0) -> str:
+        """Everything that arrives, with the protocol's commands taken out."""
+        import asyncio
+
+        out = bytearray()
+        deadline = asyncio.get_running_loop().time() + seconds
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                chunk = await asyncio.wait_for(self.reader.read(4096), 0.25)
+            except asyncio.TimeoutError:
+                if out:
+                    break
+                continue
+            if not chunk:
+                break
+            i = 0
+            while i < len(chunk):
+                if chunk[i] != 255:
+                    out.append(chunk[i])
+                    i += 1
+                elif chunk[i + 1:i + 2] and chunk[i + 1] == 250:
+                    end = chunk.find(bytes([255, 240]), i)
+                    i = len(chunk) if end < 0 else end + 2
+                else:
+                    i += 3
+        text = bytes(out).decode("utf-8", "replace")
+        self.seen += text
+        return text
+
+    async def type(self, text: str, seconds: float = 2.0) -> str:
+        self.writer.write(text.encode())
+        await self.writer.drain()
+        return await self.read(seconds)
+
+
+def _strip(text: str) -> str:
+    import re
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
+@pytest.fixture
+def board_port(served):
+    """A real board on a real socket, in this event loop, on a free port."""
+    import asyncio
+
+    from motherbrain.bbs import Board, session
+
+    run, corpus = served
+    board = Board(str(run), str(corpus), device="cpu")
+    board.load()
+
+    async def start():
+        server = await asyncio.start_server(
+            lambda r, w: session(r, w, board), "127.0.0.1", 0)
+        return server, server.sockets[0].getsockname()[1]
+
+    return board, start
+
+
+def test_a_caller_can_dial_in_and_reach_the_menu(board_port):
+    """The whole path: negotiate, log in, and get the five options."""
+    import asyncio
+
+    board, start = board_port
+
+    async def call():
+        server, port = await start()
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        client = _Dialler(reader, writer)
+        opening = _strip(await client.read(3.0))
+        assert "handle" in opening, opening[-300:]
+
+        await client.type("TESTER\r", 2.0)
+        menu = _strip(await client.type(" ", 3.0))
+
+        # The five console options, in order, word for word.
+        from motherbrain.voice import MENU
+        for _, label in __import__(
+                "motherbrain.bbs", fromlist=["x"]).CONSOLE_OPTIONS:
+            assert label in menu, label
+            assert label in MENU, f"{label} drifted from the console menu"
+
+        assert "Chat with MotherBrain" in menu
+        assert "Teleconference" in menu
+        assert board.callers, "the board did not register the node"
+
+        # And it answers a question it can answer exactly.
+        await client.type("C\r", 2.0)
+        answer = _strip(await client.type("what is 6 * 7\r", 5.0))
+        assert "42" in answer
+        assert "COMPUTED" in answer, answer[-300:]
+
+        writer.close()
+        server.close()
+        await server.wait_closed()
+
+    asyncio.run(asyncio.wait_for(call(), 60))
+
+
+def test_two_callers_hear_each_other(board_port):
+    """A teleconference nobody else's words reach is a text box."""
+    import asyncio
+
+    board, start = board_port
+
+    async def call():
+        server, port = await start()
+
+        async def dial(handle):
+            reader, writer = await asyncio.open_connection("127.0.0.1", port)
+            client = _Dialler(reader, writer)
+            await client.read(2.0)
+            await client.type(f"{handle}\r", 1.5)
+            await client.type(" ", 2.0)
+            await client.type("T\r", 2.0)
+            return client, writer
+
+        alice, aw = await dial("ALICE")
+        bob, bw = await dial("BOB")
+        assert "BOB joins" in _strip(await alice.read(1.5))
+
+        await alice.type("hello bob\r", 1.0)
+        heard = _strip(await bob.read(1.5))
+        assert "<ALICE> hello bob" in heard, heard
+
+        # And a room is a room: leave it and the words stop arriving.
+        await bob.type("/join ELSEWHERE\r", 1.0)
+        await alice.type("still here\r", 1.0)
+        assert "still here" not in _strip(await bob.read(1.0))
+
+        for writer in (aw, bw):
+            writer.close()
+        server.close()
+        await server.wait_closed()
+
+    asyncio.run(asyncio.wait_for(call(), 60))
+
+
+def test_the_board_menu_is_the_console_menu():
+    """Five options, one order, three faces. A board that renumbered them
+    would be a different program wearing the same name."""
+    from motherbrain.bbs import CONSOLE_OPTIONS
+    from motherbrain.gui import OPTIONS
+    from motherbrain.voice import MENU
+
+    assert [key for key, _ in CONSOLE_OPTIONS] == ["1", "2", "3", "4", "5"]
+    for (key, label), window in zip(CONSOLE_OPTIONS, OPTIONS + [("5  Run the GUI", "")]):
+        assert label in MENU, f"{label} is not on the console menu"
+        assert MENU.index(label) >= 0
+    # and in the order the console lists them
+    positions = [MENU.index(label) for _, label in CONSOLE_OPTIONS]
+    assert positions == sorted(positions), "the board reordered the options"

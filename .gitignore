@@ -33,3 +33,8 @@ models/motherbrain.pt
 certs/
 *.key
 *.pem
+
+# The board's own state: who called, what they posted, what they uploaded.
+# It belongs to whoever runs the board, not to the repository.
+runs/*/bbs/
+runs/*/knowledge.json
