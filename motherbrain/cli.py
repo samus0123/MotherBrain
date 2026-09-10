@@ -829,6 +829,13 @@ def cmd_bootstrap(args) -> int:
 # console
 
 
+def cmd_doors(args) -> int:
+    """Play the board's door games at this keyboard, with no board."""
+    from motherbrain.localterm import play
+
+    return play(args.run, args.corpus, args.device)
+
+
 def cmd_infer(args) -> int:
     """Run MotherBrain as an inference model: many prompts, batched.
 
@@ -2356,6 +2363,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--export", help="where to write the merged model")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_sight)
+
+    s = common(sub.add_parser(
+        "doors", help="play the BBS door games here, without the BBS"))
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_doors)
 
     s = common(sub.add_parser(
         "infer", help="run many prompts through the model at once, and time it"))
