@@ -138,9 +138,10 @@ def answer_about_self(kind: str, stats: dict) -> str:
         # only the network, and saying "a transformer" undersells the half
         # of it that is the reason the answers are true.
         return (
-            f"MotherBrain: an artificial intelligence system built around a "
-            f"mixture-of-experts transformer, v{version}, {total:,} "
-            f"parameters, {sight}.\n"
+            f"MotherBrain: a BBSLLM - a bulletin board system with a large "
+            f"language model in it - and an artificial intelligence system "
+            f"built around a mixture-of-experts transformer, v{version}, "
+            f"{total:,} parameters, {sight}.\n"
             f"The network is one part of it. The others are a knowledge base "
             f"that stores what it is told and derives what follows, an exact "
             f"calculator, a language pipeline that reads your sentence and "

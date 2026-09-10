@@ -136,6 +136,16 @@ class Caller:
         self.sub = "1"                      # the current message sub
         self.dir = "1"                      # the current file directory
         self.watchers: set[int] = set()     # sysop nodes reading over a shoulder
+        # Where things were drawn, so a click can be turned into the key a
+        # caller would have typed. A menu that can be pointed at is the same
+        # menu; it just knows its own geometry.
+        self.mouse = False
+        # Where the caller is, screen by screen. The call stack already
+        # takes them back one level; this is what lets the screen say so
+        # by name, and what puts a breadcrumb at the top of every one.
+        self.trail: list[str] = ["Main menu"]
+        self.row = 0
+        self.hotspots: list[tuple[int, int, int, str]] = []
         self.fed = 0
         self.keys: deque[str] = deque()
         self.inbox: asyncio.Queue = asyncio.Queue()
@@ -188,7 +198,42 @@ class Caller:
     async def line(self, text: str = "") -> None:
         if self.watchers:
             self._echo(text)
+        self.row += 1
         await self.send(text + "\r\n")
+
+    @contextlib.contextmanager
+    def at(self, name: str):
+        """Mark a screen as entered, and leave the trail as it was found."""
+        self.trail.append(name)
+        try:
+            yield self
+        finally:
+            if len(self.trail) > 1:
+                self.trail.pop()
+
+    def whence(self) -> str:
+        """The screen a "go back" returns to."""
+        return self.trail[-2] if len(self.trail) > 1 else "Main menu"
+
+    def breadcrumb(self) -> str:
+        return f"{A.GREY}" + f" {A.HB}»{A.GREY} ".join(self.trail) + A.RESET
+
+    def hotspot(self, key: str, width: int | None = None) -> None:
+        """Mark the line just written as clickable, standing for `key`."""
+        self.hotspots.append((self.row, 1, width or self.columns, key))
+
+    async def screen(self) -> None:
+        """Start a new screen: clear it, and forget where everything was."""
+        self.row = 0
+        self.hotspots.clear()
+        await self.send(A.CLS)
+
+    def clicked(self, row: int, column: int) -> str:
+        """The key a click at (row, column) stands for, or empty."""
+        for at, first, last, key in self.hotspots:
+            if at == row and first <= column <= last:
+                return key
+        return ""
 
     def _echo(self, text: str) -> None:
         """Copy a line to any sysop watching this node with //SPY."""
@@ -200,9 +245,13 @@ class Caller:
                 other.tell(f"{A.GREY}[{self.node}]{A.RESET} {text}")
 
     async def art(self, text: str) -> None:
-        await self.send(text.replace("\r\n", "\n").replace("\n", "\r\n") + "\r\n")
+        body = text.replace("\r\n", "\n")
+        self.row += body.count("\n") + 1
+        await self.send(body.replace("\n", "\r\n") + "\r\n")
 
     async def cls(self) -> None:
+        self.row = 0
+        self.hotspots.clear()
         await self.send(A.CLS)
 
     async def pause(self, text: str = "press any key") -> None:
@@ -250,7 +299,7 @@ class Caller:
                 if key in ("\r", "\n"):
                     await self.send("\r\n")
                     return self._buffer or default
-                if key == "\x03":                       # ctrl-c
+                if key in ("\x03", "\x1b"):            # ctrl-c, escape
                     await self.send("\r\n")
                     return ""
                 if key in ("\x08", "\x7f"):
@@ -338,6 +387,21 @@ class Caller:
         i = 0
         while i < len(text):
             ch = text[i]
+            if ch == "\x1b" and text[i + 1:i + 2] == "[" \
+                    and text[i + 2:i + 3] == "<":
+                # An SGR mouse report: ESC [ < button ; column ; row M or m.
+                end = i + 3
+                while end < len(text) and text[end] not in "Mm":
+                    end += 1
+                if end >= len(text):
+                    break                       # cut in half; wait for more
+                self._mouse(text[i + 3:end], text[end])
+                i = end + 1
+                continue
+            if ch == "\x1b" and i + 1 >= len(text):
+                self.keys.append("\x1b")            # a bare Escape: go back
+                i += 1
+                continue
             if ch == "\x1b" and text[i + 1:i + 2] in ("[", "O"):
                 final = text[i + 2:i + 3]
                 name = {"A": "UP", "B": "DOWN", "C": "RIGHT",
@@ -356,6 +420,27 @@ class Caller:
                 continue
             self.keys.append(ch)
             i += 1
+
+    def _mouse(self, body: str, final: str) -> None:
+        """One mouse report. A press on something clickable is that key.
+
+        Only the press, and only button one: a menu that fired on release
+        as well would run every command twice, and a menu that fired on
+        scroll would run them at random.
+        """
+        if final != "M":
+            return
+        try:
+            button, column, row = (int(part) for part in body.split(";"))
+        except ValueError:
+            return
+        if button & 0b11 != 0 or button & 0x40:           # not a plain click
+            return
+        key = self.clicked(row, column)
+        if key:
+            for char in key:
+                self.keys.append(char)
+            self.keys.append("\r")
 
     async def _interject(self, text: str) -> None:
         """Print something that arrived while the caller was typing."""
@@ -410,6 +495,13 @@ class Board:
         self.indexed = 0
         self.name = BOARD_NAME
         self.new_user_password: str | None = None
+        # What somebody who has never called before can do. The default is
+        # WWIV's: a new caller is unvalidated until the sysop says otherwise.
+        # A board meant to be open to everyone raises this once, here or in
+        # //CONFIG, rather than validating people one at a time forever.
+        self.new_user_sl = W.NEW_USER_SL
+        self.new_user_dsl = W.NEW_USER_DSL
+        self.new_user_flags = ""
         # A caller from the machine the board runs on is the sysop. On a
         # board bound to loopback that is simply true; the flag exists so a
         # board facing a network can turn it off.
@@ -439,6 +531,10 @@ class Board:
         self.trust_local = settings.get("trust_local", self.trust_local)
         self.max_batch = settings.get("max_batch", self.max_batch)
         self.max_tokens = settings.get("max_tokens", self.max_tokens)
+        self.new_user_sl = settings.get("new_user_sl", self.new_user_sl)
+        self.new_user_dsl = settings.get("new_user_dsl", self.new_user_dsl)
+        self.new_user_flags = settings.get("new_user_flags",
+                                           self.new_user_flags)
 
         table = self.read("colours.json", None)
         if isinstance(table, list) and len(table) == len(W.DEFAULT_COLOURS):
@@ -995,6 +1091,17 @@ MESSAGE_COMMANDS = [
     ("V", "Voting booth", 0),
 ]
 
+# The console's wording is what a caller sees wherever there is room for
+# it. On a phone there is not, and a truncated label - "Tell MotherBrain
+# what kind of pr" - is worse than a short one that says the same thing.
+CONSOLE_SHORT = {
+    "1": "Make me a program",
+    "2": "Tell me what to do",
+    "3": "Teach me something",
+    "4": "Apply a patch",
+    "5": "Run the GUI",
+}
+
 BOARD_COMMANDS = [
     ("T", "Transfer section", 0),
     ("N", "New-file scan", 0),
@@ -1006,34 +1113,53 @@ BOARD_COMMANDS = [
     ("W", "Who is online", 0),
 ]
 
+# Short on purpose: these four share one row, and a label that has to be
+# truncated to fit is a label nobody can read on a phone.
 MINOR_COMMANDS = [
-    ("L", "Last callers", 0),
-    ("X", "Expert mode", 0),
-    ("?", "This menu", 0),
-    ("G", "Good-bye (log off)", 0),
+    ("L", "Callers", 0),
+    ("X", "Expert", 0),
+    ("?", "Menu", 0),
+    ("G", "Good-bye", 0),
 ]
 
 
+# Below this the two-column menu stops being two columns. A phone held
+# upright is about forty characters wide, and a board that insists on
+# sixty-four there just runs off the side of the screen.
+NARROW = 60
+
+
 def wide(caller: Caller) -> int:
-    return min(max(caller.columns, 64), 79)
+    """The width to draw at: what the caller has, within reason.
+
+    The floor used to be sixty-four, which is fine for a terminal and wrong
+    for a phone - the screens were drawn wider than the screen and the
+    right-hand half was simply gone.
+    """
+    return min(max(caller.columns, 38), 79)
 
 
 async def header(caller: Caller) -> None:
-    """The status line WWIV kept at the top: who, where, and how long left."""
+    """The shaded header a board put at the top of every screen."""
     board = caller.board
-    stats = board.stats()
+    width = wide(caller)
+    await caller.art("\n".join(A.banner(
+        f"{board.name}  B B S L L M", width,
+        "Bulletin Board System / Large Language Model")))
+
+
+async def footer(caller: Caller) -> None:
+    """The status bar along the bottom: who, where, and how long left."""
+    board = caller.board
     user = caller.user
     left = user.minutes_left() - caller.minutes() if user else 0.0
-    width = wide(caller)
-    title = (f"\x039{board.name}\x031 - \x032The Bulletin Board System")
-    right = (f"\x030Node \x032{caller.node}\x030  "
-             f"\x030v{stats.get('version', 0)} "
-             f"{stats.get('total_params_human', '?')}\x030  "
-             f"\x030Left \x032{left:5.1f}\x030m ")
-    bar = W.pad(f" {title}", width - W.width_of(right) - 1) + right
-    await caller.line(f"\x031{'═' * width}")
-    await caller.line(bar)
-    await caller.line(f"\x031{'═' * width}\x030")
+    stats = board.stats()
+    await caller.line(A.status(
+        f"{user.name if user else '?'} #{user.number if user else 0}"
+        f"   {board.sub(caller.sub).name}",
+        f"Node {caller.node}  v{stats.get('version', 0)} "
+        f"{stats.get('total_params_human', '?')}  {left:.0f} min left",
+        wide(caller)))
 
 
 async def login(caller: Caller) -> bool:
@@ -1043,7 +1169,10 @@ async def login(caller: Caller) -> bool:
     await caller.art(A.logo())
     await caller.line(A.shaded_bar(min(caller.columns, 78)))
     await caller.line(W.render(A.centre(
-        f"\x039{board.name} \x031- \x032The Bulletin Board System",
+        f"\x039{board.name} \x031- \x032a BBSLLM",
+        min(caller.columns, 78))))
+    await caller.line(W.render(A.centre(
+        "\x030a Bulletin Board System with a Large Language Model in it",
         min(caller.columns, 78))))
     await caller.line(W.render(A.centre(
         f"\x030a v{board.version} language model, answering its own "
@@ -1186,7 +1315,9 @@ async def new_user(caller: Caller):
     password = await caller.ask("\x035Choose a password \x030(blank for "
                                 "none)\x035: \x030", limit=64, mask=True)
 
-    user = board.users.create(name)
+    user = board.users.create(name, sl=board.new_user_sl,
+                              dsl=board.new_user_dsl,
+                              flags=board.new_user_flags)
     user.real_name = real[:40]
     if password:
         board.set_password(user, password)
@@ -1204,39 +1335,87 @@ async def new_user(caller: Caller):
 
 
 async def draw_menu(caller: Caller) -> None:
-    """The main menu, in three columns, the way WWIV drew it."""
+    """The main menu, drawn the way a 1987 board drew one.
+
+    Shaded header, panels with drop shadows, keys in brackets so the eye
+    finds them, and a status bar along the bottom. Every entry registers
+    where it was drawn, so a click on it is the same as typing it.
+    """
     user = caller.user
     width = wide(caller)
-    await caller.cls()
+    narrow = width < NARROW
+    await caller.screen()
     await header(caller)
-    await caller.line("")
 
-    await caller.art("\n".join(A.box(
-        "MOTHERBRAIN", [W.render(f"  \x032{key}\x030) \x039{label}")
-                        for key, label in CONSOLE_OPTIONS],
-        width=width, frame=A.HC)))
+    # -- what MotherBrain itself does --
+    top = A.panel("MOTHERBRAIN", ["" for _ in CONSOLE_OPTIONS],
+                  width=width - 2, frame=A.HC, head=A.HY)
+    await caller.line(top[0])
+    for (key, label), _ in zip(CONSOLE_OPTIONS, top[1:]):
+        if width < NARROW:
+            label = CONSOLE_SHORT.get(key, label)
+        await caller.line(_framed(A.entry(key, label), width - 2, A.HC))
+        caller.hotspot(key, width)
+    await caller.line(top[-2])
+    await caller.line(top[-1])
 
-    columns = [
-        ("MESSAGES", MESSAGE_COMMANDS),
-        ("THE BOARD", BOARD_COMMANDS),
-    ]
-    rows: list[str] = []
-    left, right = columns[0][1], columns[1][1]
-    half = (width - 4) // 2
-    rows.append(W.render(f" \x031{W.pad(columns[0][0], half)}"
-                         f"{columns[1][0]}"))
-    for i in range(max(len(left), len(right))):
-        a = _command_cell(user, left[i]) if i < len(left) else ""
-        b = _command_cell(user, right[i]) if i < len(right) else ""
-        rows.append(W.render(f" {W.pad(a, half)}{b}"))
-    rows.append("")
-    minor = "   ".join(_command_cell(user, item) for item in MINOR_COMMANDS)
-    rows.append(W.render(f" {minor}"))
-    rows.append(W.render(" \x030/A\x030) change sub    \x030/D\x030) change "
-                         "directory" +
-                         ("    \x033//\x030) sysop" if user.sysop else "")))
-    await caller.art("\n".join(A.box("COMMANDS", rows, width=width,
-                                      frame=A.HB)))
+    # -- the board: two columns when there is room, one when there is not --
+    columns = ([MESSAGE_COMMANDS + BOARD_COMMANDS] if narrow
+               else [MESSAGE_COMMANDS, BOARD_COMMANDS])
+    half = (width - 6) if narrow else (width - 6) // 2
+    rows = max(len(table) for table in columns)
+    frame = A.panel("THE BOARD", [""] * (rows + 4), width=width - 2,
+                    frame=A.HB, head=A.HY)
+    await caller.line(frame[0])
+    if not narrow:
+        await caller.line(_framed(
+            f"{A.HC}{A.pad('MESSAGES', half)}{A.HC}THE BOARD", width - 2,
+            A.HB))
+    for i in range(rows):
+        line, keys = "", []
+        for table in columns:
+            if i < len(table):
+                key, label, needs = table[i]
+                ok = user is None or user.sl >= needs
+                cell = A.entry(key, label, available=ok)
+                keys.append((key, ok))
+            else:
+                cell = ""
+                keys.append(("", False))
+            line += A.pad(cell, half)
+        await caller.line(_framed(line, width - 2, A.HB))
+        # Left half and right half are separately clickable.
+        for column, (key, ok) in enumerate(keys):
+            if key and ok:
+                first = 2 + column * half
+                caller.hotspots.append((caller.row, first,
+                                        first + half, key))
+    await caller.line(_framed("", width - 2, A.HB))
+
+    per_row = 2 if narrow else len(MINOR_COMMANDS)
+    cell = (width - 8) // per_row
+    for start in range(0, len(MINOR_COMMANDS), per_row):
+        chunk = MINOR_COMMANDS[start:start + per_row]
+        await caller.line(_framed(
+            "".join(A.pad(A.entry(key, label), cell)
+                    for key, label, _needs in chunk), width - 2, A.HB))
+        for column, (key, _label, _needs) in enumerate(chunk):
+            first = 2 + column * cell
+            caller.hotspots.append((caller.row, first, first + cell, key))
+    await caller.line(_framed(
+        f"{A.GREY}/A change sub   /D change directory"
+        + ("   // sysop" if user is not None and user.sysop else ""),
+        width - 2, A.HB))
+    await caller.line(frame[-2])
+    await caller.line(frame[-1])
+    await footer(caller)
+
+
+def _framed(body: str, width: int, frame: str) -> str:
+    """One row inside a double-ruled panel, with the drop shadow on the end."""
+    inner = width - 2
+    return (f"{frame}║{A.RESET} {A.pad(body, inner - 1)}{frame}║"
+            f"{A.RESET}{A.SHADOW}██{A.RESET}")
 
 
 def _command_cell(user, item) -> str:
@@ -1247,15 +1426,40 @@ def _command_cell(user, item) -> str:
     return f"\x032{key}\x030) \x039{label}"
 
 
+async def go_back(caller: Caller, key: str = "Q") -> None:
+    """The line every screen ends with, naming the screen it returns to.
+
+    "Back" on its own makes a caller guess. Naming the destination costs a
+    dozen characters and means nobody has to.
+    """
+    await caller.line("")
+    await caller.line(
+        f"  {A.entry(key, f'Go back to {caller.whence()}')}"
+        f"   {A.GREY}(Q, escape, or an empty line){A.RESET}")
+    caller.hotspot(key)
+
+
+async def crumbs(caller: Caller) -> None:
+    """Where you are, at the top of the screen, as a board did it."""
+    await caller.line(f"  {caller.breadcrumb()}")
+
+
+def leaving(answer: str) -> bool:
+    """Every screen agrees on what "go back" looks like when typed."""
+    stripped = answer.strip().upper()
+    return stripped in ("", "Q", "X", "BACK", "\x1b")
+
+
 async def prompt(caller: Caller) -> str:
     """WWIV's command prompt: where you are, and how long you have left."""
     board = caller.board
     user = caller.user
     left = (user.minutes_left() - caller.minutes()) if user else 0.0
     sub = board.sub(caller.sub)
-    return await caller.ask(W.render(
-        f"\x031[\x039{sub.name}\x031] \x030Time left \x032{left:.0f}"
-        f"\x030 \x031:\x030 "), limit=64)
+    return await caller.ask(
+        f"{A.HB}[{A.HW}{sub.name}{A.HB}]{A.RESET} "
+        f"{A.GREY}{left:.0f} min{A.RESET} {A.HY}Command{A.RESET}"
+        f"{A.HB}:{A.RESET} ", limit=64)
 
 
 async def main_menu(caller: Caller) -> None:
@@ -1304,8 +1508,10 @@ async def main_menu(caller: Caller) -> None:
             await caller.pause()
             continue
         actions += 1
+        name = _screen_name(key)
         try:
-            await handler(caller)
+            with caller.at(name):
+                await handler(caller)
         except Hangup:
             raise
         except Exception as exc:                          # noqa: BLE001
@@ -1317,6 +1523,19 @@ async def main_menu(caller: Caller) -> None:
         caller.user.expert = caller.expert
         board.users.end_call(caller.user, caller.minutes())
     await goodbye(caller)
+
+
+def _screen_name(key: str) -> str:
+    """What to call the screen a command opens, for the trail and the crumb."""
+    for table in (CONSOLE_OPTIONS,):
+        for entry, label in table:
+            if entry == key:
+                return label.split("(")[0].strip()
+    for table in (MESSAGE_COMMANDS, BOARD_COMMANDS, MINOR_COMMANDS):
+        for entry, label, _needs in table:
+            if entry == key:
+                return label
+    return "a screen"
 
 
 def _needs(key: str) -> int:
@@ -1346,8 +1565,9 @@ async def goodbye(caller: Caller) -> None:
 async def option_make(caller: Caller) -> None:
     """1 - describe a program; it writes one and files it under your handle."""
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.line(f"  {A.HY}TELL MOTHERBRAIN WHAT KIND OF PROGRAM TO MAKE"
                       f"{A.RESET}")
@@ -1407,8 +1627,9 @@ async def option_do(caller: Caller) -> None:
     """2 - tell it what to do. Everything that touches this machine is refused."""
     from motherbrain.commands import parse
 
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.line(f"  {A.HY}TELL MOTHERBRAIN WHAT TO DO{A.RESET}")
     await caller.line(f"  {A.GREY}Ask it things. Blank line to go back."
@@ -1445,8 +1666,9 @@ async def option_teach(caller: Caller) -> None:
     from motherbrain.data import Corpus
 
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.line(f"  {A.HY}TEACH MOTHERBRAIN SOMETHING NEW{A.RESET}")
     await caller.line(f"  {A.GREY}Type or paste. A blank line ends it. "
@@ -1493,8 +1715,9 @@ async def option_teach(caller: Caller) -> None:
 async def option_patch(caller: Caller) -> None:
     """4 - learn what was fed and ascend. The sysop's key, and only theirs."""
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.line(f"  {A.HY}APPLY NEW KNOWLEDGE AS A PATCH (UPDATE)"
                       f"{A.RESET}")
@@ -1570,8 +1793,9 @@ async def option_patch(caller: Caller) -> None:
 
 async def option_gui(caller: Caller) -> None:
     """5 - the window. It opens where the board runs, which is not here."""
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.line(f"  {A.HY}RUN THE GUI{A.RESET}")
     await caller.line("")
@@ -1602,8 +1826,9 @@ async def option_gui(caller: Caller) -> None:
 
 async def chat_with_motherbrain(caller: Caller) -> None:
     """C - a conversation, with every reply labelled by where it came from."""
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.art(A.gradient("  CHAT WITH MOTHERBRAIN  ",
                                 (A.HM, A.M, A.HB, A.B)))
@@ -1640,8 +1865,9 @@ async def teleconference(caller: Caller) -> None:
     """T - the chat rooms. Whoever else is dialled in is in here with you."""
     board = caller.board
     board.join(caller, "LOBBY")
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.art(A.gradient("  T E L E C O N F E R E N C E  ",
                                 (A.HG, A.G, A.HC, A.C)))
@@ -1739,14 +1965,15 @@ async def _room_command(caller: Caller, said: str) -> bool:
 async def door_menu(caller: Caller) -> None:
     """D - pick a door."""
     while True:
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         rows = [f"  {A.HY}[{key}]{A.RESET}  {A.HW}{A.pad(name, 12)}"
                 f"{A.GREY}{blurb}{A.RESET}"
                 for key, name, blurb in doors.CATALOGUE]
         rows.append("")
-        rows.append(f"  {A.HY}[Q]{A.RESET}  {A.HW}back to the main menu")
+        rows.append(A.entry("Q", f"Go back to {caller.whence()}"))
         await caller.art("\n".join(A.box("D O O R S", rows,
                                          width=min(caller.columns, 76),
                                          frame=A.HM)))
@@ -1771,8 +1998,9 @@ async def message_base(caller: Caller) -> None:
         here = caller.sub
         threads = [t for t in board.threads() if t.get("sub", "1") == here]
         roots = [t for t in threads if t.get("parent") is None]
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         rows = []
         for t in roots[-14:]:
@@ -1823,8 +2051,9 @@ async def post_message(caller: Caller) -> None:
                          f"{here.post_sl}; yours is {user.sl}.\x030")
         await caller.pause()
         return
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.say(f"\x031Posting in \x039{here.name}\x030")
     subject = (await caller.ask(W.render("\x035Subject: \x030"),
@@ -1851,8 +2080,9 @@ async def quick_scan(caller: Caller) -> None:
     board = caller.board
     user = caller.user
     since = user.last_on if user else ""
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     threads = board.threads()
     rows = []
@@ -1890,8 +2120,9 @@ async def _read_thread(caller: Caller, ident: int) -> None:
         return
     chain = [root] + [t for t in threads if t.get("parent") == ident]
 
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     for msg in chain:
         await caller.line(f"{A.HY}{msg['subject']}{A.RESET}  "
@@ -1927,8 +2158,9 @@ async def _read_thread(caller: Caller, ident: int) -> None:
 async def oneliner_wall(caller: Caller) -> None:
     """O - the graffiti wall every board had."""
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     lines = board.oneliners()[-15:]
     rows = [f"{A.HM}\"{A.pad(x['text'], 52)}\"{A.RESET}{A.GREY} - "
@@ -2021,8 +2253,9 @@ async def file_area(caller: Caller) -> None:
     board = caller.board
     while True:
         sections = file_sections(board)
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         rows = []
         user = caller.user
@@ -2042,7 +2275,7 @@ async def file_area(caller: Caller) -> None:
         rows.append("")
         rows.append(f"  {A.HY}[U]{A.RESET} {A.HW}upload{A.RESET}"
                     f"{A.GREY}   send the board a file over XMODEM{A.RESET}")
-        rows.append(f"  {A.HY}[Q]{A.RESET} {A.HW}back{A.RESET}")
+        rows.append(A.entry("Q", f"Go back to {caller.whence()}"))
         await caller.art("\n".join(A.box("F I L E   A R E A", rows,
                                          width=min(caller.columns, 76),
                                          frame=A.HY)))
@@ -2064,7 +2297,8 @@ async def file_area(caller: Caller) -> None:
             await caller.pause()
             continue
         caller.dir = section["key"]
-        await _browse(caller, section)
+        with caller.at(section['name']):
+            await _browse(caller, section)
 
 
 async def _browse(caller: Caller, section: dict) -> None:
@@ -2072,8 +2306,9 @@ async def _browse(caller: Caller, section: dict) -> None:
     page = 0
     per_page = max(8, min(18, caller.rows - 10))
     while True:
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         per_page = max(4, min(9, (caller.rows - 12) // 2))
         chunk = files[page * per_page:(page + 1) * per_page]
@@ -2116,7 +2351,8 @@ async def _browse(caller: Caller, section: dict) -> None:
             files = listing(section, 400)
             continue
         if choice.isdigit() and 1 <= int(choice) <= len(files):
-            await _download(caller, files[int(choice) - 1])
+            with caller.at(files[int(choice) - 1].name):
+                await _download(caller, files[int(choice) - 1])
 
 
 async def _download(caller: Caller, path: Path) -> None:
@@ -2281,8 +2517,9 @@ async def gallery(caller: Caller) -> None:
     """
     board = caller.board
     while True:
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         await caller.art("\n".join(A.box("A N S I   G A L L E R Y", [
             f"  {A.HY}[S]{A.RESET} {A.HW}show me one{A.RESET}"
@@ -2292,7 +2529,7 @@ async def gallery(caller: Caller) -> None:
             f"{A.GREY}   pick an image out of the file area{A.RESET}",
             f"  {A.HY}[U]{A.RESET} {A.HW}upload one{A.RESET}"
             f"{A.GREY}       XMODEM it up and it will look at it{A.RESET}",
-            f"  {A.HY}[Q]{A.RESET} {A.HW}back{A.RESET}",
+            A.entry("Q", "Go back"),
         ], width=min(caller.columns, 76), frame=A.HM)))
         key = (await caller.ask(f"  {A.HY}> {A.RESET}", limit=2)).strip().upper()
         if not key or key == "Q":
@@ -2446,8 +2683,9 @@ async def system_info(caller: Caller) -> None:
     from motherbrain.stats import render
 
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     stats = await board.refresh_stats()
     await caller.art(f"{A.HC}" + render(stats, width=min(caller.columns, 70))
@@ -2469,8 +2707,9 @@ async def system_info(caller: Caller) -> None:
 
 async def who_is_online(caller: Caller) -> None:
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     rows = []
     for node, other in sorted(board.callers.items()):
@@ -2487,8 +2726,9 @@ async def who_is_online(caller: Caller) -> None:
 
 async def last_callers(caller: Caller) -> None:
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     rows = [f"  {A.HW}{A.pad(c['who'], 22)}{A.RESET}{A.GREY}{c['when']}  "
             f"{c['minutes']:>5} min  {c['did']} things  {c['from']}{A.RESET}"
@@ -2503,8 +2743,9 @@ async def last_callers(caller: Caller) -> None:
 async def page_sysop(caller: Caller) -> None:
     """P - page the sysop. The sysop is a language model, and answers."""
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.line(f"  {A.HY}PAGING THE SYSOP{A.RESET}")
     await caller.line(f"  {A.GREY}The sysop here is the model. Any human "
@@ -2531,8 +2772,9 @@ async def page_sysop(caller: Caller) -> None:
 
 async def settings(caller: Caller) -> None:
     """! - baud rate, encoding, width. The baud rate is not a joke."""
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.art("\n".join(A.box("S E T T I N G S", [
         f"  {A.HY}[1]{A.RESET} 300 baud    {A.GREY}as slow as it really was"
@@ -2566,8 +2808,9 @@ async def settings(caller: Caller) -> None:
 
 
 async def help_screen(caller: Caller) -> None:
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     body = [
         f"  {A.HW}1-5{A.RESET}  the five things MotherBrain does. The same "
@@ -2601,13 +2844,14 @@ async def bulletins(caller: Caller) -> None:
     board = caller.board
     while True:
         items = board.bulletins()
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         rows = [W.render(f"  \x032{b['key']}\x030) \x039{b['title']}")
                 for b in items] or [W.render("  \x030None.")]
         rows.append("")
-        rows.append(W.render("  \x032Q\x030) back"))
+        rows.append(A.entry("Q", f"Go back to {caller.whence()}"))
         await caller.art("\n".join(A.box("B U L L E T I N S", rows,
                                           width=wide(caller), frame=A.HB)))
         choice = (await caller.ask(W.render("\x035Bulletin: \x030"),
@@ -2629,8 +2873,9 @@ async def bulletins(caller: Caller) -> None:
 async def auto_message(caller: Caller) -> None:
     """A - the auto-message: one line, shown to everyone who logs on next."""
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     current = board.auto_message()
     if current:
@@ -2661,8 +2906,9 @@ async def voting_booth(caller: Caller) -> None:
     user = caller.user
     while True:
         polls = board.polls()
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         rows = []
         for poll in polls:
@@ -2715,8 +2961,9 @@ async def _one_poll(caller: Caller, polls: list, poll: dict) -> None:
 async def feedback(caller: Caller) -> None:
     """F - feedback to the sysop. Here the sysop reads it and answers."""
     board = caller.board
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.say("\x031FEEDBACK TO THE SYSOP\x030")
     await caller.say("\x030The sysop is the model. It will answer, and any "
@@ -2746,8 +2993,9 @@ async def email(caller: Caller) -> None:
     while True:
         box = [m for m in board.mail()
                if user is not None and m["to"] == user.number]
-        await caller.cls()
+        await caller.screen()
         await header(caller)
+        await crumbs(caller)
         await caller.line("")
         rows = []
         for i, item in enumerate(box[-15:], start=1):
@@ -2825,8 +3073,9 @@ async def your_info(caller: Caller) -> None:
     if user is None:
         return
     rules = user.rules()
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     await caller.art("\n".join(A.box(f"USER #{user.number}", [
         W.render(f"  \x030Handle          \x039{user.name}"),
@@ -2887,8 +3136,9 @@ async def new_file_scan(caller: Caller) -> None:
     board = caller.board
     user = caller.user
     since = user.last_on if user else ""
-    await caller.cls()
+    await caller.screen()
     await header(caller)
+    await crumbs(caller)
     await caller.line("")
     rows = []
     for section in file_sections(board):
@@ -3128,7 +3378,7 @@ async def user_editor(caller: Caller, who: str) -> None:
             W.render(f"  \x030   calls {target.calls}, posts {target.posts}, "
                      f"{target.minutes:.0f} minutes"),
             "",
-            W.render("  \x032Q\x030) back"),
+            A.entry("Q", "Go back"),
         ], width=wide(caller), frame=A.HR)))
         field = (await caller.ask(W.render("\x035Field: \x030"),
                                   limit=4)).strip().upper()
@@ -3305,8 +3555,15 @@ async def config_editor(caller: Caller) -> None:
                      f"\x039{board.max_batch}"),
             W.render(f"  \x032H\x030) Tokens per reply  "
                      f"\x039{board.max_tokens}"),
+            W.render(f"  \x032I\x030) New caller SL     "
+                     f"\x039{board.new_user_sl}\x030 "
+                     f"(10 = unvalidated, 50 = can post and upload)"),
+            W.render(f"  \x032J\x030) New caller DSL    "
+                     f"\x039{board.new_user_dsl}"),
+            W.render(f"  \x032K\x030) New caller flags  "
+                     f"\x039{board.new_user_flags or '(none)'}"),
             "",
-            W.render("  \x032Q\x030) back"),
+            A.entry("Q", "Go back"),
         ], width=wide(caller), frame=A.HR)))
         field = (await caller.ask(W.render("\x035Field: \x030"),
                                   limit=4)).strip().upper()
@@ -3332,6 +3589,15 @@ async def config_editor(caller: Caller) -> None:
                 board._engine.max_batch = board.max_batch
         elif field == "H" and value.isdigit():
             board.max_tokens = settings["max_tokens"] = max(8, int(value))
+        elif field == "I" and value.isdigit():
+            board.new_user_sl = settings["new_user_sl"] = \
+                max(0, min(254, int(value)))
+        elif field == "J" and value.isdigit():
+            board.new_user_dsl = settings["new_user_dsl"] = \
+                max(0, min(254, int(value)))
+        elif field == "K":
+            board.new_user_flags = settings["new_user_flags"] = "".join(
+                c for c in value.upper() if c in "ABCDEFGHIJKLMNOP")
         board.write("config.json", settings)
 
 
@@ -3448,6 +3714,12 @@ async def session(reader, writer, board: Board) -> None:
     try:
         writer.write(caller.tn.start())
         await writer.drain()
+        # SGR mouse reporting: 1000 turns clicks on, 1006 asks for them in
+        # the extended form that works past column 95. A terminal that does
+        # not do mice ignores both and nothing is lost.
+        writer.write(b"\x1b[?1000h\x1b[?1006h")
+        await writer.drain()
+        caller.mouse = True
         # Give the client a moment to answer before the first screen, so the
         # window size and terminal type are known while drawing it.
         with contextlib.suppress(asyncio.TimeoutError, Hangup):
@@ -3462,6 +3734,9 @@ async def session(reader, writer, board: Board) -> None:
         with contextlib.suppress(Exception):
             await caller.line(f"\r\n{A.HR}the board fell over: {exc}{A.RESET}")
     finally:
+        if caller.mouse:
+            with contextlib.suppress(Exception):
+                await caller.send("\x1b[?1006l\x1b[?1000l")
         board.leave(caller)
         board.callers.pop(caller.node, None)
         if caller.handle:                     # someone who never logged in
@@ -3471,13 +3746,21 @@ async def session(reader, writer, board: Board) -> None:
 
 
 async def run_board(board: Board, host: str = "127.0.0.1",
-                    port: int = DEFAULT_PORT) -> None:
+                    port: int = DEFAULT_PORT, web_port: int = 0) -> None:
     """Bind, then answer the telephone until something stops us."""
     async def handle(reader, writer):
         await session(reader, writer, board)
 
     keeper = asyncio.create_task(board.stats_keeper())
     reader = asyncio.create_task(board.read_the_corpus())
+    web = None
+    if web_port:
+        from motherbrain import webterm
+
+        web = asyncio.create_task(
+            webterm.serve("127.0.0.1", port, host, web_port))
+        print(f"  a browser can reach it on http://{host}:{web_port}/  "
+              f"(tap the menus)")
     server = await asyncio.start_server(handle, host, port)
     where = ", ".join(str(s.getsockname()[:2]) for s in server.sockets or [])
     print(f"  answering telnet on {where}")
@@ -3487,6 +3770,8 @@ async def run_board(board: Board, host: str = "127.0.0.1",
     finally:
         keeper.cancel()
         reader.cancel()
+        if web is not None:
+            web.cancel()
 
 
 def port_advice(port: int, exc: OSError) -> str:
@@ -3517,7 +3802,8 @@ def serve(run_dir: str, corpus_dir: str, device: str = "auto",
           host: str = "127.0.0.1", port: int = DEFAULT_PORT,
           password: str | None = None, sysop_password: str | None = None,
           insecure: bool = False, max_callers: int = MAX_CALLERS,
-          max_tokens: int = 120, steps: int = 100, grow: int = 1) -> int:
+          max_tokens: int = 120, steps: int = 100, grow: int = 1,
+          web_port: int = 0, new_user_sl: int | None = None) -> int:
     """Start the board. Blocking, and the same on every platform."""
     from motherbrain.security import check_exposure
 
@@ -3536,6 +3822,11 @@ def serve(run_dir: str, corpus_dir: str, device: str = "auto",
                   max_per_address=MAX_PER_ADDRESS,
                   max_tokens=max_tokens, steps=steps, grow=grow)
     board.load_settings()
+    if new_user_sl is not None:
+        board.new_user_sl = board.new_user_dsl = new_user_sl
+        board.new_user_flags = "A"
+        print(f"  a caller who has never called before starts at SL "
+              f"{new_user_sl}: they can read, post, download and upload.")
     print("  building the file area ...")
     for path in warez.build(run_dir):
         print(f"    {path.name}")
@@ -3555,7 +3846,7 @@ def serve(run_dir: str, corpus_dir: str, device: str = "auto",
     print()
 
     try:
-        asyncio.run(run_board(board, host, port))
+        asyncio.run(run_board(board, host, port, web_port))
     except KeyboardInterrupt:
         print("\n  NO CARRIER")
     except OSError as exc:

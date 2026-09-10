@@ -501,6 +501,10 @@ copied the directory to.
 | `mb serve` | HTTP for your IDEs, and a browser console at `/` |
 | `mb infer` | many prompts at once, batched, with the throughput printed |
 | `mb doors` | the board's ten door games, at your own keyboard |
+| `mb start` | the board, the browser front-end, and a call, in one command |
+| `mb call` | a telnet client, for machines that ship without one |
+| `mb usb` | the whole thing, portable, on a drive |
+| `mb languages` | which programming languages it has actually read |
 | `mb chat` | one prompt, one completion, nothing else |
 | `mb status` | what is on disk and what to run next |
 
@@ -1185,6 +1189,45 @@ at this size it will not. It is a real language model that has learned the
 shape of Python from 53M tokens; it is not a coding assistant. Scale and
 corpus are the only cure, and `mb train` is how you apply them.
 
+## Starting it
+
+One command:
+
+```bash
+mb start
+```
+
+That starts the board on telnet's own port 23 (stepping down to 2323 where
+that needs privilege), serves it to a browser on 8080, and dials in. You get
+a login prompt: type `NEW` the first time.
+
+```bash
+mb start --open        # anyone on your network can call, and a new caller
+                       # can read, post, download and upload straight away
+mb start --no-call     # start it and leave it running
+```
+
+`--open` says what it means before it does it: telnet is plaintext, so
+everything typed and everything generated crosses the network in the clear.
+Applying a patch stays the sysop's key either way.
+
+**On a phone.** `mb start` prints a browser address. Open it and the whole
+board is there — tap a menu line to choose it, and the button bar plus your
+own keyboard for the rest. The page is a relay, not a second implementation:
+it carries the same bytes the telnet socket carries, and a tap is sent as
+the same mouse report a desktop terminal sends, which the board resolves
+through the hotspot table every screen already builds.
+
+**With a mouse.** Any terminal with mouse reporting — most of them — lets you
+click the menu entries directly. Same mechanism.
+
+**From a USB drive.** `mb usb /media/usb` puts the whole thing on a stick:
+model, board, file area, and Python's own cache, with nothing written to the
+computer you plug it into. See `START HERE.txt` on the drive, which is also
+honest about the one thing it cannot do — open by itself on insert, which
+Windows disabled for removable media in 2011 and no file on a drive can turn
+back on.
+
 ## The bulletin board
 
 `mb bbs` answers telnet on port 23 with MotherBrain as a 1980s BBS. The main
@@ -1319,6 +1362,31 @@ the entire point.
 All four faces — terminal, window, browser (`POST /ask`) and the board — go
 through this one pipeline, so they cannot drift into disagreeing about what
 is true.
+
+## Programming languages
+
+It reads 82 of them — from Python and C through Haskell, COBOL, Fortran,
+Erlang and Solidity — and `mb languages` prints which ones it has actually
+been given rather than which ones it could take:
+
+```
+MotherBrain reads 82 languages. It has been given 13 of them.
+
+  Python             11,960 document(s)    178,252,882 chars  ████████████████
+  C                   9,880 document(s)     54,775,446 chars  ██████
+  ...
+```
+
+Teaching it more is a corpus problem, not a model problem:
+
+```bash
+mb feed --path /some/source/tree     # read it
+mb patch                             # learn it
+```
+
+Reading is not learning. A document in the corpus changes nothing until a
+patch is applied, and the two are separate steps because they are separate
+things.
 
 ## Honest limits
 

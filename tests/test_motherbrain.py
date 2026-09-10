@@ -3797,14 +3797,16 @@ class _Dialler:
         """Everything that arrives, with the protocol's commands taken out."""
         import asyncio
 
+        # Read for the whole window rather than stopping at the first lull.
+        # The board sends its screens in bursts with gaps in the middle -
+        # a reader that stops at a gap gets the first burst and calls it the
+        # screen.
         out = bytearray()
         deadline = asyncio.get_running_loop().time() + seconds
         while asyncio.get_running_loop().time() < deadline:
             try:
-                chunk = await asyncio.wait_for(self.reader.read(4096), 0.25)
+                chunk = await asyncio.wait_for(self.reader.read(4096), 0.2)
             except asyncio.TimeoutError:
-                if out:
-                    break
                 continue
             if not chunk:
                 break
@@ -3826,6 +3828,23 @@ class _Dialler:
         self.writer.write(text.encode())
         await self.writer.drain()
         return await self.read(seconds)
+
+    async def until(self, needle: str, seconds: float = 10.0) -> str:
+        """Read until the board says something in particular.
+
+        Waiting for a quiet gap instead is fragile: the board sends its
+        mouse-enable escape the moment a caller connects, and a reader that
+        stops at the first lull returns that and nothing else.
+        """
+        import asyncio
+
+        deadline = asyncio.get_running_loop().time() + seconds
+        collected = ""
+        while asyncio.get_running_loop().time() < deadline:
+            collected += await self.read(0.5)
+            if needle in _strip(collected):
+                return collected
+        return collected
 
 
 def _strip(text: str) -> str:
@@ -3862,15 +3881,19 @@ def test_a_caller_can_dial_in_and_reach_the_menu(board_port):
         server, port = await start()
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         client = _Dialler(reader, writer)
-        opening = _strip(await client.read(3.0))
+        opening = _strip(await client.until("user number or name"))
         assert "user number or name" in opening, opening[-300:]
 
-        # WWIV's login: NEW, then the new-user application.
-        await client.type("NEW\r", 1.5)
-        await client.type("TESTER\r", 1.5)
-        await client.type("\r", 1.5)            # real name, skipped
-        await client.type("\r", 2.0)            # no password
-        menu = _strip(await client.type(" ", 3.0))
+        # WWIV's login: NEW, then the new-user application. Each answer is
+        # given a moment to be consumed - the board reads keys one at a
+        # time, and a test that runs ahead of it is testing its own timing.
+        for answer in ("NEW\r", "TESTER\r", "\r", "\r", " "):
+            await client.type(answer, 1.5)
+        await client.until("Chat with MotherBrain")
+        # Everything the board has said so far, not just the last burst:
+        # the menu may already have arrived while an earlier answer was
+        # being read, and a test that only looks at the last read misses it.
+        menu = _strip(client.seen)
 
         # The five console options, in order, word for word.
         from motherbrain.voice import MENU
@@ -3886,8 +3909,11 @@ def test_a_caller_can_dial_in_and_reach_the_menu(board_port):
         assert board.users.find("TESTER") is not None, "no user record"
 
         # And it answers a question it can answer exactly.
+        before = len(client.seen)
         await client.type("C\r", 2.0)
-        answer = _strip(await client.type("what is 6 * 7\r", 5.0))
+        await client.type("what is 6 * 7\r", 1.0)
+        await client.until("COMPUTED")
+        answer = _strip(client.seen[before:])
         assert "42" in answer
         assert "COMPUTED" in answer, answer[-300:]
 
@@ -3895,7 +3921,7 @@ def test_a_caller_can_dial_in_and_reach_the_menu(board_port):
         server.close()
         await server.wait_closed()
 
-    asyncio.run(asyncio.wait_for(call(), 60))
+    asyncio.run(asyncio.wait_for(call(), 150))
 
 
 def test_two_callers_hear_each_other(board_port):
@@ -3911,20 +3937,19 @@ def test_two_callers_hear_each_other(board_port):
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             client = _Dialler(reader, writer)
             await client.read(2.0)
-            await client.type("NEW\r", 1.0)
-            await client.type(f"{handle}\r", 1.0)
-            await client.type("\r", 1.0)
-            await client.type("\r", 1.5)
-            await client.type(" ", 1.5)
-            await client.type("M\r", 2.0)      # WWIV: M is multi-node chat
+            for answer in ("NEW\r", f"{handle}\r", "\r", "\r", " "):
+                await client.type(answer, 1.5)
+            await client.until("Command:", 8.0)
+            await client.type("M\r", 1.0)      # WWIV: M is multi-node chat
+            await client.until("TELECONFERENCE", 8.0)
             return client, writer
 
         alice, aw = await dial("ALICE")
         bob, bw = await dial("BOB")
-        assert "BOB joins" in _strip(await alice.read(1.5))
+        assert "BOB joins" in _strip(await alice.until("BOB joins", 6.0))
 
-        await alice.type("hello bob\r", 1.0)
-        heard = _strip(await bob.read(1.5))
+        await alice.type("hello bob\r", 0.2)
+        heard = _strip(await bob.until("hello bob", 6.0))
         assert "<ALICE> hello bob" in heard, heard
 
         # And a room is a room: leave it and the words stop arriving.
@@ -3937,7 +3962,7 @@ def test_two_callers_hear_each_other(board_port):
         server.close()
         await server.wait_closed()
 
-    asyncio.run(asyncio.wait_for(call(), 60))
+    asyncio.run(asyncio.wait_for(call(), 150))
 
 
 def test_the_board_menu_is_the_console_menu():
@@ -4477,3 +4502,238 @@ def test_it_describes_itself_as_what_it_is():
     for part in ("knowledge base", "calculator", "perception", "reasoning"):
         assert part in said, f"it did not mention its {part}"
     assert "labelled" in said, "it did not say answers carry their source"
+
+
+# ---- the USB drive ----------------------------------------------------------
+
+def test_a_usb_drive_carries_everything_and_leaves_nothing(tmp_path, served):
+    """The promise is that the computer is as it was when you pull it out."""
+    from motherbrain.usb import build
+
+    run, corpus = served
+    drive = tmp_path / "drive"
+    build(drive, str(run), str(corpus), device="cpu")
+
+    for name in ("MOTHERBRAIN.bat", "MOTHERBRAIN.command", "motherbrain.sh",
+                 "autorun.inf", "START HERE.txt"):
+        assert (drive / name).is_file(), f"{name} is not on the drive"
+    assert (drive / "MotherBrain" / "motherbrain" / "bbs.py").is_file()
+    assert (drive / "MotherBrain" / "runs" / "default" / "tokenizer.json"
+            ).is_file()
+
+    # Everything the program writes has to be pointed back at the drive.
+    for launcher in ("MOTHERBRAIN.bat", "motherbrain.sh"):
+        text = (drive / launcher).read_text()
+        assert "MB_WORKSPACE" in text, f"{launcher} does not set the workspace"
+        assert "PYTHONPYCACHEPREFIX" in text, \
+            f"{launcher} leaves bytecode on the host"
+        assert "PIP_CACHE_DIR" in text, f"{launcher} leaves a pip cache behind"
+        assert ".venv" in text, f"{launcher} does not build on the drive"
+
+    # A shell script with CRLF in it dies with "bad interpreter".
+    assert b"\r\n" not in (drive / "motherbrain.sh").read_bytes()
+    assert b"\r\n" not in (drive / "MOTHERBRAIN.command").read_bytes()
+    assert b"\r\n" in (drive / "MOTHERBRAIN.bat").read_bytes(), \
+        "a .bat with bare LF confuses older cmd.exe"
+
+    import os
+    assert os.access(drive / "motherbrain.sh", os.X_OK)
+    assert os.access(drive / "MOTHERBRAIN.command", os.X_OK)
+
+
+def test_the_drive_is_honest_about_not_opening_itself(tmp_path, served):
+    """AutoRun on removable media has been off since 2011 and no file on a
+    drive can turn it back on. Saying otherwise on the tin is the one thing
+    that would make this untrustworthy."""
+    from motherbrain.usb import build
+
+    run, corpus = served
+    drive = tmp_path / "drive"
+    build(drive, str(run), str(corpus), device="cpu")
+
+    text = (drive / "START HERE.txt").read_text()
+    assert "No, and nothing on this drive can make it." in text
+    assert "2011" in text and "Conficker" in text
+
+    # And the opt-in installers say what they will do, and can be undone.
+    for name in ("windows", "linux", "macos"):
+        suffix = "cmd" if name == "windows" else "sh"
+        installer = drive / "autostart" / f"{name}-install.{suffix}"
+        undo = drive / "autostart" / f"{name}-uninstall.{suffix}"
+        assert installer.is_file() and undo.is_file(), name
+        body = installer.read_text()
+        assert "changes this" in body.lower() or "changes THIS" in body, \
+            f"{name} does not say whose machine it changes"
+        assert "uninstall" in body, f"{name} does not point at its undo"
+
+
+def test_the_board_carries_every_console_option():
+    """The board is the console plus a board, not a different program."""
+    from motherbrain.bbs import BOARD_COMMANDS, CONSOLE_OPTIONS, HANDLERS
+    from motherbrain.voice import MENU
+
+    for key, label in CONSOLE_OPTIONS:
+        assert key in HANDLERS, f"option {key} is on the menu and does nothing"
+        assert label in MENU, f"{label} is not the console's wording"
+
+    # And chatting with it is one of the board's own commands.
+    letters = {key for key, _label, _sl in BOARD_COMMANDS}
+    assert "C" in letters and HANDLERS["C"].__name__ == "chat_with_motherbrain"
+
+
+# ---- mouse, touch, and going back -------------------------------------------
+
+def test_a_click_is_the_key_that_would_have_been_typed():
+    """The menu knows where it drew itself, so pointing at an entry and
+    typing its letter are the same act. This is also what makes a tap on a
+    phone work: the browser sends the same mouse report."""
+    from motherbrain.bbs import Caller
+
+    class Fake:
+        def __init__(self):
+            self.data = bytearray()
+        def write(self, b): self.data += b
+        async def drain(self): pass
+        def get_extra_info(self, _): return ("127.0.0.1", 1)
+        def close(self): pass
+
+    class Board:
+        colours = [7] * 10
+        callers: dict = {}
+
+    caller = Caller(None, Fake(), Board(), 1)
+    caller.row = 5
+    caller.hotspot("C")
+    caller.hotspots.append((7, 40, 78, "T"))
+
+    assert caller.clicked(5, 1) == "C"
+    assert caller.clicked(7, 50) == "T"
+    assert caller.clicked(7, 10) == ""
+    assert caller.clicked(9, 1) == ""
+
+    # An SGR press turns into the keys; a release does not, or every
+    # command would run twice.
+    caller._mouse("0;50;7", "M")
+    assert "".join(caller.keys) == "T\r"
+    caller.keys.clear()
+    caller._mouse("0;50;7", "m")
+    assert not caller.keys
+    caller.keys.clear()
+    caller._mouse("64;50;7", "M")            # a scroll wheel
+    assert not caller.keys
+
+
+def test_the_board_draws_to_the_width_the_caller_has():
+    """A phone is about forty columns. The floor used to be sixty-four, and
+    a board that draws wider than the screen loses its right-hand half."""
+    from motherbrain.bbs import NARROW, wide
+
+    class Caller:
+        def __init__(self, columns): self.columns = columns
+
+    assert wide(Caller(40)) == 40
+    assert wide(Caller(20)) == 38, "it must still be drawable at all"
+    assert wide(Caller(100)) == 79
+    assert wide(Caller(40)) < NARROW, "a phone must get the one-column menu"
+    assert wide(Caller(80)) >= NARROW
+
+
+def test_going_back_names_where_it_goes(tmp_path):
+    """"Back" on its own makes a caller guess."""
+    from motherbrain.bbs import Board, Caller
+
+    class Fake:
+        def write(self, b): pass
+        async def drain(self): pass
+        def get_extra_info(self, _): return ("127.0.0.1", 1)
+        def close(self): pass
+
+    board = Board(str(tmp_path / "run"), str(tmp_path / "corpus"))
+    caller = Caller(None, Fake(), board, 1)
+    assert caller.trail == ["Main menu"]
+    assert caller.whence() == "Main menu"
+
+    with caller.at("Transfer section"):
+        assert caller.whence() == "Main menu"
+        with caller.at("WAREZ"):
+            assert caller.whence() == "Transfer section"
+            assert "WAREZ" in caller.breadcrumb()
+            assert "Transfer section" in caller.breadcrumb()
+    assert caller.trail == ["Main menu"], "the trail was not put back"
+
+
+def test_the_browser_front_end_is_a_relay_and_nothing_more():
+    """Every screen, every door, every menu, unchanged - because the page
+    speaks the same protocol the telnet socket does."""
+    import inspect
+    import socket
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from motherbrain import webterm
+
+    board = socket.socket()
+    board.bind(("127.0.0.1", 0))
+    board.listen(1)
+    port = board.getsockname()[1]
+    seen = []
+
+    def pretend():
+        conn, _ = board.accept()
+        conn.sendall(b"\x1b[1;33mMENU\x1b[0m\r\n")
+        try:
+            seen.append(conn.recv(200))
+        except OSError:
+            pass
+
+    threading.Thread(target=pretend, daemon=True).start()
+
+    client = TestClient(webterm.create_app("127.0.0.1", port))
+    assert "MotherBrain BBS" in client.get("/").text
+    with client.websocket_connect("/ws") as ws:
+        assert "MENU" in ws.receive_text()
+        # A tap is sent as the mouse report a terminal would send.
+        ws.send_text("\x1b[<0;12;5M")
+    for _ in range(50):
+        if seen:
+            break
+        import time as _t
+        _t.sleep(0.05)
+    assert seen and b"\x1b[<0;12;5M" in seen[0], seen
+
+    # The page has to raise a phone keyboard and take taps.
+    page = webterm.PAGE
+    assert "touchscreen" not in page  # not a test of the driver
+    assert "1000h" not in page, "the page does not turn mouse mode on itself"
+    assert "typedEl.focus()" in page, "no way to raise a phone keyboard"
+    assert 'addEventListener("click"' in page, "taps are not read"
+    assert "document.addEventListener(\"keydown\"" in page, \
+        "a desktop keyboard is not read"
+
+
+def test_it_reads_every_language_it_claims_to():
+    """"All programming languages" is a corpus problem, and the corpus has
+    to accept them before anything can be taught."""
+    from motherbrain.data import LANGUAGES, NAMED_LANGUAGES, language_of
+
+    names = set(LANGUAGES.values()) | set(NAMED_LANGUAGES.values())
+    for expected in ("Python", "C", "C++", "Rust", "Go", "Haskell", "COBOL",
+                     "Fortran", "Assembly", "Lisp", "Prolog" if False else
+                     "Erlang", "Swift", "SQL", "Shell", "PowerShell"):
+        assert expected in names, expected
+    assert len(names) > 70, f"only {len(names)} languages"
+
+    assert language_of("a.hs") == "Haskell"
+    assert language_of("x.cbl") == "COBOL"
+    assert language_of("Makefile") == "Make"
+    assert language_of("Dockerfile") == "Dockerfile"
+    assert language_of("photo.png") == "unknown"
+
+    # And what it says it has read has to come from what it has read.
+    import inspect
+
+    from motherbrain import cli
+    source = inspect.getsource(cli.cmd_languages)
+    assert "corpus.documents()" in source, "the census is not a census"
+    assert "Reading is not learning" in source

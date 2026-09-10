@@ -829,6 +829,118 @@ def cmd_bootstrap(args) -> int:
 # console
 
 
+def cmd_wait(args) -> int:
+    """Wait until something is listening on a port, then return.
+
+    The USB launchers start the board and dial it. Dialling a socket that
+    has not finished binding yet fails, and a launcher that fails on the
+    first run of the day is a launcher nobody trusts again.
+    """
+    import socket
+    import time as _time
+
+    deadline = _time.time() + args.timeout
+    while _time.time() < deadline:
+        try:
+            with socket.create_connection((args.host, args.port), 1.0):
+                return 0
+        except OSError:
+            _time.sleep(0.3)
+    print(f"nothing answered on {args.host}:{args.port} within "
+          f"{args.timeout:.0f}s", file=sys.stderr)
+    return 1
+
+
+def cmd_usb(args) -> int:
+    """Lay out a complete, portable MotherBrain on a USB drive."""
+    from motherbrain.usb import build, size_on_disk
+
+    dest = Path(args.dest).expanduser()
+    if dest.exists() and any(dest.iterdir()) and not args.force:
+        existing = dest / "MotherBrain"
+        if not existing.exists():
+            print(f"{dest} is not empty and has no MotherBrain on it "
+                  f"already.\n"
+                  f"Pass --force if you meant this one.", file=sys.stderr)
+            return 1
+
+    print(f"Building MotherBrain on {dest} ...")
+    done = build(dest, args.run, args.corpus, device=args.device,
+                 with_corpus=args.with_corpus, label=args.label)
+    for item in done:
+        print(f"  {item}")
+
+    total = size_on_disk(dest)
+    print(f"\n{total / 1e6:,.0f} MB on the drive.\n")
+    print("On the drive now:")
+    print("  MOTHERBRAIN.bat        Windows: double-click it")
+    print("  MOTHERBRAIN.command    macOS: double-click it")
+    print("  motherbrain.sh         Linux: run it")
+    print("  START HERE.txt         what it is, and what it will not do")
+    print("  autostart/             opt-in installers, one per platform")
+    print()
+    print("It will not open by itself when you plug it in, and nothing on a")
+    print("drive can make it: Windows switched AutoRun off for removable")
+    print("media in 2011, macOS never had it, and Linux only offers to open")
+    print("a file manager. The drive gets a name and an icon, opening it")
+    print("puts the launcher in front of you, and autostart/ sets up the")
+    print("real thing on a machine you own, once, knowingly.")
+    return 0
+
+
+def cmd_languages(args) -> int:
+    """What MotherBrain has actually read, language by language.
+
+    "Teach it all programming languages" is a corpus problem, not a model
+    problem: it can read any of the 82 this build recognises, and it knows
+    exactly the ones it has been given. This prints that, rather than a
+    claim.
+    """
+    from collections import Counter
+
+    from motherbrain.data import Corpus, LANGUAGES, language_of
+
+    corpus = Corpus(args.corpus)
+    counts: Counter = Counter()
+    chars: Counter = Counter()
+    for document in corpus.documents():
+        name = language_of(document.get("source", "")) if document.get(
+            "source") else "unknown"
+        if name == "unknown":
+            name = language_of(document.get("path", "")) or "unknown"
+        counts[name] += 1
+        chars[name] += len(document.get("text", ""))
+
+    known = sorted(set(LANGUAGES.values()))
+    print(f"MotherBrain reads {len(known)} languages. It has been given "
+          f"{len([n for n in counts if n != 'unknown'])} of them.\n")
+
+    if counts:
+        width = max(len(n) for n in counts)
+        for name, n in counts.most_common(40):
+            share = chars[name] / max(1, sum(chars.values()))
+            bar = "█" * int(share * 30)
+            print(f"  {name:<{width}}  {n:>7,} document(s)  "
+                  f"{chars[name]:>13,} chars  {bar}")
+    else:
+        print("  nothing yet.")
+
+    missing = [n for n in known if n not in counts]
+    if missing and args.missing:
+        print(f"\n  never seen: {', '.join(missing)}")
+    print(f"\nFeed it more with:  mb feed --path /some/source/tree")
+    print("Then `mb patch` to learn it. Reading is not learning; a "
+          "document\nin the corpus changes nothing until a patch is applied.")
+    return 0
+
+
+def cmd_call(args) -> int:
+    """Dial a bulletin board. Windows and macOS ship without a telnet client."""
+    from motherbrain.client import call
+
+    return call(args.host, args.port, terminal=args.term)
+
+
 def cmd_doors(args) -> int:
     """Play the board's door games at this keyboard, with no board."""
     from motherbrain.localterm import play
@@ -891,6 +1003,113 @@ def cmd_infer(args) -> int:
     return 0
 
 
+def _first_free_port(host: str, choices) -> int:
+    """The first port we may actually bind, in the caller's order of taste."""
+    import socket
+
+    for port in choices:
+        try:
+            with socket.socket() as probe:
+                probe.bind((host, port))
+                return port
+        except OSError:
+            continue
+    return choices[-1]
+
+
+def cmd_start(args) -> int:
+    """Start the whole thing: the board, the browser front-end, and a call.
+
+    One command, because "how do I start it" should have a one-command
+    answer. Everything else - `mb bbs`, `mb call`, `mb gui` - is this taken
+    apart for people who want the pieces separately.
+    """
+    import subprocess
+    import time as _time
+
+    from motherbrain.client import call
+
+    # Telnet's port is 23 and this board answers on it. Below 1024 needs
+    # privilege on every Unix and an elevated prompt on Windows, so when
+    # that is not available it steps down to 2323 and says so rather than
+    # failing - the alternative is a program that only starts as root.
+    port, web = args.port, args.web
+    if port == 0:
+        port = _first_free_port(args.host, (23, 2323, 2424))
+        if port != 23:
+            print(f"port 23 needs privilege here, so the board is on {port}.")
+            print(f"  for the real thing:  sudo mb start --port 23")
+    host = "0.0.0.0" if args.open else args.host
+    command = [sys.executable, "-m", "motherbrain", "bbs",
+               "--port", str(port), "--web", str(web),
+               "--host", host, "--run", args.run, "--corpus", args.corpus,
+               "--device", args.device]
+    if args.open:
+        # Anyone, any time, every feature. Telnet has no encryption and
+        # never did, so this is said once and plainly rather than buried.
+        command += ["--insecure", "--new-user-level", "50"]
+        print("Open board: anybody who can reach this machine can call, and")
+        print("a caller who has never called before can read, post, download")
+        print("and upload straight away. Telnet is plaintext - everything")
+        print("typed and everything generated crosses the network in the")
+        print("clear. Applying a patch stays the sysop's key.")
+        print()
+    board = subprocess.Popen(
+        command,
+        stdout=subprocess.DEVNULL if not args.verbose else None,
+        stderr=subprocess.STDOUT if not args.verbose else None)
+
+    print(f"Starting MotherBrain. The first run loads the model, which takes "
+          f"a minute.")
+    try:
+        deadline = _time.time() + args.timeout
+        import socket as _socket
+
+        while _time.time() < deadline:
+            if board.poll() is not None:
+                print("the board stopped before it finished starting. "
+                      "Run `mb bbs` on its own to see why.", file=sys.stderr)
+                return 1
+            try:
+                with _socket.create_connection(("127.0.0.1", port), 1.0):
+                    break
+            except OSError:
+                _time.sleep(0.4)
+        else:
+            print(f"the board did not answer within {args.timeout:.0f}s",
+                  file=sys.stderr)
+            board.terminate()
+            return 1
+
+        if args.open:
+            from motherbrain.gui import lan_addresses
+
+            print(f"  telnet    <this machine> {port}")
+            for address in lan_addresses(port):
+                where = address.replace("http://", "").rsplit(":", 1)[0]
+                print(f"            telnet {where} {port}")
+                print(f"  browser   http://{where}:{web}/")
+        else:
+            print(f"  telnet    {args.host} {port}")
+            print(f"  browser   http://{args.host}:{web}/   "
+                  f"(a phone can tap the menus)")
+        print()
+        if args.no_call:
+            print("Running. Ctrl-C to stop the board.")
+            board.wait()
+            return 0
+        return call("127.0.0.1", port)
+    except KeyboardInterrupt:
+        return 0
+    finally:
+        if board.poll() is None:
+            board.terminate()
+            try:
+                board.wait(timeout=10)
+            except Exception:                             # noqa: BLE001
+                board.kill()
+
+
 def cmd_bbs(args) -> int:
     """Answer the telephone: MotherBrain as a 1980s bulletin board."""
     from motherbrain.bbs import serve
@@ -899,7 +1118,8 @@ def cmd_bbs(args) -> int:
                  port=args.port, password=args.password,
                  sysop_password=args.sysop_password, insecure=args.insecure,
                  max_callers=args.nodes, max_tokens=args.max_tokens,
-                 steps=args.steps, grow=args.grow)
+                 steps=args.steps, grow=args.grow, web_port=args.web,
+                 new_user_sl=args.new_user_level)
 
 
 def cmd_console(args) -> int:
@@ -2350,6 +2570,41 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_sight)
 
     s = common(sub.add_parser(
+        "usb", help="put a complete, portable MotherBrain on a USB drive"))
+    s.add_argument("dest", help="the drive, e.g. /media/usb or E:\\")
+    s.add_argument("--with-corpus", action="store_true",
+                   help="also copy the corpus. Large, and only needed to "
+                        "learn something new or to quote what it has read")
+    s.add_argument("--label", default="MOTHERBRAIN",
+                   help="the drive's name in Explorer and Finder")
+    s.add_argument("--force", action="store_true",
+                   help="write into a directory that already has things in it")
+    s.add_argument("--device", default="cpu")
+    s.set_defaults(func=cmd_usb)
+
+    s = sub.add_parser(
+        "wait", help="wait until a port answers (the USB launchers use it)")
+    s.add_argument("port", type=int, default=23, nargs="?")
+    s.add_argument("--host", default="127.0.0.1")
+    s.add_argument("--timeout", type=float, default=180.0)
+    s.set_defaults(func=cmd_wait)
+
+    s = common(sub.add_parser(
+        "languages", help="which programming languages it has actually read"))
+    s.add_argument("--missing", action="store_true",
+                   help="also list the ones it has never been given")
+    s.set_defaults(func=cmd_languages)
+
+    s = sub.add_parser(
+        "call", help="dial a bulletin board (a telnet client, built in)")
+    s.add_argument("host", nargs="?", default="127.0.0.1")
+    s.add_argument("port", nargs="?", type=int, default=23)
+    s.add_argument("--term", default="xterm-256color",
+                   help="terminal type to announce. `ansi-bbs` asks for code "
+                        "page 437, as a period client would")
+    s.set_defaults(func=cmd_call)
+
+    s = common(sub.add_parser(
         "doors", help="play the BBS door games here, without the BBS"))
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_doors)
@@ -2377,6 +2632,26 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_infer)
 
     s = common(sub.add_parser(
+        "start", help="start the BBSLLM: the board, the browser, and a call"))
+    s.add_argument("--port", type=int, default=0,
+                   help="the telnet port. The default is 23 - telnet's own - "
+                        "stepping down to 2323 where that needs privilege")
+    s.add_argument("--web", type=int, default=8080,
+                   help="the browser port, for phones and mice")
+    s.add_argument("--host", default="127.0.0.1",
+                   help="0.0.0.0 to let other machines on your network call")
+    s.add_argument("--open", action="store_true",
+                   help="let anyone on the network call, and let a new "
+                        "caller use everything but the sysop's key")
+    s.add_argument("--no-call", action="store_true",
+                   help="start it and leave it running, without dialling in")
+    s.add_argument("--verbose", action="store_true",
+                   help="show the board's own output")
+    s.add_argument("--timeout", type=float, default=300.0)
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_start)
+
+    s = common(sub.add_parser(
         "bbs", help="run MotherBrain as a telnet bulletin board (port 23)"))
     s.add_argument("--host", default="127.0.0.1",
                    help="interface to answer on. Loopback by default: telnet "
@@ -2394,6 +2669,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="face a network with no password. Do not")
     s.add_argument("--nodes", type=int, default=512,
                    help="how many callers may be connected at once")
+    s.add_argument("--web", type=int, default=0, metavar="PORT",
+                   help="also serve the board to a browser on this port, "
+                        "where a phone can tap the menus with a finger")
+    s.add_argument("--new-user-level", type=int, default=None, metavar="SL",
+                   help="what a caller who has never called before can do. "
+                        "10 (the default) is unvalidated; 50 can post, "
+                        "download and upload at once")
     s.add_argument("--max-tokens", type=int, default=120)
     s.add_argument("--steps", type=int, default=100,
                    help="training steps when the sysop applies a patch")

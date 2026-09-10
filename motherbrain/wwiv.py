@@ -238,14 +238,19 @@ class Users:
                 return user
         return None
 
-    def create(self, name: str, sysop: bool = False) -> User:
+    def create(self, name: str, sysop: bool = False,
+               sl: int | None = None, dsl: int | None = None,
+               flags: str = "") -> User:
+        """A new record. What a new caller starts with is the sysop's call."""
         number = max(self.records, default=0) + 1
         today = time.strftime("%Y-%m-%d")
         user = User(number=number, name=name[:30],
-                    sl=SYSOP_SL if sysop else NEW_USER_SL,
-                    dsl=SYSOP_SL if sysop else NEW_USER_DSL,
-                    ar="ABCDEFGHIJKLMNOP" if sysop else "",
-                    dar="ABCDEFGHIJKLMNOP" if sysop else "",
+                    sl=SYSOP_SL if sysop else (NEW_USER_SL if sl is None
+                                               else sl),
+                    dsl=SYSOP_SL if sysop else (NEW_USER_DSL if dsl is None
+                                                else dsl),
+                    ar="ABCDEFGHIJKLMNOP" if sysop else flags,
+                    dar="ABCDEFGHIJKLMNOP" if sysop else flags,
                     first_on=today, last_on=today, day=today)
         self.records[number] = user
         self.save()
