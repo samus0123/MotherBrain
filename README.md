@@ -500,6 +500,7 @@ copied the directory to.
 | `mb bbs` | a 1980s bulletin board, on telnet. `telnet 127.0.0.1 23` |
 | `mb serve` | HTTP for your IDEs, and a browser console at `/` |
 | `mb infer` | many prompts at once, batched, with the throughput printed |
+| `mb doors` | the board's ten door games, at your own keyboard |
 | `mb chat` | one prompt, one completion, nothing else |
 | `mb status` | what is on disk and what to run next |
 
@@ -1271,6 +1272,53 @@ scales with how long the last batch took: two per cent of a generation to
 halve the number of generations is a trade worth making, and on a fast device
 it stays near zero by itself. What it does not yet do is admit a new request
 into a batch already running — that is the next real gain, and it is not here.
+
+## Natural language
+
+A 52M base model trained on source code cannot answer a question. Sampled
+freely it produces fluent English about nothing, which is the worst failure
+available to a chat box: it looks exactly like an answer.
+
+So it does not sample. `motherbrain/nlp.py` reads the sentence and composes a
+reply out of something that is actually true, in this order:
+
+| source | what it means |
+| --- | --- |
+| `COMPUTED` | arithmetic, done exactly. `what is 144 / 12` → `12` |
+| `FROM ITS OWN STATE` | its version, size, senses — read off disk |
+| `KNOWN` | something it was told, and what follows from it |
+| `QUOTED` | sentences it has actually read, word for word |
+| `NOT KNOWN` | and saying so is the answer |
+
+The tagger is rule-based — the closed classes listed in full, then suffix
+rules — because a statistical tagger trained on nothing is worse than a table
+and a table can be read. The composer handles agreement, articles and number,
+so what comes out is a sentence: `it is` / `they are` / `I am`, `a modem` /
+`an hour` / `a user`.
+
+Quoting is grounded in an inverted index over the corpus — 181,692 sentences,
+built once in about eight seconds, queried in single-digit milliseconds. It
+quotes rather than paraphrases, because paraphrasing is where a retrieval
+system starts inventing, and it needs two content words in common before it
+will offer a sentence at all: one word in common is a coincidence.
+
+The last row is the important one. `what is a blorptrix` gets:
+
+```
+[NOT KNOWN] - and saying so is the answer.
+  I do not know. Nothing I have been told settles blorptrix, and I will
+  not make something up to fill the gap. Teach me with "blorptrix is ..."
+  and I will keep it.
+```
+
+Nothing is appended to that. Following an admission with fluent prose takes
+it back, and the prose is the part people remember. The one place the raw
+model still speaks is THE ORACLE door, where showing what it does unaided is
+the entire point.
+
+All four faces — terminal, window, browser (`POST /ask`) and the board — go
+through this one pipeline, so they cannot drift into disagreeing about what
+is true.
 
 ## Honest limits
 

@@ -896,44 +896,30 @@ class App:
                            f"loss {v.loss_before:.3f} -> {v.loss_after:.3f}\n", "note")
             return
 
-        # A question about itself has a real answer on disk. Answering it from
-        # state rather than generating is the difference between a reply and a
-        # convincing noise.
-        from motherbrain.chat import CONTINUATION_NOTE, consider, respond
-        from motherbrain.logic import solve
+        # The same language pipeline the terminal and the board use: read the
+        # sentence, then answer from something true. A model this size
+        # produces a wrong number with exactly the confidence of a right one,
+        # so nothing that can be established ever reaches the sampler.
+        from motherbrain import nlp
+        from motherbrain.chat import CONTINUATION_NOTE
         from motherbrain.stats import gather
 
-        # Anything with a definite answer is computed, never generated. A model
-        # this size produces a wrong number with exactly the confidence of a
-        # right one, so the arithmetic never reaches it.
-        exact = solve(text)
-        if exact is not None:
-            self._emit(exact.value + "\n")
-            if exact.working:
-                self._emit(f"  {exact.working}\n", "note")
-            self._speak(exact.value[:200])
-            return
-
         try:
-            considered = consider(text, self.run_dir)
+            found = nlp.answer(text, run_dir=self.run_dir,
+                               corpus_dir=self.corpus_dir,
+                               stats=gather(self.run_dir, self.corpus_dir,
+                                            model=self.model, device=self.dev))
         except Exception:                                 # noqa: BLE001
-            considered = None
-        if considered is not None:
-            self._emit(considered[1] + "\n")
-            self._speak(considered[1][:300])
-            return
+            found = None
 
-        try:
-            summary = gather(self.run_dir, self.corpus_dir, model=self.model,
-                             device=self.dev)
-            reply_kind, reply = respond(text, summary)
-        except Exception:                                 # noqa: BLE001
-            reply_kind, reply = "generate", ""
-
-        if reply_kind == "fact":
-            self._emit(reply + "\n")
-            self._speak(reply[:300])
+        if found is not None and found.source != "none":
+            self._emit(found.text + "\n")
+            for line in found.evidence:
+                self._emit(f"  {line}\n", "note")
+            self._speak(found.text[:300])
             return
+        if found is not None:
+            self._emit(found.text + "\n", "note")
 
         image = self._load_image()
         produced = []

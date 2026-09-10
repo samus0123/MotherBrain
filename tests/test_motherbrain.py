@@ -2086,12 +2086,22 @@ def test_every_surface_answers_from_state_not_prose(served):
     from motherbrain import cli, gui
     from motherbrain.server import create_app
 
+    # Both used to import chat and logic directly, and drifted apart. They
+    # go through the one language pipeline now, which calls both - so the
+    # assertion is that they use it, not that they reimplement it.
     for where, source in (("window", inspect.getsource(gui.App._do)),
                           ("terminal", inspect.getsource(cli.cmd_console))):
-        assert "from motherbrain.chat import" in source, \
-            f"the {where} never asks what it knows about itself"
-        assert "from motherbrain.logic import" in source, \
-            f"the {where} generates answers it could compute"
+        assert "nlp.answer" in source, \
+            f"the {where} answers without reading the sentence first"
+
+    from motherbrain import nlp
+    pipeline = inspect.getsource(nlp.answer)
+    assert "from motherbrain.logic import solve" in pipeline, \
+        "the pipeline generates answers it could compute"
+    assert "from motherbrain.chat import consider" in pipeline, \
+        "the pipeline never asks what it was told"
+    assert "answer_about_self" in pipeline, \
+        "the pipeline never asks what it knows about itself"
 
     run, corpus = served
     client = TestClient(create_app(run_dir=str(run), corpus_dir=str(corpus),
@@ -3853,9 +3863,13 @@ def test_a_caller_can_dial_in_and_reach_the_menu(board_port):
         reader, writer = await asyncio.open_connection("127.0.0.1", port)
         client = _Dialler(reader, writer)
         opening = _strip(await client.read(3.0))
-        assert "handle" in opening, opening[-300:]
+        assert "user number or name" in opening, opening[-300:]
 
-        await client.type("TESTER\r", 2.0)
+        # WWIV's login: NEW, then the new-user application.
+        await client.type("NEW\r", 1.5)
+        await client.type("TESTER\r", 1.5)
+        await client.type("\r", 1.5)            # real name, skipped
+        await client.type("\r", 2.0)            # no password
         menu = _strip(await client.type(" ", 3.0))
 
         # The five console options, in order, word for word.
@@ -3866,8 +3880,10 @@ def test_a_caller_can_dial_in_and_reach_the_menu(board_port):
             assert label in MENU, f"{label} drifted from the console menu"
 
         assert "Chat with MotherBrain" in menu
-        assert "Teleconference" in menu
+        assert "Transfer section" in menu
+        assert "sysop" in menu, "the local caller is not offered //"
         assert board.callers, "the board did not register the node"
+        assert board.users.find("TESTER") is not None, "no user record"
 
         # And it answers a question it can answer exactly.
         await client.type("C\r", 2.0)
@@ -3895,9 +3911,12 @@ def test_two_callers_hear_each_other(board_port):
             reader, writer = await asyncio.open_connection("127.0.0.1", port)
             client = _Dialler(reader, writer)
             await client.read(2.0)
-            await client.type(f"{handle}\r", 1.5)
-            await client.type(" ", 2.0)
-            await client.type("T\r", 2.0)
+            await client.type("NEW\r", 1.0)
+            await client.type(f"{handle}\r", 1.0)
+            await client.type("\r", 1.0)
+            await client.type("\r", 1.5)
+            await client.type(" ", 1.5)
+            await client.type("M\r", 2.0)      # WWIV: M is multi-node chat
             return client, writer
 
         alice, aw = await dial("ALICE")
@@ -4101,3 +4120,360 @@ def test_running_the_program_with_no_arguments_starts_it(monkeypatch):
     # And it is still an error to ask for a command that does not exist.
     with pytest.raises(SystemExit):
         cli.main(["nonsense"])
+
+
+# ---- WWIV -------------------------------------------------------------------
+
+def test_heart_codes_become_colour_and_measure_as_nothing():
+    """WWIV wrote a heart and a digit, and looked the colour up in a table
+    the sysop could edit. Every screen on this board is written that way, so
+    a width that counted the codes would misalign all of them."""
+    from motherbrain import wwiv
+
+    text = "\x031Main\x030 normal \x032yellow"
+    rendered = wwiv.render(text)
+    assert "\x1b[" in rendered and "\x03" not in rendered
+    assert wwiv.strip(text) == "Main normal yellow"
+    assert wwiv.width_of(text) == len("Main normal yellow")
+
+    # A heart with no digit after it is somebody typing a heart.
+    assert wwiv.render("love \x03 you") == "love \x03 you"
+
+    # And the table is what decides, so changing it changes every screen.
+    other = tuple([0x0C] + list(wwiv.DEFAULT_COLOURS[1:]))
+    assert wwiv.render("\x030x", other) != wwiv.render("\x030x")
+
+
+def test_security_levels_decide_what_a_caller_can_do():
+    """One number per user, looked up in one place. That was the whole of a
+    WWIV board's access policy and it is a genuinely good design."""
+    from motherbrain import wwiv
+
+    new = wwiv.User(number=2, name="NEWBIE")
+    assert not new.sysop
+    assert not new.rules().can_upload, "a brand new caller could upload"
+    assert new.minutes_left() == wwiv.LEVELS[10].minutes_per_call
+
+    sysop = wwiv.User(number=1, name="SYSOP", sl=255, dsl=255,
+                      ar="ABCDEFGHIJKLMNOP", dar="ABCDEFGHIJKLMNOP")
+    assert sysop.sysop and sysop.rules().can_upload
+
+    # DSL and DAR gate a file directory independently of SL.
+    caller = wwiv.User(number=3, name="MID", sl=50, dsl=20, dar="B")
+    assert caller.may_download("", 20)
+    assert not caller.may_download("", 30), "DSL 20 reached a DSL 30 directory"
+    assert caller.may_download("B", 10)
+    assert not caller.may_download("C", 10), "a missing DAR flag let them in"
+
+    # Today's allowance runs out even when the per-call one has not.
+    tired = wwiv.User(number=4, name="TIRED", sl=10)
+    tired.today = wwiv.LEVELS[10].minutes_per_day
+    assert tired.minutes_left() == 0
+
+
+def test_user_records_are_numbered_from_one_and_survive_a_restart(tmp_path):
+    """USER.LST, and #1 is the sysop."""
+    from motherbrain import wwiv
+
+    path = tmp_path / "users.json"
+    users = wwiv.Users(path)
+    first = users.create("SAMUS", sysop=True)
+    second = users.create("GUEST")
+    assert (first.number, second.number) == (1, 2)
+    assert first.sysop and not second.sysop
+
+    again = wwiv.Users(path)
+    assert again.find("2").name == "GUEST"
+    assert again.find("samus").number == 1
+    assert again.find("#1").name == "SAMUS"
+    assert again.find("nobody") is None
+
+
+def test_the_board_menu_is_still_the_console_menu():
+    """WWIV's letters around them, but the five are the five, in order."""
+    from motherbrain.bbs import CONSOLE_OPTIONS
+    from motherbrain.voice import MENU
+
+    assert [key for key, _ in CONSOLE_OPTIONS] == ["1", "2", "3", "4", "5"]
+    positions = [MENU.index(label) for _, label in CONSOLE_OPTIONS]
+    assert positions == sorted(positions), "the board reordered the options"
+
+
+def test_passwords_are_hashed_and_never_stored(tmp_path):
+    """Telnet is plaintext; the password file does not have to be."""
+    from motherbrain.bbs import Board
+
+    board = Board(str(tmp_path / "run"), str(tmp_path / "corpus"))
+    user = board.users.create("SAMUS")
+    assert board.check_password(user, "anything"), "no password means open"
+
+    board.set_password(user, "correct horse battery staple")
+    stored = (tmp_path / "run" / "bbs" / "passwords.json").read_text()
+    assert "correct horse" not in stored
+    assert board.check_password(user, "correct horse battery staple")
+    assert not board.check_password(user, "wrong")
+
+    board.clear_password(user)
+    assert board.check_password(user, "")
+
+
+def test_there_is_no_shell_command_on_the_board():
+    """WWIV had //DOS. This does not, and the reason is not an oversight: a
+    shell on the far end of a plaintext telnet session is the hole."""
+    import inspect
+
+    from motherbrain import bbs
+
+    names = {name for name, _ in bbs.SYSOP_HELP}
+    assert not any("DOS" in name or "SHELL" in name.upper() for name in names)
+    source = inspect.getsource(bbs.sysop_command)
+    assert "subprocess" not in source and "os.system" not in source
+    assert "//DOS" in source, "the reason it is absent is no longer written down"
+
+
+def test_the_sysop_can_reach_every_internal():
+    """`//?` has to list something that exists for each line it prints."""
+    import inspect
+
+    from motherbrain import bbs
+
+    source = inspect.getsource(bbs.sysop_command)
+    for name, _what in bbs.SYSOP_HELP:
+        verb = name[2:].split()[0].split("<")[0].strip().upper()
+        if verb in ("?",):
+            continue
+        assert f'"{verb}"' in source, f"{name} is listed but not implemented"
+
+
+def test_a_release_is_a_real_archive_that_describes_itself(tmp_path):
+    """A file area is a shelf of packaged things, and the thing that makes
+    it one is the FILE_ID.DIZ the listing reads out of each archive."""
+    import zipfile
+
+    from motherbrain import warez
+
+    built = warez.build(tmp_path / "run", force=True)
+    names = {p.name for p in built}
+    assert {"MBRAIN.ZIP", "MBDOORS.ZIP", "MBANSI.ZIP", "MBRAIN.NFO"} <= names
+
+    doors_zip = warez.area(tmp_path / "run") / "MBDOORS.ZIP"
+    with zipfile.ZipFile(doors_zip) as archive:
+        inside = archive.namelist()
+        assert "FILE_ID.DIZ" in inside
+        assert "PLAYDOORS.py" in inside
+        assert "motherbrain/doors.py" in inside
+        # It has to stand alone: nothing that needs torch belongs in it.
+        assert not any(n.endswith(("model.py", "train.py", "server.py"))
+                       for n in inside), inside
+
+    text = warez.read_diz(doors_zip)
+    assert text and len(text.splitlines()) <= warez.DIZ_LINES
+    assert all(len(line) <= warez.DIZ_WIDTH for line in text.splitlines())
+    assert warez.describe(doors_zip).startswith("MOTHERBRAIN DOORS")
+
+    # The ANSI pack has to be openable by something that reads .ANS files.
+    with zipfile.ZipFile(warez.area(tmp_path / "run") / "MBANSI.ZIP") as art:
+        logo = art.read("MBLOGO.ANS")
+        assert logo.startswith(b"\x1b["), "not an ANSI file"
+        logo.decode("cp437")            # a real .ANS is code page 437
+
+
+def test_the_public_directories_take_uploads_from_anyone(tmp_path):
+    """GAMES and WHATEVERWARE are open both ways; the rest are not."""
+    from motherbrain.bbs import Board, file_sections, upload_target
+
+    board = Board(str(tmp_path / "run"), str(tmp_path / "corpus"))
+    sections = {s["name"]: s for s in file_sections(board)}
+
+    for name in ("GAMES", "WHATEVERWARE"):
+        assert sections[name]["upload"], f"{name} does not take uploads"
+        assert sections[name]["dsl"] == 0, f"{name} is gated"
+        assert sections[name].get("public"), f"{name} is not public"
+    assert not sections["WAREZ"].get("upload"), "the shelf takes uploads"
+    assert not sections["SOURCE"].get("upload")
+
+    class FakeCaller:
+        handle = "../../etc"
+        board = None
+
+    caller = FakeCaller()
+    caller.board = board
+    public = upload_target(caller, sections["GAMES"])
+    assert public == Path(sections["GAMES"]["roots"][0])
+    private = upload_target(caller, sections["USER"])
+    assert ".." not in private.parts, "a handle became a path"
+
+
+def test_the_classic_doors_are_the_classics():
+    """The BASIC canon is public domain, which is why these are the real
+    games rather than things in their shape."""
+    import random
+
+    from motherbrain import doors
+
+    keys = {key for key, _name, _blurb in doors.CATALOGUE}
+    assert {"H", "W", "L", "N", "E", "R"} <= keys
+
+    # ELIZA reflects pronouns, which is the entire trick.
+    rng = random.Random(0)
+    assert "you are" in doors.eliza_reply("I am tired", rng).lower() or \
+        "tired" in doors.eliza_reply("I am tired", rng).lower()
+    assert doors._reflect("i am your friend") == "you are my friend"
+
+    # And the daily-turn RPG resets its turns, which is what makes it daily.
+    fresh = doors._wyrm_new("SOMEBODY")
+    assert fresh["turns"] == doors.WYRM_TURNS
+    assert fresh["level"] == 1 and fresh["gold"] == 0
+
+
+# ---- natural language -------------------------------------------------------
+
+def test_it_reads_a_sentence_before_answering_it():
+    """A tagger that guesses makes the parser downstream confidently wrong,
+    so the closed classes are listed and the rest is decided by shape."""
+    from motherbrain import nlp
+
+    tagged = dict(nlp.tag(nlp.tokenise("the model runs quickly")))
+    assert tagged["the"] == "DET"
+    assert tagged["runs"] in ("VERB", "NOUN")
+    assert tagged["quickly"] == "ADV"
+
+    for text, kind in [("What is a modem?", "question"),
+                       ("hello", "greeting"),
+                       ("thanks", "thanks"),
+                       ("The brain learns.", "statement"),
+                       ("can you see", "question"),
+                       ("why not", "question")]:
+        assert nlp.analyse(text).kind == kind, text
+
+    asked = nlp.analyse("how many parameters do you have")
+    assert asked.wh == "how" and asked.about_self
+    assert "parameter" in asked.keywords, asked.keywords
+
+    # The lemmatiser must not mangle adjectives - "conscious" is not
+    # "consciou", and every keyword match downstream depends on it.
+    assert nlp.lemma("conscious", "ADJ") == "conscious"
+    assert nlp.lemma("parameters") == "parameter"
+    assert nlp.lemma("running", "VERB") == "run"
+    assert nlp.lemma("children") == "child"
+
+
+def test_it_composes_english_rather_than_fragments():
+    """Agreement is where a generated sentence gives itself away."""
+    from motherbrain import nlp
+
+    assert nlp.agree("it", "be") == "is"
+    assert nlp.agree("they", "be") == "are"
+    assert nlp.agree("I", "be") == "am"
+    assert nlp.agree("model", "run") == "runs"
+    assert nlp.agree("models", "run") == "run"
+    assert nlp.agree("it", "try") == "tries"
+    assert nlp.agree("it", "watch") == "watches"
+
+    assert nlp.article("modem") == "a"
+    assert nlp.article("apple") == "an"
+    assert nlp.article("hour") == "an"
+    assert nlp.article("user") == "a", "'an user' is how you spot a machine"
+
+    assert nlp.sentence("  the  cat sat ") == "The cat sat."
+    assert nlp.sentence("already right.") == "Already right."
+    assert nlp.join(["sight", "sound", "video"]) == "sight, sound and video"
+    assert nlp.join(["one"]) == "one"
+
+
+def test_it_says_it_does_not_know(tmp_path):
+    """The whole design turns on this being a real answer rather than a
+    failure to produce one."""
+    from motherbrain import nlp
+
+    found = nlp.answer("what is a blorptrix", run_dir=str(tmp_path))
+    assert found.source == "none"
+    assert "do not know" in found.text
+    assert "blorptrix" in found.text, "it did not say what it did not know"
+
+    # And it never quietly produces prose in place of the admission.
+    assert not found.evidence
+
+
+def test_the_pipeline_prefers_the_certain_source(tmp_path):
+    """Computed, then told, then its own state, then quoted. In that order,
+    because that is the order of certainty."""
+    from motherbrain import nlp
+    from motherbrain.knowledge import Knowledge
+
+    run = tmp_path / "run"
+    run.mkdir()
+
+    assert nlp.answer("hello").source == "social"
+    assert nlp.answer("what is 6 * 7", run_dir=str(run)).source == "exact"
+    assert "42" in nlp.answer("what is 6 * 7", run_dir=str(run)).text
+
+    base = Knowledge(str(run))
+    base.tell("a modem is a device")
+    base.tell("all devices need power")
+    told = nlp.answer("what is a modem", run_dir=str(run))
+    assert told.source == "known"
+    assert "device" in told.text and "power" in told.text
+
+    state = {"version": 5, "total_params": 52_222_872,
+             "active_params": 33_348_504, "params_at_v0": 18_880_896,
+             "patches": 5}
+    mine = nlp.answer("how many parameters do you have", run_dir=str(run),
+                      stats=state)
+    assert mine.source == "self" and "52,222,872" in mine.text
+
+
+def test_retrieval_quotes_and_never_paraphrases(tmp_path):
+    """Grounding an answer in something it has read is only honest if you
+    can be shown the sentence, exactly as it was written."""
+    from motherbrain import nlp
+    from motherbrain.data import Corpus
+
+    corpus = Corpus(tmp_path / "corpus")
+    corpus.add_text(
+        "A modem converts digital data into an analogue signal. "
+        "The signal travels over a telephone line. "
+        "This third sentence is about something else entirely.", "seed")
+    nlp.forget_index()
+
+    index = nlp.corpus_index(str(tmp_path / "corpus"))
+    assert len(index) >= 3
+    # The inverted index must only offer sentences that could match.
+    assert index.candidates(["bicycle"]) == []
+    assert index.candidates(["modem"])
+
+    found = nlp.answer("what is a modem", corpus_dir=str(tmp_path / "corpus"))
+    assert found.source == "read"
+    assert found.evidence, "it claimed to quote and quoted nothing"
+    quoted = found.evidence[0].strip('"')
+    assert quoted in ("A modem converts digital data into an analogue signal.",
+                      "The signal travels over a telephone line."), quoted
+    nlp.forget_index()
+
+
+def test_every_face_answers_through_the_same_pipeline():
+    """Four faces that disagree about what is true are four programs."""
+    import inspect
+
+    from motherbrain import bbs, cli, gui
+
+    for name, source in (("board", inspect.getsource(bbs.Board.answer)),
+                         ("terminal", inspect.getsource(cli.cmd_console)),
+                         ("window", inspect.getsource(gui.App._do))):
+        assert "nlp.answer" in source, f"the {name} answers its own way"
+
+    from motherbrain.server import create_app
+    assert "ask_endpoint" in inspect.getsource(create_app)
+
+
+def test_it_describes_itself_as_what_it_is():
+    """It is an artificial intelligence system, and the honest way to say so
+    is to name the parts rather than the word."""
+    from motherbrain.chat import answer_about_self
+
+    said = answer_about_self("identity", {"version": 5,
+                                          "total_params": 52_222_872})
+    assert "artificial intelligence" in said
+    for part in ("knowledge base", "calculator", "perception", "reasoning"):
+        assert part in said, f"it did not mention its {part}"
+    assert "labelled" in said, "it did not say answers carry their source"

@@ -31,7 +31,10 @@ _PATTERNS = [
     ("limits", r"\bwhat can'?t you do\b|\bwhat can you not do\b|"
                r"\byour limits\b|\bwhat are you bad at\b|"
                r"\bcan you (reason|think|understand)\b|\bare you (smart|conscious|alive)\b"),
-    ("identity", r"\bwho are you\b|\bwhat are you\b|\bwhat is motherbrain\b"),
+    ("identity", r"\bwho are you\b|\bwhat are you\b|\bwhat is motherbrain\b|"
+                 r"\bare you (an? )?(ai|a\.i\.|artificial intelligence|"
+                 r"machine|model|robot|program|computer|bot)\b|"
+                 r"\bwhat kind of (thing|model|system) are you\b"),
     ("capability", r"\bwhat can you do\b|\bhelp\b$|\bwhat are my options\b"),
 ]
 
@@ -130,17 +133,36 @@ def answer_about_self(kind: str, stats: dict) -> str:
         heard = stats.get("sound_accuracy", 0.0)
         sight = ("can see and hear, narrowly" if can_see and heard
                  else "can see, narrowly" if can_see else "text only")
-        return (f"MotherBrain: a mixture-of-experts transformer, v{version}, "
-                f"{total:,} parameters, {sight}. Trained from nothing on this "
-                f"machine, and grown by patches rather than retrained.")
+        # An artificial intelligence system, and the honest way to say so is
+        # to name the parts rather than the word: what answers you is not
+        # only the network, and saying "a transformer" undersells the half
+        # of it that is the reason the answers are true.
+        return (
+            f"MotherBrain: an artificial intelligence system built around a "
+            f"mixture-of-experts transformer, v{version}, {total:,} "
+            f"parameters, {sight}.\n"
+            f"The network is one part of it. The others are a knowledge base "
+            f"that stores what it is told and derives what follows, an exact "
+            f"calculator, a language pipeline that reads your sentence and "
+            f"composes a reply from evidence, a retrieval index over "
+            f"everything it has read, a perception tower, and a reasoning "
+            f"loop that writes code and runs it before showing it to you.\n"
+            f"It was trained from nothing on this machine and grown by "
+            f"patches rather than retrained. Every answer it gives is "
+            f"labelled with where the answer came from, because the network "
+            f"on its own would answer everything fluently and most of it "
+            f"falsely.")
 
     if kind == "capability":
-        return ("Four things: write a program from a description, carry out an "
-                "instruction (make, run, write, find, delete, list, sh), learn "
-                "something new, or apply what was learned as a patch. Ask me "
-                "what I am, how big I am, what I learned, or whether I can "
-                "see, and you will get facts. Ask me anything else and you "
-                "will get a continuation, which is not the same thing.")
+        return ("Five things: write a program from a description, carry out "
+                "an instruction, learn something new, apply what was learned "
+                "as a patch, or open the window. Ask me what I am, how big I "
+                "am, what I learned, or whether I can see, and you get facts "
+                "off my own state. Ask me arithmetic and I compute it. Tell "
+                "me something and I keep it, and answer from it later. Ask "
+                "me about anything in my corpus and I quote what I actually "
+                "read. Ask me anything else and I say I do not know, which is "
+                "the answer rather than the failure.")
     return ""
 
 
