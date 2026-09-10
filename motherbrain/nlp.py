@@ -473,8 +473,16 @@ _INDEX: dict[str, Index] = {}
 _INDEX_LIMIT = 250_000
 
 
-def corpus_index(corpus_dir, documents: int = 12_000) -> Index:
-    """The inverted index over the corpus, built once and kept."""
+def corpus_index(corpus_dir, documents: int = 12_000,
+                 recent: int = 1_000) -> Index:
+    """The inverted index over the corpus, built once and kept.
+
+    The front of the corpus and the back of it. Reading only the front
+    meant that anything just fed - which lands at the end, behind twenty
+    thousand documents - was never indexed, so the board could not quote
+    back the thing it had been given a minute earlier. The newest
+    documents are exactly the ones somebody is most likely to ask about.
+    """
     key = str(corpus_dir)
     cached = _INDEX.get(key)
     if cached is not None:
@@ -485,9 +493,13 @@ def corpus_index(corpus_dir, documents: int = 12_000) -> Index:
         from motherbrain.data import Corpus
 
         corpus = Corpus(corpus_dir)
+        total = corpus.n_documents
+        tail = max(0, total - recent)
         for i, document in enumerate(corpus.texts()):
-            if i >= documents or len(index) >= _INDEX_LIMIT:
-                break
+            if len(index) >= _INDEX_LIMIT and i < tail:
+                continue                      # full, but keep reading to
+            if i >= documents and i < tail:    # the newest documents
+                continue
             for line in sentences(document):
                 line = line.strip()
                 if 20 <= len(line) <= 400:

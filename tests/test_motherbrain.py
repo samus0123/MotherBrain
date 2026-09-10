@@ -4736,7 +4736,11 @@ def test_it_reads_every_language_it_claims_to():
     from motherbrain import cli
     source = inspect.getsource(cli.cmd_languages)
     assert "corpus.documents()" in source, "the census is not a census"
-    assert "Reading is not learning" in source
+    # It has to say which part of it a patch changes, without overclaiming
+    # in either direction: what it reads is quotable at once, and only the
+    # weights wait for an optimiser.
+    assert "weights only" in source
+    assert "quote" in source
 
 
 def test_a_new_patch_keeps_every_patch_before_it_and_adds_parameters(tmp_path):
@@ -4823,3 +4827,53 @@ def test_applying_a_patch_updates_a_running_board_in_place(tmp_path, served):
 
     asyncio.run(swap())
     assert board.model.n_params() == first
+
+
+def test_what_it_has_just_read_can_be_quoted_back(tmp_path):
+    """Feeding is not training, but it is not nothing either.
+
+    The index used to read the front of the corpus only, so a document fed
+    a minute ago - which lands at the end, behind everything else - was
+    never indexed and could not be quoted. The newest documents are exactly
+    the ones somebody is about to ask about.
+    """
+    from motherbrain import nlp
+    from motherbrain.data import Corpus
+
+    corpus = Corpus(tmp_path / "corpus")
+    for i in range(30):
+        corpus.add_text(f"Filler document {i}. It is about nothing at all "
+                        f"and mentions no unusual words.", f"filler{i}")
+    nlp.forget_index()
+
+    # Indexed with a cap far below the number of documents already there.
+    index = nlp.corpus_index(str(tmp_path / "corpus"), documents=5, recent=3)
+    assert index.candidates(["flimbex"]) == []
+
+    corpus.add_text("A flimbex is a small brass fitting used on Sumerian "
+                    "irrigation gates.", "taught")
+    nlp.forget_index()
+    index = nlp.corpus_index(str(tmp_path / "corpus"), documents=5, recent=3)
+    assert index.candidates(["flimbex"]), \
+        "the newest document was never indexed"
+
+    found = nlp.answer("what is a flimbex",
+                       corpus_dir=str(tmp_path / "corpus"))
+    assert found.source == "read"
+    assert "brass fitting" in found.evidence[0]
+    nlp.forget_index()
+
+
+def test_teaching_it_refreshes_what_it_can_quote():
+    """Option 3 adds to the corpus, so the index built from the corpus is
+    stale the moment it returns."""
+    import inspect
+
+    from motherbrain import bbs
+
+    source = inspect.getsource(bbs.option_teach)
+    assert "nlp.forget_index()" in source, \
+        "what was just fed cannot be quoted until something else rebuilds"
+    assert "read_the_corpus" in source, "it is dropped and never rebuilt"
+    # And it must not overclaim: the weights have not moved.
+    assert "weights only move" in source

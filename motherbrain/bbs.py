@@ -1758,11 +1758,21 @@ async def option_teach(caller: Caller) -> None:
     await asyncio.to_thread(corpus.add_text, text,
                             f"bbs-{_safe_name(caller.handle)}")
     caller.fed += len(text)
+
+    # Reading is not training - the weights do not move until a patch is
+    # applied - but it is not nothing either. What was just fed can be
+    # quoted back immediately, and only a stale cache was stopping it.
+    from motherbrain import nlp
+
+    nlp.forget_index()
+    asyncio.create_task(board.read_the_corpus())
     await caller.line("")
     await caller.line(f"  {A.HG}{len(text):,} characters stored{A.RESET}, "
                       f"credited to {caller.handle}.")
-    await caller.line(f"  {A.GREY}The model is unchanged. It waits for a "
-                      f"patch.{A.RESET}")
+    await caller.line(f"  {A.GREY}I can quote that back to you now. What has "
+                      f"not changed is the model:{A.RESET}")
+    await caller.line(f"  {A.GREY}its weights only move when somebody "
+                      f"applies a patch, which is option 4.{A.RESET}")
     board.page_all(f"{A.HC}*** {caller.handle} fed the corpus "
                    f"{len(text):,} characters ***{A.RESET}", skip=caller.node)
     await caller.pause()
