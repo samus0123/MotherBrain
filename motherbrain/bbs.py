@@ -116,6 +116,16 @@ class Hangup(Exception):
     """The caller dropped carrier."""
 
 
+class Goodbye(Exception):
+    """The caller asked to leave, from wherever they were.
+
+    Raised rather than returned because a caller who wants to log off from
+    four screens deep should not have to press Q four times, and because
+    every screen returning a "and also they want to leave" flag would put
+    that check in fifty places instead of one.
+    """
+
+
 class Caller:
     """One node: a socket, a screen, and whoever is sitting at the far end."""
 
@@ -255,9 +265,18 @@ class Caller:
         await self.send(A.CLS)
 
     async def pause(self, text: str = "press any key") -> None:
-        await self.send(f"{A.GREY}  [{A.HW}{text}{A.GREY}]{A.RESET}")
-        await self.key()
+        """Wait for a key. G leaves the board, from this screen like any other.
+
+        Screens that only show something and wait have no menu to put an
+        exit on, so the exit is on the pause itself - which means there is
+        no screen anywhere without a way out.
+        """
+        await self.send(f"{A.GREY}  [{A.HW}{text}{A.GREY}, or "
+                        f"{A.HW}G{A.GREY} to log off]{A.RESET}")
+        key = await self.key()
         await self.send("\r" + A.CLEAR_LINE)
+        if key.upper() == "G":
+            raise Goodbye()
 
     def tell(self, text: str) -> None:
         """Deliver a line from elsewhere - another node, or the sysop."""
@@ -1426,6 +1445,36 @@ def _command_cell(user, item) -> str:
     return f"\x032{key}\x030) \x039{label}"
 
 
+async def options(caller: Caller, extra: str = "") -> None:
+    """The two lines every menu ends with: go back, and leave the board.
+
+    Every screen has both. A caller four screens deep should be able to
+    log off without pressing Q four times, and a caller who does not know
+    where they are should be told where "back" goes.
+    """
+    await caller.line("")
+    if extra:
+        await caller.line(f"  {extra}")
+    await caller.line(
+        f"  {A.entry('Q', f'Go back to {caller.whence()}')}"
+        f"    {A.entry('G', 'Exit and log off')}")
+    caller.hotspots.append((caller.row, 1, 40, "Q"))
+    caller.hotspots.append((caller.row, 41, caller.columns, "G"))
+
+
+async def menu_choice(caller: Caller, prompt: str = "", limit: int = 8) -> str:
+    """Ask a menu question. Q goes back, G leaves the board, from anywhere.
+
+    Free-text screens - chat, teaching, writing a message - do not use
+    this, because there "G" is a letter somebody meant to type.
+    """
+    answer = (await caller.ask(
+        prompt or f"  {A.HY}Choice{A.HB}:{A.RESET} ", limit=limit)).strip()
+    if answer.upper() in ("G", "O", "OFF", "BYE", "GOODBYE", "EXIT", "QUIT"):
+        raise Goodbye()
+    return answer
+
+
 async def go_back(caller: Caller, key: str = "Q") -> None:
     """The line every screen ends with, naming the screen it returns to.
 
@@ -1512,6 +1561,8 @@ async def main_menu(caller: Caller) -> None:
         try:
             with caller.at(name):
                 await handler(caller)
+        except Goodbye:
+            break
         except Hangup:
             raise
         except Exception as exc:                          # noqa: BLE001
@@ -1640,10 +1691,15 @@ async def option_do(caller: Caller) -> None:
                       f"a shell on the sysop's machine.{A.RESET}")
     await caller.line("")
 
+    await options(caller)
+    await caller.line("")
+
     while True:
         line = (await caller.ask(f"  {A.HG}>{A.RESET} ", limit=400)).strip()
-        if not line:
+        if not line or line.upper() == "Q":
             return
+        if line.upper() in ("G", "OFF", "BYE"):
+            raise Goodbye()
         command = parse(line)
         if command.name in LOCAL_ONLY:
             await caller.line(f"  {A.HR}`{command.name}` is refused to a "
@@ -1839,13 +1895,23 @@ async def chat_with_motherbrain(caller: Caller) -> None:
             "it reads off its own state, and everything else it continues - "
             "fluently, and about nothing. Blank line to leave.", 72):
         await caller.line(f"  {A.GREY}{line}{A.RESET}")
+    await options(caller, A.entry("?", "what it can answer", note=""))
     await caller.line("")
 
     while True:
         said = (await caller.ask(f"  {A.HG}{caller.handle}>{A.RESET} ",
                                  limit=400)).strip()
-        if not said:
+        if not said or said.upper() == "Q":
             return
+        if said.upper() in ("G", "OFF", "BYE"):
+            raise Goodbye()
+        if said == "?":
+            await caller.say("\x030Arithmetic it computes. Things you tell "
+                             "it, it keeps. Questions about\r\n  itself it "
+                             "reads off disk. Anything in its corpus it "
+                             "quotes. Anything\r\n  else it says it does "
+                             "not know.")
+            continue
         waiting = caller.board.queued()
         if waiting:
             await caller.line(f"  {A.GREY}{waiting} ahead of you in the "
@@ -1974,11 +2040,12 @@ async def door_menu(caller: Caller) -> None:
                 for key, name, blurb in doors.CATALOGUE]
         rows.append("")
         rows.append(A.entry("Q", f"Go back to {caller.whence()}"))
+        rows.append(A.entry("G", "Exit and log off"))
         await caller.art("\n".join(A.box("D O O R S", rows,
                                          width=min(caller.columns, 76),
                                          frame=A.HM)))
         await caller.line("")
-        key = (await caller.ask(f"  {A.HY}door: {A.RESET}", limit=2)).strip()
+        key = await menu_choice(caller, f"  {A.HY}Door{A.HB}:{A.RESET} ", 2)
         if not key or key.upper() == "Q":
             return
         caller.board.page_all(
@@ -2019,7 +2086,7 @@ async def message_base(caller: Caller) -> None:
         await caller.line(f"  {A.HY}[P]{A.RESET} post   "
                           f"{A.HY}[number]{A.RESET} read   "
                           f"{A.HY}[Q]{A.RESET} back")
-        choice = (await caller.ask(f"  {A.HY}> {A.RESET}", limit=8)).strip()
+        choice = await menu_choice(caller, f"  {A.HY}Message{A.HB}:{A.RESET} ", 8)
         if not choice or choice.upper() == "Q":
             return
         if choice.upper() == "P":
@@ -2276,10 +2343,11 @@ async def file_area(caller: Caller) -> None:
         rows.append(f"  {A.HY}[U]{A.RESET} {A.HW}upload{A.RESET}"
                     f"{A.GREY}   send the board a file over XMODEM{A.RESET}")
         rows.append(A.entry("Q", f"Go back to {caller.whence()}"))
+        rows.append(A.entry("G", "Exit and log off"))
         await caller.art("\n".join(A.box("F I L E   A R E A", rows,
                                          width=min(caller.columns, 76),
                                          frame=A.HY)))
-        key = (await caller.ask(f"  {A.HY}area: {A.RESET}", limit=2)).strip()
+        key = await menu_choice(caller, f"  {A.HY}Area{A.HB}:{A.RESET} ", 2)
         if not key or key.upper() == "Q":
             return
         if key.upper() == "U":
@@ -2334,10 +2402,9 @@ async def _browse(caller: Caller, section: dict) -> None:
         await caller.say(
             f"  \x030page {page + 1}/{pages}   \x032N\x030)ext  "
             f"\x032B\x030)ack  \x032number\x030) take it"
-            + ("   \x032U\x030)pload" if takes else "")
-            + "   \x032Q\x030)uit")
-        choice = (await caller.ask(W.render("\x035File: \x030"),
-                                   limit=6)).strip()
+            + ("   \x032U\x030)pload" if takes else ""))
+        await options(caller)
+        choice = await menu_choice(caller, W.render("\x035File\x030: "), 6)
         if not choice or choice.upper() == "Q":
             return
         if choice.upper() == "N":
@@ -2377,7 +2444,8 @@ async def _download(caller: Caller, path: Path) -> None:
     await caller.line(f"  {A.HY}[V]{A.RESET} view     "
                       f"{A.GREY}read it here, if it is text{A.RESET}")
     await caller.line(f"  {A.HY}[Q]{A.RESET} back")
-    key = (await caller.ask(f"  > ", limit=2)).strip().upper()
+    key = (await menu_choice(caller, f"  {A.HY}Take it{A.HB}:{A.RESET} ",
+                             2)).upper()
     if key not in ("X", "B", "V"):
         return
 
@@ -2530,8 +2598,10 @@ async def gallery(caller: Caller) -> None:
             f"  {A.HY}[U]{A.RESET} {A.HW}upload one{A.RESET}"
             f"{A.GREY}       XMODEM it up and it will look at it{A.RESET}",
             A.entry("Q", "Go back"),
+            A.entry("G", "Exit and log off"),
         ], width=min(caller.columns, 76), frame=A.HM)))
-        key = (await caller.ask(f"  {A.HY}> {A.RESET}", limit=2)).strip().upper()
+        key = (await menu_choice(caller, f"  {A.HY}Gallery{A.HB}:{A.RESET} ",
+                                 2)).upper()
         if not key or key == "Q":
             return
         if key == "S":
@@ -2852,10 +2922,11 @@ async def bulletins(caller: Caller) -> None:
                 for b in items] or [W.render("  \x030None.")]
         rows.append("")
         rows.append(A.entry("Q", f"Go back to {caller.whence()}"))
+        rows.append(A.entry("G", "Exit and log off"))
         await caller.art("\n".join(A.box("B U L L E T I N S", rows,
                                           width=wide(caller), frame=A.HB)))
-        choice = (await caller.ask(W.render("\x035Bulletin: \x030"),
-                                   limit=4)).strip()
+        choice = await menu_choice(
+            caller, W.render("\x035Bulletin\x030: "), 4)
         if not choice or choice.upper() == "Q":
             return
         found = next((b for b in items if b["key"] == choice), None)
@@ -2921,8 +2992,8 @@ async def voting_booth(caller: Caller) -> None:
                              "back"))
         await caller.art("\n".join(A.box("V O T I N G   B O O T H", rows,
                                           width=wide(caller), frame=A.HB)))
-        choice = (await caller.ask(W.render("\x035Question: \x030"),
-                                   limit=4)).strip()
+        choice = await menu_choice(
+            caller, W.render("\x035Question\x030: "), 4)
         if not choice or choice.upper() == "Q":
             return
         poll = next((p for p in polls if p["key"] == choice), None)
@@ -3011,8 +3082,7 @@ async def email(caller: Caller) -> None:
                              "read    \x032Q\x030) back"))
         await caller.art("\n".join(A.box("E - M A I L", rows,
                                           width=wide(caller), frame=A.HG)))
-        choice = (await caller.ask(W.render("\x035Mail: \x030"),
-                                   limit=4)).strip()
+        choice = await menu_choice(caller, W.render("\x035Mail\x030: "), 4)
         if not choice or choice.upper() == "Q":
             return
         if choice.upper() == "S":
@@ -3379,9 +3449,10 @@ async def user_editor(caller: Caller, who: str) -> None:
                      f"{target.minutes:.0f} minutes"),
             "",
             A.entry("Q", "Go back"),
+            A.entry("G", "Exit and log off"),
         ], width=wide(caller), frame=A.HR)))
-        field = (await caller.ask(W.render("\x035Field: \x030"),
-                                  limit=4)).strip().upper()
+        field = (await menu_choice(caller, W.render("\x035Field\x030: "),
+                                   4)).upper()
         if not field or field == "Q":
             return
         if field == "H":
@@ -3435,8 +3506,8 @@ async def board_editor(caller: Caller) -> None:
         await caller.cls()
         await caller.art("\n".join(A.box("SUB-BOARDS", rows,
                                           width=wide(caller), frame=A.HR)))
-        choice = (await caller.ask(W.render("\x035Sub: \x030"),
-                                   limit=4)).strip().upper()
+        choice = (await menu_choice(caller, W.render("\x035Sub\x030: "),
+                                    4)).upper()
         if not choice or choice == "Q":
             board.save_subs()
             return
@@ -3501,8 +3572,9 @@ async def dir_editor(caller: Caller) -> None:
         await caller.cls()
         await caller.art("\n".join(A.box("FILE DIRECTORIES", rows,
                                           width=wide(caller), frame=A.HR)))
-        choice = (await caller.ask(W.render("\x035Directory: \x030"),
-                                   limit=4)).strip().upper()
+        choice = (await menu_choice(caller,
+                                    W.render("\x035Directory\x030: "),
+                                    4)).upper()
         if not choice or choice == "Q":
             return
         if choice == "R":
@@ -3564,9 +3636,10 @@ async def config_editor(caller: Caller) -> None:
                      f"\x039{board.new_user_flags or '(none)'}"),
             "",
             A.entry("Q", "Go back"),
+            A.entry("G", "Exit and log off"),
         ], width=wide(caller), frame=A.HR)))
-        field = (await caller.ask(W.render("\x035Field: \x030"),
-                                  limit=4)).strip().upper()
+        field = (await menu_choice(caller, W.render("\x035Field\x030: "),
+                                   4)).upper()
         if not field or field == "Q":
             return
         value = (await caller.ask(W.render("\x035New value: \x030"),
@@ -3625,8 +3698,8 @@ async def colour_editor(caller: Caller) -> None:
         await caller.say("\x030Low nibble is the foreground, high nibble "
                          "the background, bit 7 blinks - an IBM attribute "
                          "byte, as it always was.")
-        choice = (await caller.ask(W.render("\x035Colour: \x030"),
-                                   limit=4)).strip().upper()
+        choice = (await menu_choice(caller, W.render("\x035Colour\x030: "),
+                                    4)).upper()
         if not choice or choice == "Q":
             return
         if choice == "R":
