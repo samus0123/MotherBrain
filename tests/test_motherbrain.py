@@ -4877,3 +4877,160 @@ def test_teaching_it_refreshes_what_it_can_quote():
     assert "read_the_corpus" in source, "it is dropped and never rebuilt"
     # And it must not overclaim: the weights have not moved.
     assert "weights only move" in source
+
+
+# ---- its model of itself ----------------------------------------------------
+
+def test_it_accounts_for_every_one_of_its_own_parameters(served):
+    """Walked from the live module tree, not read off the config.
+
+    Those have disagreed in this project before: a patch adds experts, and
+    a count taken from the config goes on describing the model it was built
+    from.
+    """
+    from motherbrain import aware
+    from motherbrain.cli import load_current
+
+    run, _corpus = served
+    model, _tok, _device, _version = load_current(str(run), "cpu")
+
+    parts = aware.architecture(model)
+    assert parts, "it could not describe itself at all"
+    total = parts[-1]
+    assert total.name == "total"
+    counted = sum(p.parameters for p in parts if p.name != "total")
+    assert counted == total.parameters, \
+        f"{total.parameters - counted:,} parameters unaccounted for"
+    assert total.parameters == model.n_params()
+
+    named = {p.name for p in parts}
+    assert {"embedding", "attention"} <= named, named
+
+    # Tied output weights mean there is no separate output row, and that is
+    # a fact about how it is built rather than something to paper over.
+    embedding = next(p for p in parts if p.name == "embedding")
+    if model.lm_head.weight is model.embed.weight:
+        assert "output" not in named
+        assert "tied" in embedding.detail
+    else:
+        assert "output" in named
+
+
+def test_it_answers_how_it_works_by_reading_its_own_source():
+    """The difference between a program that can describe itself and one
+    that has been described. Nothing here is remembered or generated - the
+    file is opened at the moment the question is asked."""
+    import ast
+
+    from motherbrain import aware
+
+    found = aware.introspect("how do you do arithmetic")
+    assert found is not None
+    where, text = found
+    assert where == "motherbrain/logic.py"
+
+    # What it quotes has to be what is actually in the file, right now.
+    source = (pathlib.Path("motherbrain") / "logic.py").read_text()
+    assert text == (ast.get_docstring(ast.parse(source)) or "").strip()
+
+    assert aware.introspect("how do you see")[0] == \
+        "motherbrain/perception.py"
+    assert aware.introspect("how do you remember what I tell you")[0] == \
+        "motherbrain/knowledge.py"
+    assert aware.introspect("what is the weather") is None
+
+
+def test_its_verdict_follows_the_number(served):
+    """One rule, written down once, so no screen can drift into optimism."""
+    from motherbrain import aware
+
+    assert aware.verdict(0.0, 0.03) == "untrained"
+    assert "should not be believed" in aware.verdict(0.04, 0.03)
+    assert "wrong most of the time" in aware.verdict(0.23, 0.03)
+    assert "more often than not" in aware.verdict(0.45, 0.03)
+    assert "reliable" in aware.verdict(0.85, 0.03)
+
+    # And it is monotone: a better score never gets a worse verdict.
+    ladder = [aware.verdict(a, 0.03) for a in (0.04, 0.23, 0.45, 0.85)]
+    assert len(set(ladder)) == 4, ladder
+
+
+def test_it_keeps_a_record_of_what_it_could_not_answer(tmp_path):
+    """A system that cannot tell you where it fell short has a brochure,
+    not a model of itself."""
+    from motherbrain.aware import Journal
+
+    book = Journal(tmp_path / "unanswered.json", limit=3)
+    book.record("what is a zorblatt", "none")
+    book.record("what is a zorblatt", "none")
+    book.record("what is 2 + 2", "exact")          # answered: not a gap
+    book.record("who is the king of France", "none")
+
+    assert book.total() == 3
+    assert len(book.entries) == 2, "an answered question was recorded"
+    assert book.worst(1)[0]["question"] == "what is a zorblatt"
+    assert book.worst(1)[0]["asked"] == 2
+
+    # It survives a restart, and it is bounded.
+    for i in range(5):
+        book.record(f"question {i}", "none")
+    assert len(book.entries) <= 3
+    assert len(Journal(tmp_path / "unanswered.json").entries) == len(book.entries)
+
+    book.clear()
+    assert Journal(tmp_path / "unanswered.json").entries == []
+
+
+def test_asking_it_something_it_cannot_answer_is_written_down(tmp_path):
+    """The gap has to be a fact rather than an impression, which means the
+    pipeline itself records it."""
+    from motherbrain import aware, nlp
+
+    run = tmp_path / "run"
+    run.mkdir()
+    found = nlp.answer("what is a flibbertigibbet engine", run_dir=str(run))
+    assert found.source == "none"
+
+    book = aware.journal_for(str(run))
+    assert len(book.entries) == 1
+    assert "flibbertigibbet" in book.entries[0]["question"]
+
+    # An answered question leaves no trace.
+    nlp.answer("what is 6 * 7", run_dir=str(run))
+    assert len(aware.journal_for(str(run)).entries) == 1
+
+
+def test_its_self_report_is_never_generated(served):
+    """A model of yourself assembled by a sampler is not a model of
+    yourself. Every line has to come from the live model, the disk, or a
+    measurement."""
+    import inspect
+
+    from motherbrain import aware
+    from motherbrain.cli import load_current
+    from motherbrain.stats import gather
+
+    source = inspect.getsource(aware)
+    for forbidden in ("model.generate", "generate_batch", "multinomial",
+                      "temperature"):
+        assert forbidden not in source, \
+            f"the self-report reaches for the sampler ({forbidden})"
+
+    run, corpus = served
+    model, _tok, device, _v = load_current(str(run), "cpu")
+    text = aware.report(model, gather(str(run), str(corpus), model=model,
+                                      device=device), str(run))
+
+    # And it says what it is, and is not.
+    assert "not conscious" in text
+    assert "nothing it is like to be me" in text
+    assert "model of myself" in text
+    assert f"{model.n_params():,}" in text
+
+
+def test_the_board_offers_what_it_knows_about_itself():
+    from motherbrain.bbs import BOARD_COMMANDS, HANDLERS
+
+    letters = {key for key, _label, _sl in BOARD_COMMANDS}
+    assert "S" in letters
+    assert HANDLERS["S"].__name__ == "self_knowledge"

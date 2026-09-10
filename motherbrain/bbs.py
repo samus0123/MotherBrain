@@ -824,7 +824,7 @@ class Board:
         # from what it has read. The sampler is not in that list.
         found = await asyncio.to_thread(
             nlp.answer, text, run_dir=self.run_dir,
-            corpus_dir=self.corpus_dir, stats=self.stats())
+            corpus_dir=self.corpus_dir, stats=self.stats(), model=self.model)
         if found.source != "none":
             return found.source, found.render()
         if not generate:
@@ -1128,6 +1128,7 @@ BOARD_COMMANDS = [
     ("M", "Multi-node chat", 0),
     ("D", "Doors", 0),
     ("I", "System information", 0),
+    ("S", "What I know about myself", 0),
     ("Y", "Your statistics", 0),
     ("W", "Who is online", 0),
 ]
@@ -3211,6 +3212,34 @@ async def show_menu(caller: Caller) -> None:
     await caller.pause()
 
 
+async def self_knowledge(caller: Caller) -> None:
+    """S - what MotherBrain can establish about itself, and nothing else.
+
+    Every line of it is read off the live model, the disk, or a
+    measurement. None of it is generated, which is the point: a model of
+    yourself assembled by a sampler is not a model of yourself.
+    """
+    from motherbrain import aware
+
+    board = caller.board
+    text = await asyncio.to_thread(aware.report, board.model, board.stats(),
+                                   board.run_dir, wide(caller))
+    await caller.screen()
+    await header(caller)
+    await crumbs(caller)
+    for line in text.split("\n"):
+        await caller.line(f"{A.HC}{line}{A.RESET}" if line.startswith("─")
+                          else f"{A.HW}{line}{A.RESET}")
+    await options(caller, A.entry(
+        "F", "forget the questions I could not answer") if caller.sysop
+        else "")
+    choice = (await menu_choice(caller, limit=2)).upper()
+    if choice == "F" and caller.sysop:
+        aware.journal_for(board.run_dir).clear()
+        await caller.say("\x032Forgotten.\x030")
+        await caller.pause()
+
+
 async def new_file_scan(caller: Caller) -> None:
     """N - what has arrived in the file directories since you last called."""
     board = caller.board
@@ -3768,6 +3797,7 @@ HANDLERS = {
     "T": file_area, "N": new_file_scan, "C": chat_with_motherbrain,
     "M": teleconference, "D": door_menu, "I": system_info, "Y": your_info,
     "W": who_is_online, "L": last_callers, "X": expert_toggle,
+    "S": self_knowledge,
     "?": show_menu,
 }
 

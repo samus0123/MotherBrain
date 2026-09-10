@@ -888,6 +888,33 @@ def cmd_usb(args) -> int:
     return 0
 
 
+def cmd_self(args) -> int:
+    """Everything MotherBrain can establish about itself.
+
+    Not consciousness - nothing here experiences anything. A model of
+    itself: what it is made of, where it came from, what it can and cannot
+    sense, and what it has been asked and could not answer.
+    """
+    from motherbrain import aware
+    from motherbrain.stats import gather
+
+    model = device = None
+    try:
+        model, _tok, device, _version = load_current(args.run, args.device)
+    except FileNotFoundError:
+        print(f"no model in {args.run}; run `mb bootstrap` first",
+              file=sys.stderr)
+        return 1
+
+    stats = gather(args.run, args.corpus, model=model, device=device)
+    print(aware.report(model, stats, args.run))
+
+    if args.forget:
+        aware.journal_for(args.run).clear()
+        print("\n  The record of unanswered questions has been cleared.")
+    return 0
+
+
 def cmd_languages(args) -> int:
     """What MotherBrain has actually read, language by language.
 
@@ -2592,6 +2619,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--host", default="127.0.0.1")
     s.add_argument("--timeout", type=float, default=180.0)
     s.set_defaults(func=cmd_wait)
+
+    s = common(sub.add_parser(
+        "self", help="what MotherBrain can establish about itself"))
+    s.add_argument("--forget", action="store_true",
+                   help="clear the record of questions it could not answer")
+    s.add_argument("--device", default="auto")
+    s.set_defaults(func=cmd_self)
 
     s = common(sub.add_parser(
         "languages", help="which programming languages it has actually read"))
