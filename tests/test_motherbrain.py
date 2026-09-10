@@ -1323,6 +1323,48 @@ def test_opening_menu_lists_the_four_things_you_can_do(monkeypatch):
         assert voice.choose_start()[0] == expected, answer
 
 
+def test_the_menu_offers_the_window_as_its_fifth_option(monkeypatch):
+    """"Run the GUI" is on the main console, and means what it says."""
+    import motherbrain.voice as voice
+
+    assert "Run the GUI" in voice.MENU
+    assert "5" in voice.MENU
+
+    monkeypatch.setattr(voice, "detect",
+                        lambda: voice.Capability(speak="espeak", listen="sr"))
+    for answer in ("5", "gui", "window", "desktop"):
+        monkeypatch.setattr("builtins.input", lambda _, a=answer: a)
+        action, mode, _cap = voice.choose_start()
+        assert action == "gui", answer
+        # It never asks text-or-voice: a window is not a way of talking.
+        assert mode == "text", answer
+
+
+def test_option_five_opens_the_window(served, monkeypatch, capsys):
+    """And having offered it, the console has to actually hand over."""
+    from motherbrain import cli, gui
+
+    run, corpus = served
+    opened = {}
+
+    def fake_window(run_dir, corpus_dir, device, **kw):
+        opened.update(run_dir=run_dir, corpus_dir=corpus_dir, **kw)
+        return 0
+
+    monkeypatch.setattr(gui, "run", fake_window)
+
+    assert cli.main(["console", "--run", str(run), "--corpus", str(corpus),
+                     "--mode", "gui", "--device", "cpu"]) == 0
+    assert opened["run_dir"] == str(run), "it opened somebody else's model"
+    assert opened["corpus_dir"] == str(corpus)
+    assert "steps" in opened and "grow" in opened
+
+    # It hands over rather than dropping into the prompt underneath.
+    out = capsys.readouterr().out
+    assert "window" in out
+    assert "Tell me what to do" not in out
+
+
 def test_only_the_conversational_options_ask_about_voice(monkeypatch):
     """Teaching and patching are not conversations, so they never ask."""
     import motherbrain.voice as voice

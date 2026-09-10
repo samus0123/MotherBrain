@@ -180,12 +180,15 @@ What would you like to do?
   2  Tell MotherBrain what to do                      (text or voice)
   3  Teach MotherBrain something new
   4  Apply new knowledge as a patch (update)
+  5  Run the GUI                                      (a window, not this)
 
-choose [1-4, default 2]
+choose [1-5, default 2]
 ```
 
-All three faces open on the same four options — the terminal (`mb console`),
-the window (`mb gui`), and the browser (`mb serve`, then `/`).
+All three faces open on the same four things to do — the terminal
+(`mb console`), the window (`mb gui`), and the browser (`mb serve`, then `/`).
+The terminal carries a fifth: it is the only one of the three that can hand
+you a window, so option 5 opens one.
 
 **1 — what kind of program to make.** Describe it in plain words. The
 description becomes a docstring and its own words become the function name,
@@ -219,6 +222,12 @@ v1 -> v2
 ```
 
 Learning and applying are separate steps because they are separate things.
+
+**5 — run the GUI.** The same four things, in a window instead of this
+terminal. `mb console --mode gui` goes straight there, and so does `mb gui`.
+The console hands over rather than running both: whatever the window returns
+is what the command returns. On a machine with no display or no Tkinter it
+falls back to the browser, as `mb gui` does.
 
 Applying also writes the merged model to `models/motherbrain.pt`. What makes
 an ascent durable in the repository, though, is the **patch** in
