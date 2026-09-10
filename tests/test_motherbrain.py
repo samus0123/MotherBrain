@@ -1624,8 +1624,9 @@ def test_mb_gui_serves_a_browser_rather_than_failing(monkeypatch):
 
     served = {}
 
-    def fake_serve(run_dir, corpus_dir, device, reason):
+    def fake_serve(run_dir, corpus_dir, device, reason, **kw):
         served["reason"] = reason
+        served.update(kw)
         return 0
 
     monkeypatch.setattr(builtins, "__import__", no_tkinter)
@@ -1633,6 +1634,20 @@ def test_mb_gui_serves_a_browser_rather_than_failing(monkeypatch):
 
     assert gui.run("runs/default", "data/corpus") == 0
     assert "Tkinter" in served["reason"]
+
+    # The fall to the browser must not drop the lock on the door. This
+    # branch was left behind when its sibling ("there is no display") was
+    # given the keyword arguments, so `mb gui --api-key ...` on a machine
+    # without Tkinter served MotherBrain to the network with no key at all.
+    # A public host never reaches this branch - it serves before it looks
+    # for a window - so the key is checked on the path that does: local
+    # host, missing Tkinter, `--api-key` given.
+    served.clear()
+    assert gui.run("runs/default", "data/corpus",
+                   api_key="a-key-long-enough-to-be-real") == 0
+    assert served["api_key"] == "a-key-long-enough-to-be-real", \
+        "the fall to the browser dropped the key and served in the open"
+    assert served["host"] == "127.0.0.1"
 
     # --no-web is the escape hatch for anyone who wants the old behaviour.
     served.clear()
@@ -1655,6 +1670,15 @@ def test_the_fallback_finds_a_port_that_is_free():
     port = _free_port()
     with socket.socket() as s:
         s.bind(("127.0.0.1", port))       # free, so this must not raise
+
+    # A port held on one interface used to pass a probe of another: the
+    # check bound 127.0.0.1 while uvicorn bound `host`, so the banner
+    # printed in full and the server then died of EADDRINUSE.
+    with socket.socket() as taken:
+        taken.bind(("0.0.0.0", 0))
+        busy = taken.getsockname()[1]
+        taken.listen(1)
+        assert _free_port(busy, host="0.0.0.0") != busy
 
 
 def test_advice_matches_the_platform_it_is_given_on(monkeypatch):
@@ -2116,6 +2140,41 @@ def test_the_printed_address_is_one_somebody_could_type():
         assert address.endswith(":8000")
         assert "0.0.0.0" not in address
         assert not address.startswith("http://127.")
+
+
+def test_every_address_it_prints_is_on_the_interface_it_binds(monkeypatch,
+                                                              capsys):
+    """A concrete --host binds one interface, so it is the only way in.
+
+    The banner used to hardcode http://127.0.0.1 as "on this machine" and
+    take the "from anywhere" lines off the routing table, neither of which
+    has anything to do with `host`. Bound to 192.0.2.2 it advertised
+    127.0.0.1 and whatever the LAN address happened to be: three links,
+    two of them dead, and only --network worked by accident.
+    """
+    import uvicorn
+
+    from motherbrain import gui, server
+
+    bound = {}
+    monkeypatch.setattr(server, "create_app", lambda **kw: object())
+    monkeypatch.setattr(uvicorn, "run",
+                        lambda app, host, port, **kw: bound.update(
+                            host=host, port=port))
+
+    assert gui.run_in_browser("runs/default", "data/corpus", "cpu",
+                              "serving to the network", host="192.0.2.2",
+                              api_key="a-key-long-enough-to-be-real") == 0
+    out = capsys.readouterr().out
+    printed = [w.strip(".,") for w in out.split() if w.startswith("http://")]
+    assert printed, "it printed no address at all"
+    for address in printed:
+        assert address.startswith(f"http://{bound['host']}:{bound['port']}"), \
+            f"{address} is not on the interface it bound"
+
+    # And it no longer claims this machine has no window. It was asked for
+    # a network address; that says nothing about the display here.
+    assert "no window here" not in out
 
 
 def test_the_link_it_prints_is_the_link_that_works(served):

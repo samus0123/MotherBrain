@@ -44,7 +44,7 @@ MISSING_TK = """MotherBrain's window needs Tkinter, which is not installed here.
 
 Nothing else is missing - the model is fine. Until then:
 
-  mb console     the same four options, in this terminal
+  mb console     the same options, in this terminal
   mb serve       then open http://127.0.0.1:8000 in a browser
 """
 
@@ -1292,18 +1292,36 @@ class App:
             self.say_note("the next thing you send is conditioned on it.\n")
 
 
-def _free_port(preferred: int = 8000) -> int:
-    """A port that is actually free, preferring the documented one."""
+def _free_port(preferred: int = 8000, host: str = "127.0.0.1") -> int:
+    """A port free on the interface the server will bind, preferring 8000.
+
+    The interface matters. Probing loopback while uvicorn binds something
+    else proves nothing: a port already held by an interface-specific bind
+    passes the check, and uvicorn then dies of EADDRINUSE after the whole
+    banner - links, key and all - has been printed.
+    """
     import socket
 
+    host = host or "0.0.0.0"
+    try:
+        family = socket.getaddrinfo(host, None,
+                                    type=socket.SOCK_STREAM)[0][0]
+    except OSError:
+        family = socket.AF_INET
+
     for port in (preferred, 8001, 8080, 0):
-        with socket.socket() as s:
+        with socket.socket(family, socket.SOCK_STREAM) as s:
             try:
-                s.bind(("127.0.0.1", port))
+                s.bind((host, port))
                 return s.getsockname()[1]
             except OSError:
                 continue
     return preferred
+
+
+def _bracket(address: str) -> str:
+    """An address as it goes into a URL: IPv6 literals need brackets."""
+    return f"[{address}]" if ":" in address else address
 
 
 def lan_addresses(port: int) -> list[str]:
@@ -1317,11 +1335,12 @@ def lan_addresses(port: int) -> list[str]:
 
     found = []
     try:
-        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        probe.settimeout(0.2)
-        probe.connect(("192.0.2.1", 53))       # reserved, never routed
-        found.append(probe.getsockname()[0])
-        probe.close()
+        # `with` rather than a close at the end: the close sat after the
+        # calls that raise, so a machine with no route leaked the socket.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+            probe.settimeout(0.2)
+            probe.connect(("192.0.2.1", 53))   # reserved, never routed
+            found.append(probe.getsockname()[0])
     except OSError:
         pass
     try:
@@ -1380,16 +1399,29 @@ def run_in_browser(run_dir: str, corpus_dir: str, device: str, reason: str,
     for warning in check_exposure(host, api_key, tls=False, insecure=insecure):
         print(f"warning: {warning}")
 
-    port = _free_port()
+    port = _free_port(host=host)
     query = f"?key={api_key}" if api_key else ""
-    local = f"http://127.0.0.1:{port}{query}"
 
-    print(f"no window here ({reason}).")
+    # Every address printed has to come from the interface uvicorn binds.
+    # A wildcard bind answers everywhere, so loopback works here and the
+    # routing table finds what the machine looks like from outside. A
+    # concrete --host answers on that address and nowhere else - printing
+    # 127.0.0.1 and the LAN addresses beside it hands out three links, two
+    # of them dead.
+    wildcard = host in ("0.0.0.0", "::", "")
+    reachable = "127.0.0.1" if wildcard else host
+    local = f"http://{_bracket(reachable)}:{port}{query}"
+
     if public:
         print("serving MotherBrain to this network.\n")
-        print(f"  on this machine   {local}")
-        for address in lan_addresses(port):
-            print(f"  from anywhere     {address}{query}")
+        if wildcard:
+            print(f"  on this machine   {local}")
+            for address in lan_addresses(port):
+                print(f"  from anywhere     {address}{query}")
+        else:
+            # Bound to one interface: that address is the way in from this
+            # machine and from any other. There is no second link to give.
+            print(f"  at                {local}")
         if generated:
             print(f"\n  key               {api_key}")
             print("  generated for this run, and already in the links above.")
@@ -1398,8 +1430,11 @@ def run_in_browser(run_dir: str, corpus_dir: str, device: str, reason: str,
         print("  the clear. `mb cert`, then `mb serve --tls-cert/--tls-key`,")
         print("  if that matters where you are running this.")
     else:
-        print(f"opening MotherBrain in your browser instead: {local}")
-        print("the same four options, and nothing to install.")
+        # Not "no window here (you asked for it)": on the --web path there
+        # may well be a perfectly good window, and on --network this line
+        # asserted something false about every machine that has one.
+        print(f"opening MotherBrain in your browser ({reason}): {local}")
+        print("the same options, and nothing to install.")
     print("\nctrl-c to stop.\n")
 
     def open_when_up():
@@ -1443,8 +1478,12 @@ def run(run_dir: str, corpus_dir: str, device: str = "auto",
         if web is False:
             print(MISSING_TK, file=sys.stderr)
             return 1
+        # host/api_key/insecure travel with it. Dropping them here started
+        # the server unauthenticated on a machine that just happened to be
+        # missing Tkinter - the one case where nobody is watching the banner.
         return run_in_browser(run_dir, corpus_dir, device,
-                              "Tkinter is not installed")
+                              "Tkinter is not installed", host=host,
+                              api_key=api_key, insecure=insecure)
 
     try:
         root = tk.Tk()
