@@ -5034,3 +5034,250 @@ def test_the_board_offers_what_it_knows_about_itself():
     letters = {key for key, _label, _sl in BOARD_COMMANDS}
     assert "S" in letters
     assert HANDLERS["S"].__name__ == "self_knowledge"
+
+
+# ---- the world model ------------------------------------------------------
+
+def test_preconditions_name_what_stopped_them():
+    """A failed action that says only "no" is useless for planning. Every
+    refusal has to name the thing that was not true."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="a")))
+    assert not W.take(w, "a")
+    assert "b is on top of a" in W.take(w, "a").said
+    assert "there is no z" in W.take(w, "z").said
+
+
+def test_a_ball_holds_nothing_up():
+    """The rule is about shape, not about what anyone has written down
+    about balls. This is the sort of fact a text model has no access to."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("a", size="small", held=True),
+                        W.Thing("ball", shape="ball", size="large", on="floor")))
+    outcome = W.put_on(w, "a", "ball")
+    assert not outcome
+    assert "ball will not hold anything up" in outcome.said
+
+
+def test_a_big_thing_will_not_balance_on_a_small_one():
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("big", size="large", held=True),
+                        W.Thing("small", size="small", on="floor")))
+    assert "would topple" in W.put_on(w, "big", "small").said
+
+
+def test_taking_the_support_away_makes_things_fall():
+    """Gravity has to be reachable, or `settle` is dead code dressed as
+    physics. Pulling a plank out is the action that reaches it."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("shelf", shape="plank", size="large", on="floor"),
+                        W.Thing("cup", size="small", on="shelf"),
+                        W.Thing("hat", shape="pyramid", size="small", on="cup")))
+    outcome = W.act(w, "pull-out", "shelf")
+    assert outcome
+    after, fell = W.settle(outcome.world)
+    assert fell == ["cup fell to the floor"]
+    # The stack came down together: the hat's support never went away.
+    assert after.get("cup").on == "floor"
+    assert after.get("hat").on == "cup"
+
+
+def test_a_closed_lid_hides_as_well_as_blocks():
+    """Out of reach and out of sight are two different facts, and a world
+    model that conflates them cannot answer either question."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("box", size="large", on="floor", open=False),
+                        W.Thing("coin", size="small", inside="box")))
+    assert not w.reachable("coin")
+    assert not w.visible("coin")
+
+    opened = W.act(w, "open", "box").world
+    assert opened.reachable("coin") and opened.visible("coin")
+
+    # A thing under a stack is blocked but in plain sight.
+    stacked = W.World(things=(W.Thing("a", size="large", on="floor"),
+                              W.Thing("b", size="small", on="a")))
+    assert not stacked.reachable("a")
+    assert stacked.visible("a")
+
+
+def test_a_world_can_be_stated_as_facts():
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("a", colour="red", shape="cube", on="floor"),))
+    facts = W.facts(w)
+    assert ("colour", "a", "red") in facts
+    assert ("on", "a", "floor") in facts
+    assert ("clear", "a") in facts
+
+
+# ---- planning -------------------------------------------------------------
+
+def test_a_plan_is_found_and_it_is_the_shortest_one():
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    steps, note = agent.plan(w, [agent.Goal("on", "a", "b")])
+    assert steps == [("take", "a"), ("put-on", "a", "b")]
+    assert "found in 2 steps" in note
+
+
+def test_it_says_when_no_plan_exists_instead_of_trying_anyway():
+    """This is the answer a language model can never give. A plan that does
+    not exist has to come back as "there is none", not as plausible text."""
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("ball", shape="ball", size="large", on="floor")))
+    steps, note = agent.plan(w, [agent.Goal("on", "a", "ball")])
+    assert steps is None
+    assert "no plan exists" in note
+
+
+def test_the_planner_exploits_gravity():
+    """Nobody told it that pulling a shelf out drops what is on it. It
+    follows from the rules, and the search finds it."""
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("shelf", shape="plank", size="large", on="floor"),
+                        W.Thing("cup", size="small", on="shelf")))
+    run = agent.Agent(agent.Registry(), world=w).achieve(
+        [agent.Goal("on", "cup", "floor")])
+    assert run.done
+    assert run.acts[1].argument == "pull-out shelf"
+    assert "cup fell to the floor" in run.acts[1].observation
+
+
+def test_an_already_true_goal_costs_no_actions():
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", on="floor"),))
+    steps, note = agent.plan(w, [agent.Goal("on", "a", "floor")])
+    assert steps == []
+    assert note == "already true"
+
+
+def test_a_goal_is_checked_against_the_world_not_the_plan():
+    """The loop stops because the world says so. A plan that ran to the end
+    is not evidence the goal is met - only the world is."""
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    engine = agent.Agent(agent.Registry(), world=w)
+    goal = agent.Goal("on", "a", "b")
+    assert not goal.met(engine.world)
+
+    run = engine.achieve([goal])
+    assert run.done
+    # The agent's own world moved, and that world is what was checked.
+    assert goal.met(engine.world)
+    assert engine.world.get("a").on == "b"
+    assert engine.world is not w          # the starting world is untouched
+    assert not goal.met(w)
+
+
+def test_an_agent_with_no_tool_says_so_and_lists_what_it_has():
+    from motherbrain import agent
+
+    run = agent.Agent(agent.Registry()).pursue("compose a sonnet about rain")
+    assert not run.done
+    assert "no tool" in run.answer.lower()
+
+
+def test_arithmetic_goes_to_the_calculator_not_the_model():
+    from motherbrain import agent
+
+    registry = agent.standard()
+    tool = registry.best("what is 19 * 23 + 4?")
+    assert tool.name == "calculate"
+    run = agent.Agent(registry).pursue("what is 19 * 23 + 4?")
+    assert "441" in run.answer
+
+
+# ---- the neurosymbolic router ---------------------------------------------
+
+def test_every_answer_says_what_kind_of_support_it_has():
+    from motherbrain import neurosymbolic as ns
+
+    answer = ns.solve("what is 144 / 12 + 7?")
+    assert answer.warrant == ns.CALCULATED
+    assert answer.exact
+    assert "19" in answer.text
+
+
+def test_an_exact_answer_can_be_confirmed_by_running_it_again():
+    from motherbrain import neurosymbolic as ns
+
+    answer = ns.solve("what is 2 ** 10?")
+    held, why = ns.verify(answer)
+    assert held and why == "recomputed"
+
+
+def test_a_generated_answer_is_never_waved_through():
+    """verify() returning True on unchecked model output would make the
+    whole warrant scheme a decoration."""
+    from motherbrain import neurosymbolic as ns
+
+    answer = ns.Answer(text="the moon is made of cheese",
+                       warrant=ns.GENERATED)
+    held, why = ns.verify(answer)
+    assert not held
+    assert "nothing to check" in why
+    assert not answer.exact
+    assert "would not rely on this" in answer.render()
+
+
+def test_a_plan_is_answered_by_planning_and_can_be_resimulated():
+    from motherbrain import neurosymbolic as ns, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    answer = ns.solve("put a on b", world=w)
+    assert answer.warrant == ns.PLANNED
+    assert answer.exact
+    held, _why = ns.verify(answer)
+    assert held
+
+
+def test_an_impossible_request_is_refused_with_a_reason():
+    from motherbrain import neurosymbolic as ns, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("ball", shape="ball", size="large", on="floor")))
+    answer = ns.solve("put a on ball", world=w)
+    assert "no way to do that" in answer.text
+
+
+def test_a_goal_is_only_read_when_it_is_actually_there():
+    """A guessed goal is worse than none: the plan that follows will be a
+    correct plan for the wrong thing."""
+    from motherbrain import neurosymbolic as ns
+
+    assert ns.read_goal("put a on b") == ns.read_goal("put the a on the b")
+    assert ns.read_goal("") == []
+    assert ns.read_goal("hello there") == []
+
+
+def test_an_agent_does_not_eat_its_own_tools():
+    """A tool that failed on one goal has to still be there for the next
+    one. An agent that empties its registry as it works gets worse the
+    longer it runs, which is the opposite of the point."""
+    from motherbrain import agent
+
+    registry = agent.standard()
+    before = len(registry)
+    engine = agent.Agent(registry)
+
+    assert "42" in engine.pursue("what is 6 * 7?").answer
+    assert "72" in engine.pursue("what is 8 * 9?").answer
+    engine.pursue("something no tool handles at all")
+
+    assert len(registry) == before
