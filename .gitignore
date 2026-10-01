@@ -38,3 +38,6 @@ certs/
 # It belongs to whoever runs the board, not to the repository.
 runs/*/bbs/
 runs/*/knowledge.json
+
+# Build metadata, rewritten by every `pip install -e .`
+*.egg-info/

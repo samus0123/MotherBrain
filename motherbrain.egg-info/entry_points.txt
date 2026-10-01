@@ -1,2 +1,0 @@
-[console_scripts]
-mb = motherbrain.cli:main
