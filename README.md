@@ -22,7 +22,37 @@ mb cert       make a TLS certificate
 mb serve      expose it to every IDE you own
 ```
 
+## Start it
+
+One word, from a fresh clone, with nothing set up:
+
+```bash
+./START                     # Linux, macOS, Termux
+START                       # Windows (or double-click START.bat)
+```
+
+Double-clicking works too: `START.command` on macOS, `START.bat` on Windows.
+
+The first run installs (once, a few minutes - torch is large), then starts
+the board and dials you straight into it. Every run after that goes straight
+to the board. There is no environment to activate and no flags to remember.
+
+Anything you pass goes through to `mb start`:
+
+```bash
+./START --no-call           # just the board, no dialler
+./START --open              # let the whole network call in
+./START --port 2323         # a port that needs no privilege
+./START --help              # everything else
+```
+
+`--open` is worth reading about in [Security](#security) before you use it:
+telnet has no encryption and never did.
+
 ## Install
+
+If you would rather install without starting anything - or `./START` failed
+and you want to see why - that step on its own is:
 
 ```bash
 sh scripts/install.sh       # handles the usual install failures
@@ -162,6 +192,16 @@ That is the same program; `mb` is only a shortcut that works from any
 directory.
 
 ## Quick start
+
+Already installed, and want the pieces rather than `./START`:
+
+```bash
+mb start                        # board + browser front-end + dial in
+mb bbs                          # just the board
+mb call localhost --port 2323   # just the dialler
+```
+
+Or to train one from your own text instead of using the shipped v5:
 
 ```bash
 mb feed ./my-notes ./src        # anything textual

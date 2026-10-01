@@ -5281,3 +5281,97 @@ def test_an_agent_does_not_eat_its_own_tools():
     engine.pursue("something no tool handles at all")
 
     assert len(registry) == before
+
+
+# ---- the one-word launchers ------------------------------------------------
+
+LAUNCHERS = pathlib.Path(__file__).resolve().parent.parent
+
+
+def test_the_launchers_are_there_and_runnable():
+    """"How do I start it" has to have a one-word answer on every platform,
+    and a script that is not executable is not an answer."""
+    import os
+    import stat
+
+    unix = LAUNCHERS / "START"
+    mac = LAUNCHERS / "START.command"
+    windows = LAUNCHERS / "START.bat"
+
+    for script in (unix, mac, windows):
+        assert script.is_file(), f"{script.name} is missing"
+
+    for script in (unix, mac):
+        mode = script.stat().st_mode
+        assert mode & stat.S_IXUSR, f"{script.name} is not executable"
+
+
+def test_the_shell_launchers_parse():
+    """A syntax error in the launcher is the worst possible bug: it is the
+    first thing anyone runs and it would fail before any of this exists."""
+    import subprocess
+
+    for name in ("START", "START.command"):
+        done = subprocess.run(["sh", "-n", str(LAUNCHERS / name)],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, f"{name}: {done.stderr}"
+
+
+def test_the_windows_launcher_has_windows_line_endings():
+    """A .bat with bare LF can fail in ways that are hard to read, and the
+    USB launchers already use CRLF for the same reason."""
+    data = (LAUNCHERS / "START.bat").read_bytes()
+    assert b"\r\n" in data
+    # No stray lone LFs: every LF must be preceded by a CR.
+    assert data.replace(b"\r\n", b"") .count(b"\n") == 0
+
+
+def test_the_launchers_pass_arguments_through():
+    """./START --open has to reach `mb start`, or every flag needs a second
+    way to be spelled."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert 'start "$@"' in unix
+
+    mac = (LAUNCHERS / "START.command").read_text()
+    assert './START "$@"' in mac
+
+    windows = (LAUNCHERS / "START.bat").read_text()
+    assert "start %*" in windows
+
+
+def test_a_moved_environment_is_rebuilt_not_patched():
+    """Python writes absolute paths into a virtual environment, so a moved
+    one cannot be repaired - only replaced. Pretending otherwise produces
+    "bad interpreter" later, further from the cause."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert "rm -rf" in unix
+    assert "moved" in unix
+
+
+def test_the_launchers_delegate_installing_rather_than_redo_it():
+    """scripts/install.sh already knows about PEP 668, the 5.5GB CUDA wheel
+    nobody without an NVIDIA card can use, and checking free disk before the
+    download. A second copy of that logic in the launcher would be a second
+    place to fix it, and the copy would be the worse one."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert "scripts/install.sh" in unix
+    # And it does not carry its own pip invocation.
+    assert "pip install" not in unix
+
+    windows = (LAUNCHERS / "START.bat").read_text()
+    assert "install.ps1" in windows
+
+
+def test_the_installer_the_launchers_call_is_actually_there():
+    """A launcher that delegates to a missing script is worse than one that
+    does the work badly."""
+    assert (LAUNCHERS / "scripts" / "install.sh").is_file()
+    assert (LAUNCHERS / "scripts" / "install.ps1").is_file()
+
+
+def test_the_launcher_honours_a_chosen_environment_location():
+    """install.sh takes VENV from the environment, so the launcher has to
+    pass it on or the two will disagree about where they put things."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert 'VENV="${VENV:-$HERE/.venv}"' in unix
+    assert 'VENV="$VENV" sh' in unix

@@ -1,0 +1,57 @@
+#!/bin/sh
+# Start MotherBrain. One word, from a fresh clone, with nothing set up.
+#
+# This exists because "how do I start it" kept having a two-step answer:
+# activate a virtual environment, then run a command. Two steps is one too
+# many for the thing you do every single time, so this does both - and if
+# the environment is not there yet, it installs first.
+#
+# Safe to run repeatedly. Once the environment exists this adds a few
+# milliseconds over calling `mb start` yourself.
+#
+#   ./START                  the board, and dial straight in
+#   ./START --open           let the whole network call (telnet is plaintext)
+#   ./START --port 23        the real telnet port, needs privilege
+#   ./START --no-call        just the board, no dialler
+#
+# Anything you pass goes to `mb start`, so `./START --help` lists it all.
+
+set -e
+
+HERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cd "$HERE"
+
+VENV="${VENV:-$HERE/.venv}"
+MB="$VENV/bin/mb"
+
+# ---- make sure there is something to run ----------------------------------
+# The installing is all in scripts/install.sh, which already knows about
+# PEP 668, the 5.5GB CUDA wheel nobody without an NVIDIA card can use, and
+# checking free disk before the download rather than after. Duplicating any
+# of that here would mean two places to fix it.
+if [ ! -x "$MB" ]; then
+
+    # A virtual environment cannot be moved: Python writes absolute paths
+    # into it, so a copied or renamed directory leaves one that exists and
+    # does not work. install.sh only creates a missing environment, so a
+    # broken one is cleared out here first - it cannot be repaired, and
+    # leaving it produces "bad interpreter" later, further from the cause.
+    if [ -d "$VENV" ] && [ ! -x "$VENV/bin/python" ] \
+                      && [ ! -x "$VENV/bin/python3" ]; then
+        echo "The environment in $VENV is broken."
+        echo "(This is what happens when the folder is moved or copied -"
+        echo " Python writes absolute paths into it. Rebuilding it.)"
+        rm -rf "$VENV"
+    fi
+
+    echo "First run: installing. This happens once."
+    echo
+    VENV="$VENV" sh "$HERE/scripts/install.sh" || exit 1
+    echo
+fi
+
+[ -x "$MB" ] || { echo "the install finished but $MB is missing" >&2; exit 1; }
+
+# ---- start it -------------------------------------------------------------
+# exec, so Ctrl-C reaches the board directly instead of this script.
+exec "$MB" start "$@"
