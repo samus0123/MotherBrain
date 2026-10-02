@@ -5375,3 +5375,292 @@ def test_the_launcher_honours_a_chosen_environment_location():
     unix = (LAUNCHERS / "START").read_text()
     assert 'VENV="${VENV:-$HERE/.venv}"' in unix
     assert 'VENV="$VENV" sh' in unix
+
+
+# ---- learning after deployment, and noticing when it hurt -----------------
+
+def _synthetic_corpus(path, tokens=8000, vocab=300, seed=7):
+    """A tokens.bin to probe against, with structure so loss is meaningful."""
+    rng = np.random.default_rng(seed)
+    data = rng.integers(0, vocab, size=tokens, dtype=np.uint16)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "tokens.bin").write_bytes(data.tobytes())
+    return data
+
+
+def test_the_probe_is_chosen_once_and_never_moves():
+    """A guard whose probe is rebuilt per patch measures a different thing
+    every time, which makes the comparison meaningless. That is the easiest
+    way to ship a regression guard that does nothing."""
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir()
+        _synthetic_corpus(corpus)
+
+        first = online.probe_for(str(run), str(corpus))
+        assert first is not None and len(first) > 0
+
+        second = online.probe_for(str(run), str(corpus))
+        assert second.offsets == first.offsets
+        assert second.created_at == first.created_at
+
+        # Even after the corpus grows, the existing probe is reused: the
+        # whole point is to measure the same text both times.
+        _synthetic_corpus(corpus, tokens=16000, seed=99)
+        third = online.probe_for(str(run), str(corpus))
+        assert third.offsets == first.offsets
+
+
+def test_there_is_no_probe_without_a_corpus_to_build_it_from():
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir(); corpus.mkdir()
+        assert online.probe_for(str(run), str(corpus)) is None
+
+
+def test_measuring_is_deterministic_and_leaves_the_model_alone():
+    """A measurement that moves on its own is not a measurement. And the
+    model has to come back in the mode it was handed over in - a guard that
+    silently leaves it in eval() would change how it serves callers."""
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir()
+        _synthetic_corpus(corpus, vocab=250)
+
+        model = MotherBrain(tiny(vocab_size=300, max_seq_len=256))
+        probe = online.probe_for(str(run), str(corpus), seq_len=64)
+
+        model.train()
+        first = online.measure(model, probe, str(corpus))
+        assert model.training, "the model was left in eval mode"
+
+        second = online.measure(model, probe, str(corpus))
+        assert first == second, "the same model scored differently twice"
+        assert first > 0
+
+        model.eval()
+        online.measure(model, probe, str(corpus))
+        assert not model.training, "the model was left in train mode"
+
+
+def test_a_patch_that_forgets_too_much_is_refused():
+    """One rule, in one place, so no screen can drift into optimism."""
+    from motherbrain import online
+
+    _words, roll = online.verdict_for(-0.20)
+    assert not roll
+    _words, roll = online.verdict_for(0.0)
+    assert not roll
+    _words, roll = online.verdict_for(online.TOLERANCE - 0.01)
+    assert not roll, "inside tolerance should be kept"
+    _words, roll = online.verdict_for(online.TOLERANCE + 0.01)
+    assert roll, "past tolerance should be rolled back"
+
+
+def test_the_verdict_says_which_direction_it_moved():
+    from motherbrain import online
+
+    better, _ = online.verdict_for(-0.2)
+    assert "better" in better
+    worse, _ = online.verdict_for(1.0)
+    assert "forgot too much" in worse
+    assert "1.0000" in worse
+
+
+def test_a_refused_patch_is_recorded_rather_than_hidden():
+    """A system that silently discarded the attempt would learn the same bad
+    lesson twice. The rejection is part of the lineage."""
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run = pathlib.Path(tmp)
+        check = online.Check(version=6, parent=5, retention_before=2.0,
+                             retention_after=2.9, learned_before=3.0,
+                             learned_after=0.1, verdict="forgot too much",
+                             rolled_back=True)
+        online.record(str(run), check)
+        online.record(str(run), online.Check(
+            version=7, parent=5, retention_before=2.0, retention_after=2.0,
+            learned_before=3.0, learned_after=0.2, verdict="fine"))
+
+        back = online.checks(str(run))
+        assert len(back) == 2
+        assert back[0].rolled_back and not back[1].rolled_back
+        assert abs(back[0].drift - 0.9) < 1e-9
+
+        text = back[0].render()
+        assert "v5 -> v6" in text
+        assert "Rolled back" in text
+        assert "kept on disk" in text
+
+
+def test_the_report_does_not_claim_a_guard_it_does_not_have():
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        text = online.report(tmp)
+        assert "no retention probe yet" in text
+        assert "No guarded patch has run yet." in text
+
+
+def test_the_probe_measures_forgetting_and_says_so():
+    """The probe text was trained on, so a low loss means "still knows
+    this", not "learned to reason". Calling it held-out would be a lie."""
+    import inspect
+
+    from motherbrain import online
+
+    doc = inspect.getdoc(online)
+    assert "forgetting, not generalisation" in doc
+    assert "canary" in doc
+
+
+# ---- a body, and acting on what you see -----------------------------------
+
+def test_the_loop_never_reads_the_truth_it_is_supposed_to_perceive():
+    """A loop that peeks at body.truth is the planner with extra steps. The
+    only legitimate uses are handing an action to the world and checking
+    afterwards whether the goal was met."""
+    import inspect
+
+    from motherbrain import embodied
+
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(embodied.drive)))
+    source = inspect.getsource(embodied.drive).splitlines()
+
+    # Walk the syntax tree rather than the text, so the docstring and the
+    # comments explaining the rule are not mistaken for breaking it.
+    reads = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Attribute) and node.attr == "truth"
+             and isinstance(node.value, ast.Name) and node.value.id == "body"]
+    assert reads, "the test is looking for something that is not there"
+
+    # Two legitimate uses, both outside the perceive-plan-act cycle:
+    #   goal.met(body.truth)      how the loop knows it is finished
+    #   wrong_about(body.truth)   the after-the-fact report of what it misread
+    # Anything else would be the planner reading the answer off the world.
+    allowed = ("goal.met(body.truth)", "wrong_about(body.truth)")
+    for node in reads:
+        line = source[node.lineno - 1]
+        assert any(ok in line for ok in allowed), \
+            f"drive() reads the truth it should be perceiving: {line.strip()}"
+
+
+def test_a_body_with_no_eyes_still_knows_what_it_holds():
+    """Proprioception is a separate sense. Losing sight does not cost it."""
+    from motherbrain import agent, embodied, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    episode = embodied.drive(embodied.Simulated(w), [agent.Goal("on", "a", "b")])
+    assert episode.done
+    assert episode.blind
+    assert "from position only" in episode.steps[1].looked
+
+
+def test_it_acts_once_per_look_rather_than_running_a_whole_plan():
+    """Acting out a plan without looking again is the disembodied thing this
+    module exists to avoid."""
+    from motherbrain import agent, embodied, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    episode = embodied.drive(embodied.Simulated(w), [agent.Goal("on", "a", "b")])
+    # Two actions were needed, so there are two rounds - each with its own look.
+    assert len(episode.steps) == 2
+    for step in episode.steps:
+        assert step.looked
+        assert len(step.acted.split()) >= 2
+
+
+def test_an_action_the_world_refused_is_not_tried_again():
+    """What happened when you tried is evidence too. A loop that ignores it
+    repeats one impossible move until the budget runs out - which is what
+    this did before the refusal was recorded."""
+    from motherbrain import agent, embodied, world as W
+
+    class Deluded(embodied.Simulated):
+        """Believes the ball is a cube, as the real tower sometimes does."""
+
+        def fixate(self):
+            return []
+
+    w = W.World(things=(W.Thing("a", shape="cube", size="small", held=True),
+                        W.Thing("ball", shape="ball", size="large", on="floor")),
+                held=("a",))
+    body = Deluded(w)
+    # Plan against a believed world where the ball is a cube.
+    believed = W.World(
+        things=(W.Thing("a", shape="cube", size="small", held=True),
+                W.Thing("ball", shape="cube", size="large", on="floor")),
+        held=("a",))
+    episode = embodied.Episode(goal="a on ball")
+
+    plan, _note = agent.plan(believed, [agent.Goal("on", "a", "ball")])
+    assert plan, "the believed world should admit a plan"
+
+    ok, said = body.do(*plan[0])
+    assert not ok and "will not hold anything up" in said
+    episode.refuted.add(plan[0])
+    assert plan[0] in episode.refuted
+
+
+def test_perception_is_only_claimed_where_the_tower_can_name_a_thing():
+    """A plank seen flat-on is a rectangle, which this tower would have to
+    call a square - conflating it with a cube. So it goes unnamed rather
+    than guessed at."""
+    from motherbrain import embodied, world as W
+
+    assert set(embodied.SILHOUETTE) == {"ball", "cube", "pyramid"}
+    assert embodied.UNNAMEABLE == ("plank",)
+
+    w = W.World(things=(W.Thing("shelf", shape="plank", size="large",
+                                on="floor"),))
+    assert embodied.Simulated(w).silhouette("shelf") is None
+
+
+def test_a_lid_hides_things_from_the_camera_too():
+    """`fixate` must not override what the world model already knows about
+    what can be seen."""
+    from motherbrain import embodied, world as W
+
+    w = W.World(things=(W.Thing("box", size="large", on="floor", open=False),
+                        W.Thing("coin", shape="ball", size="small",
+                                inside="box")))
+    looked_at = {t.name for t in embodied.Simulated(w).fixate()}
+    assert "coin" not in looked_at
+    assert "box" in looked_at
+
+
+def test_there_is_no_robot_and_it_says_so():
+    """Four methods is the interface a real body would implement. Nothing
+    implements it, and a module that looked like it drove a servo would be
+    worse than one that admits it does not."""
+    from motherbrain import embodied
+
+    text = embodied.explain()
+    assert "only in simulation" in text
+    assert "nothing implements it" in text
+    assert "22.7%" in text
+
+    for method in ("photograph", "holding", "do", "stop"):
+        assert hasattr(embodied.Hardware, method)
