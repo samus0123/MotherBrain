@@ -234,6 +234,27 @@ def cmd_prepare(args) -> int:
     from motherbrain.data import Corpus
 
     corpus = Corpus(args.corpus)
+
+    if args.keep_vocab:
+        # Tokenise with the vocabulary the model already has, rather than
+        # learning a new one. Learning a new vocabulary under a trained model
+        # is not a smaller version of this - it silently invalidates every
+        # embedding, because token 4,211 is now a different piece of text.
+        # Needed whenever a corpus is being rebuilt beneath an existing
+        # lineage: patch replay and the retention probe both read tokens.bin.
+        from motherbrain.tokenizer import Tokenizer
+
+        source = Path(args.run) / "tokenizer.json"
+        if not source.exists():
+            print(f"no tokenizer at {source}, so there is no vocabulary to "
+                  f"keep. Drop --keep-vocab to learn one.", file=sys.stderr)
+            return 1
+        tok = Tokenizer.load(source)
+        n = corpus.tokenize(tok)
+        print(f"\ncorpus ready: {n:,} tokens, kept vocab {tok.vocab_size} "
+              f"from {source}")
+        return 0
+
     vocab = args.vocab_size or PRESETS[args.preset].vocab_size
     tok, n = corpus.prepare(vocab_size=vocab)
     print(f"\ncorpus ready: {n:,} tokens, vocab {tok.vocab_size}")
@@ -2024,10 +2045,21 @@ def cmd_patch(args) -> int:
 
     store = PatchStore(args.run)
     corpus = Corpus(args.corpus)
-    pending = corpus.n_documents - store.consumed_docs()
+    # The corpus is append-only, so "what is new" is normally everything past
+    # the watermark. --from overrides that for the one case where the indices
+    # no longer line up: a corpus rebuilt under an existing lineage, where the
+    # documents the earlier versions learned are no longer on disk.
+    doc_start = args.start
+    consumed = store.consumed_docs() if doc_start is None else doc_start
+    pending = corpus.n_documents - consumed
     if pending <= 0:
         print(f"nothing new to learn: all {corpus.n_documents} documents are "
               f"already in v{store.current}")
+        if args.start is None and store.consumed_docs() > corpus.n_documents:
+            print(f"  the lineage has consumed {store.consumed_docs():,} "
+                  f"documents but only {corpus.n_documents:,} are on disk.")
+            print(f"  If the corpus was rebuilt, say where this patch starts: "
+                  f"  mb patch --from 0")
         return 0
 
     grow_experts = args.grow
@@ -2056,8 +2088,24 @@ def cmd_patch(args) -> int:
     cfg = PatchConfig(mode=args.mode, grow_experts=grow_experts,
                       rank=args.rank, steps=args.steps, batch_size=args.batch_size,
                       lr=args.lr, replay_ratio=args.replay, seq_len=args.seq_len)
-    version = create_patch(args.run, args.corpus, cfg, note=args.note,
-                           device=args.device)
+
+    check = None
+    if args.guard:
+        from motherbrain.online import TOLERANCE as _default_tolerance
+        from motherbrain.online import guarded_patch
+
+        def online_tolerance() -> float:
+            return _default_tolerance
+
+        version, check = guarded_patch(
+            args.run, args.corpus, cfg, note=args.note, device=args.device,
+            tolerance=(args.tolerance if args.tolerance is not None
+                       else online_tolerance()),
+            on_message=lambda text: print(f"  {text}"),
+            doc_start=doc_start)
+    else:
+        version = create_patch(args.run, args.corpus, cfg, note=args.note,
+                               device=args.device, doc_start=doc_start)
     if version is None:
         print("nothing to do")
         return 0
@@ -2074,6 +2122,13 @@ def cmd_patch(args) -> int:
               f"(rank {version.rank})")
     print(f"  trained      {version.trainable_params:,} parameters")
     print(f"  loss         {version.loss_before:.4f} -> {version.loss_after:.4f}")
+    if check is not None:
+        print()
+        print(check.render())
+        # A rolled-back patch is not a successful command. The exit code has
+        # to say so, or a script that chains `mb patch && something` would
+        # carry on as though the new version were being served.
+        return 2 if check.rolled_back else 0
     return 0
 
 
@@ -2427,6 +2482,11 @@ def build_parser() -> argparse.ArgumentParser:
     s = common(sub.add_parser("prepare", help="learn a vocabulary and tokenize the corpus"))
     s.add_argument("--preset", default="micro")
     s.add_argument("--vocab-size", type=int)
+    s.add_argument("--keep-vocab", action="store_true",
+                   help="tokenize with the vocabulary the model in --run "
+                        "already has, instead of learning a new one. Learning "
+                        "a new one under a trained model invalidates every "
+                        "embedding it has")
     s.set_defaults(func=cmd_prepare)
 
     s = common(sub.add_parser("train", help="train on the corpus"))
@@ -2529,6 +2589,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--seq-len", type=int)
     s.add_argument("--note", default="")
     s.add_argument("--device", default="auto")
+    s.add_argument("--guard", action="store_true",
+                   help="measure what the model already knows before and "
+                        "after, and roll the patch back if it forgot too much")
+    s.add_argument("--tolerance", type=float, default=None,
+                   help="how much worse older material may get, in nats per "
+                        "token, before --guard rolls the patch back")
+    s.add_argument("--from", dest="start", type=int,
+                   help="learn from this corpus document onwards instead of "
+                        "from the lineage's watermark. For a corpus rebuilt "
+                        "under an existing lineage")
     s.set_defaults(func=cmd_patch)
 
     s = common(sub.add_parser(

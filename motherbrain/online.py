@@ -83,6 +83,9 @@ class Check:
     verdict: str = ""
     rolled_back: bool = False
     at: float = 0.0
+    #: False when the probe could only be drawn from the very material this
+    #: patch learned - then it measures learning, not retention, and says so.
+    guarded_retention: bool = True
 
     @property
     def drift(self) -> float:
@@ -98,6 +101,11 @@ class Check:
                      f"{self.retention_after:.4f}"
                      f"   ({self.drift:+.4f})")
         lines.append("")
+        if not self.guarded_retention:
+            lines.append("  No older material was on disk, so this could only")
+            lines.append("  confirm the new thing was learned. It is NOT")
+            lines.append("  evidence that nothing was forgotten.")
+            lines.append("")
         lines.append(f"  {self.verdict}")
         if self.rolled_back:
             lines.append(f"  Rolled back: still serving v{self.parent}.")
@@ -142,10 +150,16 @@ def build_probe(run_dir, corpus_dir, seq_len: int = 128,
 
     import numpy as np
 
+    # The one true dtype, imported rather than written out again. Hardcoding
+    # it here cost a whole false rollback: the corpus writes uint32, this read
+    # uint16, and the probe was every real token followed by a zero - half
+    # padding, every loss pinned at chance, and the comparison meaningless.
+    from motherbrain.data import TOKEN_DTYPE
+
     token_file = Path(corpus_dir) / "tokens.bin"
     if not token_file.exists():
         return None
-    total = token_file.stat().st_size // np.dtype(np.uint16).itemsize
+    total = token_file.stat().st_size // np.dtype(TOKEN_DTYPE).itemsize
     if total < seq_len * 4:
         return None
 
@@ -186,11 +200,13 @@ def measure(model, probe: Probe, corpus_dir, device: str = "cpu") -> float:
     import numpy as np
     import torch
 
+    from motherbrain.data import TOKEN_DTYPE
+
     token_file = Path(corpus_dir) / "tokens.bin"
     if not token_file.exists() or not probe.offsets:
         return float("nan")
 
-    tokens = np.memmap(token_file, dtype=np.uint16, mode="r")
+    tokens = np.memmap(token_file, dtype=TOKEN_DTYPE, mode="r")
     was_training = model.training
     model.eval()
 
@@ -203,16 +219,25 @@ def measure(model, probe: Probe, corpus_dir, device: str = "cpu") -> float:
                     continue
                 ids = torch.from_numpy(
                     np.asarray(window, dtype=np.int64)).to(device)
-                # Targets have to be passed, not the loss computed out here.
-                # Without them the model takes its inference path and returns
-                # only the LAST position's logits, so a loss worked out from
-                # the result would silently be about one token. Handing the
-                # targets over also means this is the model's own loss - the
-                # same quantity `mb patch` records - so the numbers compare.
-                _logits, loss = model(ids[:-1].unsqueeze(0),
-                                      targets=ids[1:].unsqueeze(0))
-                if loss is None:
-                    continue
+                # Targets must be passed, but the model's returned loss must
+                # NOT be used. Two separate traps here, and this hit both.
+                #
+                # Pass targets: without them the model takes its inference
+                # path and returns only the LAST position's logits, so any
+                # loss worked out from the result is about one token.
+                #
+                # Ignore the returned loss: it is cross-entropy PLUS the
+                # mixture-of-experts router penalties. Growing a patch adds
+                # fresh experts, so the router is unbalanced and that penalty
+                # is large - and router balance has nothing to do with whether
+                # the model forgot anything. Using it made this guard roll
+                # back a perfectly good patch for an untidy router.
+                targets = ids[1:].unsqueeze(0)
+                logits, _loss_with_aux = model(ids[:-1].unsqueeze(0),
+                                               targets=targets)
+                loss = torch.nn.functional.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)), targets.reshape(-1),
+                    ignore_index=-100)
                 total += float(loss)
                 counted += 1
     finally:
@@ -226,7 +251,8 @@ def measure(model, probe: Probe, corpus_dir, device: str = "cpu") -> float:
 
 def guarded_patch(run_dir, corpus_dir, config, note: str = "",
                   device: str = "cpu", tolerance: float = TOLERANCE,
-                  on_message=None) -> tuple[object, Check | None]:
+                  on_message=None,
+                  doc_start: int | None = None) -> tuple[object, Check | None]:
     """Apply a patch, and undo it if it damaged what the model already knew.
 
     Returns (version, check). The version is always returned even when it is
@@ -247,8 +273,21 @@ def guarded_patch(run_dir, corpus_dir, config, note: str = "",
         say("No tokenised corpus, so there is nothing to measure forgetting "
             "against. Patching without a guard.")
         version = create_patch(run_dir, corpus_dir, config, note=note,
-                               device=device)
+                               device=device, doc_start=doc_start)
         return version, None
+
+    # A probe drawn from a corpus that holds nothing but the documents about
+    # to be learned is not a retention probe - it cannot detect forgetting,
+    # because there is nothing older in it to forget. Saying so is the whole
+    # difference between a guard and a rubber stamp.
+    from motherbrain.data import Corpus
+
+    older = (Corpus(corpus_dir).n_documents if doc_start is None
+             else doc_start)
+    retention = older > 0
+    if not retention:
+        say("Nothing older than this patch is on disk, so the probe can only")
+        say("confirm the new material was learned. It cannot test forgetting.")
 
     say(f"Measuring what it knows now, on {len(probe)} fixed samples ...")
     model, _tok, resolved, parent = load_current(run_dir, device)
@@ -257,7 +296,7 @@ def guarded_patch(run_dir, corpus_dir, config, note: str = "",
     say(f"  {before:.4f} nats/token")
 
     version = create_patch(run_dir, corpus_dir, config, note=note,
-                           device=device)
+                           device=device, doc_start=doc_start)
     if version is None:
         return None, None
 
@@ -268,11 +307,16 @@ def guarded_patch(run_dir, corpus_dir, config, note: str = "",
     say(f"  {after:.4f} nats/token")
 
     words, roll = verdict_for(after - before, tolerance)
+    if not retention:
+        # Rolling back here would be punishing the model for a number that
+        # says nothing about forgetting.
+        roll = False
     check = Check(version=version.version, parent=parent,
                   retention_before=before, retention_after=after,
                   learned_before=version.loss_before,
                   learned_after=version.loss_after,
-                  verdict=words, rolled_back=roll, at=time.time())
+                  verdict=words, rolled_back=roll, at=time.time(),
+                  guarded_retention=retention)
 
     if roll:
         # Going back is moving a pointer. The patch file stays, with its

@@ -5380,12 +5380,80 @@ def test_the_launcher_honours_a_chosen_environment_location():
 # ---- learning after deployment, and noticing when it hurt -----------------
 
 def _synthetic_corpus(path, tokens=8000, vocab=300, seed=7):
-    """A tokens.bin to probe against, with structure so loss is meaningful."""
+    """A tokens.bin to probe against, written the way the corpus writes it."""
+    from motherbrain.data import TOKEN_DTYPE
+
     rng = np.random.default_rng(seed)
-    data = rng.integers(0, vocab, size=tokens, dtype=np.uint16)
+    data = rng.integers(0, vocab, size=tokens, dtype=TOKEN_DTYPE)
     path.mkdir(parents=True, exist_ok=True)
     (path / "tokens.bin").write_bytes(data.tobytes())
     return data
+
+
+def test_the_probe_reads_tokens_the_width_the_corpus_wrote_them():
+    """This cost a whole false rollback. The corpus writes uint32; the probe
+    read uint16, so it saw every real token followed by a zero - half
+    padding, every loss pinned at chance, and a patch refused for it.
+
+    The fix is not a corrected constant, it is importing the one that
+    already exists, so the two cannot drift apart again."""
+    import inspect
+
+    from motherbrain import data, online
+
+    source = inspect.getsource(online)
+    assert "np.uint16" not in source, \
+        "the probe is hardcoding a token width again"
+    assert "TOKEN_DTYPE" in source
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir()
+        written = _synthetic_corpus(corpus, tokens=5000)
+        probe = online.probe_for(str(run), str(corpus))
+
+        # The probe's idea of how long the corpus is has to match reality, or
+        # its offsets point into the middle of tokens.
+        assert probe.corpus_tokens == len(written)
+        assert np.dtype(data.TOKEN_DTYPE).itemsize == 4
+        assert max(probe.offsets) + probe.seq_len < len(written)
+
+
+def test_a_guard_with_nothing_older_to_protect_says_so():
+    """A probe drawn only from the material being learned measures learning,
+    not retention. Reporting it as a retention check would make the whole
+    guard a rubber stamp."""
+    from motherbrain import online
+
+    blind = online.Check(version=6, parent=5, retention_before=6.0,
+                         retention_after=2.0, learned_before=6.0,
+                         learned_after=1.8, verdict="better",
+                         guarded_retention=False)
+    text = blind.render()
+    assert "No older material was on disk" in text
+    assert "NOT" in text and "forgotten" in text
+
+    real = online.Check(version=7, parent=6, retention_before=2.0,
+                        retention_after=2.0, learned_before=3.0,
+                        learned_after=0.5, verdict="fine")
+    assert "No older material" not in real.render()
+
+
+def test_the_probe_does_not_score_the_router_instead_of_the_knowledge():
+    """model(idx, targets) returns cross-entropy PLUS the mixture-of-experts
+    router penalties. Growing a patch adds fresh experts, so that penalty
+    rises for reasons that have nothing to do with forgetting."""
+    import inspect
+
+    from motherbrain import online
+
+    source = inspect.getsource(online.measure)
+    # The returned loss is deliberately discarded in favour of a clean
+    # cross-entropy worked out from the logits.
+    assert "_loss_with_aux" in source
+    assert "cross_entropy" in source
 
 
 def test_the_probe_is_chosen_once_and_never_moves():
