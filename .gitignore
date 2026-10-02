@@ -5,9 +5,17 @@ __pycache__/
 venv/
 
 # Corpus text and its tokenized form: large, reproducible, and often private.
-data/corpus/documents.jsonl
-data/corpus/tokens.bin
-data/corpus/meta.json
+# Matched wherever the corpus lives, not at one hardcoded path - `--corpus`
+# takes any directory, and naming only data/corpus/ meant a corpus somewhere
+# else quietly became committable.
+**/documents.jsonl
+**/tokens.bin
+**/corpus/meta.json
+
+# The source text a corpus was fed FROM is a different thing: small, written
+# by hand, and the only record of what a version learned once the derived
+# files above are gone.
+!corpus/learned/**
 
 # Base weights are large and cached by CI rather than committed.
 runs/**/checkpoint.pt
