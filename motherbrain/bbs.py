@@ -1129,6 +1129,9 @@ BOARD_COMMANDS = [
     ("D", "Doors", 0),
     ("I", "System information", 0),
     ("S", "What I know about myself", 0),
+    ("K", "How I decide what to trust", 0),
+    ("Z", "The world, and acting in it", 0),
+    ("J", "How I learn after being deployed", 0),
     ("Y", "Your statistics", 0),
     ("W", "Who is online", 0),
 ]
@@ -3240,6 +3243,147 @@ async def self_knowledge(caller: Caller) -> None:
         await caller.pause()
 
 
+async def how_i_decide(caller: Caller) -> None:
+    """K - which method answered, and whether it can be checked again.
+
+    The whole hybrid argument on one screen: exact methods first, the
+    language model last, and a label on every answer saying which you are
+    holding. A caller can put a question in and watch it get routed.
+    """
+    from motherbrain import neurosymbolic as ns
+
+    board = caller.board
+    while True:
+        await caller.screen()
+        await header(caller)
+        await crumbs(caller)
+        await caller.line("")
+        for line in ns.explain().split("\n"):
+            await caller.line(f"{A.HW}{line}{A.RESET}")
+        await caller.line("")
+        await options(caller, A.entry("A", "ask something and see its grounds"))
+        choice = (await menu_choice(caller, limit=2)).upper()
+        if choice != "A":
+            return
+
+        question = (await caller.ask(f"\n  {A.HC}Question:{A.RESET} ")).strip()
+        if not question:
+            continue
+
+        answer = await asyncio.to_thread(
+            ns.solve, question, board.run_dir, None, board.model,
+            board.tok, board.device)
+        held, why = await asyncio.to_thread(ns.verify, answer)
+
+        await caller.line("")
+        for line in answer.render(wide(caller)).split("\n"):
+            await caller.line(f"{A.HW}{line}{A.RESET}")
+        await caller.line("")
+        colour = "\x032" if held else "\x034"
+        await caller.line(f"  {colour}Checked again: {why}\x030")
+        await caller.pause()
+
+
+async def the_world(caller: Caller) -> None:
+    """Z - a world with causes in it, and a planner that works on them.
+
+    This is the part a language model cannot do. The rules here hold whether
+    or not anyone wrote them down, so a plan is right before it is run - and
+    when no plan exists the answer is "there is none", which no amount of
+    fluency will produce.
+    """
+    from motherbrain import agent, embodied
+    from motherbrain import neurosymbolic as ns
+    # Not `as W`: that name is the wwiv module everywhere else in this file.
+    from motherbrain import world as model_world
+
+    board = caller.board
+    scene = model_world.build(seed=caller.node, things=4)
+
+    while True:
+        await caller.screen()
+        await header(caller)
+        await crumbs(caller)
+        await caller.line("")
+        await caller.line(f"{A.HC}  THE WORLD AS IT IS{A.RESET}")
+        await caller.line("")
+        for line in model_world.describe(scene, full=True).split("\n"):
+            await caller.line(f"{A.HW}  {line}{A.RESET}")
+        await caller.line("")
+        await caller.line(f"{A.HW}  Nobody wrote these rules down for me. A ball "
+                          f"holds nothing up.{A.RESET}")
+        await caller.line(f"{A.HW}  Pull a plank from under a stack and what was "
+                          f"on it falls.{A.RESET}")
+        await caller.line("")
+        # One per line: three entries concatenated run together into an
+        # unreadable row, and at 38 columns they would wrap mid-label.
+        await options(caller, "\n  ".join((
+            A.entry("A", "tell me what to do (e.g. put a on b)"),
+            A.entry("E", "do it with my eyes instead of the facts"),
+            A.entry("N", "a different world"))))
+        choice = (await menu_choice(caller, limit=2)).upper()
+
+        if choice == "N":
+            scene = model_world.build(seed=time.time_ns() & 0xFFFFFF,
+                                      things=4)
+            continue
+        if choice not in ("A", "E"):
+            return
+
+        said = (await caller.ask(f"\n  {A.HC}What should I do?{A.RESET} ")).strip()
+        goals = ns.read_goal(said)
+        if not goals:
+            await caller.line("")
+            await caller.line(f"  \x034I could not find a goal in that. Try "
+                              f"something like\x030")
+            await caller.line(f"  \x034\"put a on b\", \"open the box\", "
+                              f"\"is c clear\".\x030")
+            await caller.pause()
+            continue
+
+        await caller.line("")
+        if choice == "E":
+            body = embodied.Simulated(scene)
+            episode = await asyncio.to_thread(
+                embodied.drive, body, goals, board.model, board.tok,
+                board.device)
+            scene = body.truth
+            text = episode.render(wide(caller))
+        else:
+            engine = agent.Agent(agent.Registry(), world=scene)
+            run = await asyncio.to_thread(engine.achieve, goals)
+            scene = engine.world
+            text = run.render(wide(caller))
+
+        for line in text.split("\n"):
+            await caller.line(f"{A.HW}  {line}{A.RESET}")
+        await caller.pause()
+
+
+async def how_i_learn(caller: Caller) -> None:
+    """J - learning after deployment, and what it has cost.
+
+    The patch mechanism is continual learning: a new version while the board
+    stays up, with nobody disconnected. What this screen adds is the other
+    half - whether any of it made me worse, measured on material chosen once
+    and never changed.
+    """
+    from motherbrain import online
+
+    board = caller.board
+    text = await asyncio.to_thread(online.report, board.run_dir,
+                                   board.corpus_dir, wide(caller))
+    await caller.screen()
+    await header(caller)
+    await crumbs(caller)
+    await caller.line("")
+    for line in text.split("\n"):
+        await caller.line(f"{A.HC}{line}{A.RESET}" if set(line) <= set("- ")
+                          and line.strip() else f"{A.HW}{line}{A.RESET}")
+    await options(caller)
+    await menu_choice(caller, limit=2)
+
+
 async def new_file_scan(caller: Caller) -> None:
     """N - what has arrived in the file directories since you last called."""
     board = caller.board
@@ -3798,6 +3942,7 @@ HANDLERS = {
     "M": teleconference, "D": door_menu, "I": system_info, "Y": your_info,
     "W": who_is_online, "L": last_callers, "X": expert_toggle,
     "S": self_knowledge,
+    "K": how_i_decide, "Z": the_world, "J": how_i_learn,
     "?": show_menu,
 }
 

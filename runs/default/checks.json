@@ -1,0 +1,25 @@
+[
+  {
+    "version": 6,
+    "parent": 5,
+    "retention_before": 9.925582587718964,
+    "retention_after": 11.768596082925797,
+    "learned_before": 6.0147,
+    "learned_after": 1.8339,
+    "verdict": "It forgot too much: +1.8430 nats/token on older material, against a tolerance of 0.15.",
+    "rolled_back": true,
+    "at": 1790983346.0340672
+  },
+  {
+    "version": 6,
+    "parent": 5,
+    "retention_before": 6.0397,
+    "retention_after": 2.0019,
+    "learned_before": 6.0147,
+    "learned_after": 1.8339,
+    "verdict": "It got better at what it already knew, as well as learning the new thing.",
+    "rolled_back": false,
+    "at": 0.0,
+    "guarded_retention": false
+  }
+]

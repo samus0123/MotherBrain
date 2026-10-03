@@ -1,0 +1,266 @@
+"""Neural where it must be, symbolic where it can be, and always says which.
+
+Two ways of getting an answer, with opposite failure modes.
+
+A neural network generalises. Shown enough text it will answer a question it
+has never seen, and it will answer with exactly the same confidence when it
+is wrong. There is nothing inside it to inspect: the answer is a point in a
+space, not a consequence of anything.
+
+A symbolic system derives. Every step is a rule you can read, the chain is
+the proof, and when nothing follows it says nothing follows. It cannot
+generalise an inch beyond what it was given.
+
+The hybrid is not a blend. It is a *routing* decision made per question, with
+the exact methods tried first and the model reached for only when the
+question is genuinely a language question. That ordering is the whole design,
+because a fluent wrong answer costs more than a blunt refusal.
+
+What this module adds over the pieces it routes to is the thing that makes
+the answer worth trusting: every answer carries a **warrant** - what kind of
+support it has - and, where the support is exact, a **check** that can be run
+again by anyone to confirm it.
+
+    CALCULATED  an exact computation      re-runnable, and re-run by verify()
+    DERIVED     a chain of stated rules   re-runnable, and re-run by verify()
+    PLANNED     a plan in the world model re-runnable by simulating it
+    QUOTED      a passage that was read   checkable against the source text
+    GENERATED   the language model        not checkable; labelled as such
+
+A `GENERATED` answer is not a failure - some questions have no exact form -
+but it is never dressed up as one of the others, and `verify()` will say so
+rather than nodding it through.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+CALCULATED = "calculated"
+DERIVED = "derived"
+PLANNED = "planned"
+QUOTED = "quoted"
+GENERATED = "generated"
+
+#: How much weight each kind of support carries, and why. Order matters: the
+#: router tries them in this sequence and stops at the first that answers.
+WARRANTS = {
+    CALCULATED: "computed exactly; the same input always gives this",
+    DERIVED: "follows from stated facts by stated rules",
+    PLANNED: "checked by simulating it in the world model",
+    QUOTED: "taken from something I was given to read",
+    GENERATED: "produced by the language model; not checked against anything",
+}
+
+EXACT = (CALCULATED, DERIVED, PLANNED)
+
+
+@dataclass
+class Answer:
+    """An answer and the grounds for it.
+
+    `chain` holds the steps of the derivation in order. `check` is a
+    self-contained thing that can be re-run: an expression for a calculation,
+    the facts and rules for a derivation, the plan and the world for a plan.
+    """
+
+    text: str
+    warrant: str
+    chain: list = field(default_factory=list)
+    check: object = None
+    source: str = ""
+
+    @property
+    def exact(self) -> bool:
+        return self.warrant in EXACT
+
+    def render(self, width: int = 68) -> str:
+        lines = [self.text, ""]
+        if self.chain:
+            lines.append("How:")
+            for step in self.chain:
+                lines.append(f"  {step}"[:width])
+            lines.append("")
+        lines.append(f"Grounds: {WARRANTS.get(self.warrant, self.warrant)}")
+        if self.source:
+            lines.append(f"Source: {self.source}")
+        if not self.exact:
+            lines.append("I would not rely on this without checking it.")
+        return "\n".join(lines)
+
+
+def verify(answer: Answer) -> tuple[bool, str]:
+    """Re-run the answer's own check and say whether it still holds.
+
+    This is what separates the hybrid from a language model with a confident
+    tone. An exact answer can be confirmed by running its check again from
+    nothing; a generated one cannot be, and this says so plainly rather than
+    returning True because nothing went wrong.
+    """
+    if answer.warrant == CALCULATED:
+        from . import logic
+        again = logic.solve(str(answer.check))
+        if again is None:
+            return False, "the calculation no longer parses"
+        return (again.render() == answer.text,
+                "recomputed" if again.render() == answer.text
+                else f"recomputed to {again.render()}")
+
+    if answer.warrant == DERIVED:
+        run_dir, subject, obj = answer.check
+        from . import knowledge
+        store = knowledge.Knowledge(run_dir, create=False)
+        again = store.ask(subject, obj)
+        return again.holds, ("re-derived from the same facts" if again.holds
+                             else "no longer follows from what I hold")
+
+    if answer.warrant == PLANNED:
+        from . import world as W
+        start, steps = answer.check
+        _, _, stopped = W.simulate(start, steps)
+        return not stopped, stopped or "the plan runs from the same start"
+
+    if answer.warrant == QUOTED:
+        return True, "quoted; the source says what it says"
+
+    return False, "generated by the model, so there is nothing to check"
+
+
+# ---- the router -------------------------------------------------------------
+
+def solve(question: str, run_dir=None, world=None,
+          model=None, tok=None, device: str = "cpu") -> Answer:
+    """Answer a question with the most checkable method that applies.
+
+    Exact first, always. The model is asked last and only when nothing else
+    fits, and what it returns is labelled `GENERATED` no matter how well it
+    reads.
+    """
+    from . import logic
+
+    computed = logic.solve(question)
+    if computed is not None:
+        return Answer(text=computed.render(), warrant=CALCULATED,
+                      chain=[f"{question.strip()} -> {computed.render()}"],
+                      check=question)
+
+    if run_dir is not None:
+        from . import knowledge
+        store = knowledge.Knowledge(run_dir, create=False)
+        asked = knowledge.parse_question(question)
+        if asked:
+            derived = store.ask(*asked)
+            if derived.holds:
+                return Answer(
+                    text=derived.render(), warrant=DERIVED,
+                    chain=[str(step) for step in getattr(derived, "steps", [])],
+                    check=(run_dir, *asked))
+
+    if world is not None:
+        from . import agent
+        goals = read_goal(question)
+        if goals:
+            found, note = agent.plan(world, goals)
+            if found is not None:
+                return Answer(
+                    text=("Already true." if not found else
+                          "; ".join(" ".join(step) for step in found)),
+                    warrant=PLANNED,
+                    chain=[f"{i}. {' '.join(s)}"
+                           for i, s in enumerate(found, start=1)] or ["nothing to do"],
+                    check=(world, found), source=note)
+            return Answer(text=f"There is no way to do that. {note}.",
+                          warrant=PLANNED, chain=[note], check=(world, []))
+
+    if run_dir is not None:
+        from . import nlp
+        hits = nlp.search(nlp.corpus_index(run_dir), question, limit=1)
+        if hits:
+            return Answer(text=hits[0].text.strip(), warrant=QUOTED,
+                          source=getattr(hits[0], "name", "something I read"))
+
+    if model is not None and tok is not None:
+        from . import actions
+        text = "".join(actions.stream(model, tok, device, question,
+                                      max_tokens=60))
+        return Answer(text=text.strip(), warrant=GENERATED)
+
+    return Answer(text="I have no exact way to answer that, and no model "
+                       "loaded to guess with.", warrant=GENERATED)
+
+
+# ---- reading a goal out of a sentence ---------------------------------------
+
+# Words that introduce a request rather than naming anything in it.
+_COMMANDS = ("put", "is", "get", "make", "move", "place", "want", "i",
+             "can", "you", "would", "please", "could")
+
+_ARTICLES = ("the", "a", "an")
+
+
+def _trim(words, drop):
+    """Strip framing words, but never the word that names the thing.
+
+    An article is only an article when something follows it. A block can be
+    called "a", and deleting its name because it looks like a determiner
+    turns a correct plan into a correct plan for nothing.
+    """
+    kept = [w for w in words if w not in drop]
+    out = []
+    for i, word in enumerate(kept):
+        if word in _ARTICLES and i < len(kept) - 1:
+            continue
+        out.append(word)
+    return out
+
+
+_RELATIONS = {
+    "on top of": "on", "on": "on", "inside": "in", "in": "in",
+    "into": "in", "held": "held", "open": "open", "closed": "closed",
+    "clear": "clear",
+}
+
+
+def read_goal(text: str):
+    """Turn "put a on b" or "is a on b" into goals the planner can check.
+
+    Deliberately narrow. A goal that is guessed at is worse than no goal,
+    because the plan that follows will be a correct plan for the wrong thing.
+    """
+    from . import agent
+
+    words = text.lower().replace("?", "").replace(".", "").split()
+    if not words:
+        return []
+
+    for phrase, relation in sorted(_RELATIONS.items(),
+                                   key=lambda kv: -len(kv[0])):
+        parts = phrase.split()
+        for i in range(len(words) - len(parts) + 1):
+            if words[i:i + len(parts)] != parts:
+                continue
+            before = _trim(words[:i], _COMMANDS)
+            after = _trim(words[i + len(parts):], _COMMANDS)
+            state = relation in ("held", "open", "closed", "clear")
+
+            if state:
+                # "open the box" names the thing after the word; "is a open"
+                # names it before. Either is a goal about one thing.
+                thing = before[-1] if before else (after[0] if after else "")
+                if thing:
+                    return [agent.Goal(relation, thing)]
+                continue
+
+            if before and after:
+                return [agent.Goal(relation, before[-1], after[0])]
+    return []
+
+
+def explain() -> str:
+    """What the hybrid is, in the words it would use on its own screen."""
+    return (
+        "I answer with the most checkable method that fits the question.\n\n"
+        + "\n".join(f"  {name:<11} {why}" for name, why in WARRANTS.items())
+        + "\n\nThe exact ones can be run again to confirm them. The last one "
+          "cannot be,\nand I label it so you know which you are holding."
+    )

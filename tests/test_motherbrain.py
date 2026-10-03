@@ -5034,3 +5034,701 @@ def test_the_board_offers_what_it_knows_about_itself():
     letters = {key for key, _label, _sl in BOARD_COMMANDS}
     assert "S" in letters
     assert HANDLERS["S"].__name__ == "self_knowledge"
+
+
+# ---- the world model ------------------------------------------------------
+
+def test_preconditions_name_what_stopped_them():
+    """A failed action that says only "no" is useless for planning. Every
+    refusal has to name the thing that was not true."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="a")))
+    assert not W.take(w, "a")
+    assert "b is on top of a" in W.take(w, "a").said
+    assert "there is no z" in W.take(w, "z").said
+
+
+def test_a_ball_holds_nothing_up():
+    """The rule is about shape, not about what anyone has written down
+    about balls. This is the sort of fact a text model has no access to."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("a", size="small", held=True),
+                        W.Thing("ball", shape="ball", size="large", on="floor")))
+    outcome = W.put_on(w, "a", "ball")
+    assert not outcome
+    assert "ball will not hold anything up" in outcome.said
+
+
+def test_a_big_thing_will_not_balance_on_a_small_one():
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("big", size="large", held=True),
+                        W.Thing("small", size="small", on="floor")))
+    assert "would topple" in W.put_on(w, "big", "small").said
+
+
+def test_taking_the_support_away_makes_things_fall():
+    """Gravity has to be reachable, or `settle` is dead code dressed as
+    physics. Pulling a plank out is the action that reaches it."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("shelf", shape="plank", size="large", on="floor"),
+                        W.Thing("cup", size="small", on="shelf"),
+                        W.Thing("hat", shape="pyramid", size="small", on="cup")))
+    outcome = W.act(w, "pull-out", "shelf")
+    assert outcome
+    after, fell = W.settle(outcome.world)
+    assert fell == ["cup fell to the floor"]
+    # The stack came down together: the hat's support never went away.
+    assert after.get("cup").on == "floor"
+    assert after.get("hat").on == "cup"
+
+
+def test_a_closed_lid_hides_as_well_as_blocks():
+    """Out of reach and out of sight are two different facts, and a world
+    model that conflates them cannot answer either question."""
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("box", size="large", on="floor", open=False),
+                        W.Thing("coin", size="small", inside="box")))
+    assert not w.reachable("coin")
+    assert not w.visible("coin")
+
+    opened = W.act(w, "open", "box").world
+    assert opened.reachable("coin") and opened.visible("coin")
+
+    # A thing under a stack is blocked but in plain sight.
+    stacked = W.World(things=(W.Thing("a", size="large", on="floor"),
+                              W.Thing("b", size="small", on="a")))
+    assert not stacked.reachable("a")
+    assert stacked.visible("a")
+
+
+def test_a_world_can_be_stated_as_facts():
+    from motherbrain import world as W
+
+    w = W.World(things=(W.Thing("a", colour="red", shape="cube", on="floor"),))
+    facts = W.facts(w)
+    assert ("colour", "a", "red") in facts
+    assert ("on", "a", "floor") in facts
+    assert ("clear", "a") in facts
+
+
+# ---- planning -------------------------------------------------------------
+
+def test_a_plan_is_found_and_it_is_the_shortest_one():
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    steps, note = agent.plan(w, [agent.Goal("on", "a", "b")])
+    assert steps == [("take", "a"), ("put-on", "a", "b")]
+    assert "found in 2 steps" in note
+
+
+def test_it_says_when_no_plan_exists_instead_of_trying_anyway():
+    """This is the answer a language model can never give. A plan that does
+    not exist has to come back as "there is none", not as plausible text."""
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("ball", shape="ball", size="large", on="floor")))
+    steps, note = agent.plan(w, [agent.Goal("on", "a", "ball")])
+    assert steps is None
+    assert "no plan exists" in note
+
+
+def test_the_planner_exploits_gravity():
+    """Nobody told it that pulling a shelf out drops what is on it. It
+    follows from the rules, and the search finds it."""
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("shelf", shape="plank", size="large", on="floor"),
+                        W.Thing("cup", size="small", on="shelf")))
+    run = agent.Agent(agent.Registry(), world=w).achieve(
+        [agent.Goal("on", "cup", "floor")])
+    assert run.done
+    assert run.acts[1].argument == "pull-out shelf"
+    assert "cup fell to the floor" in run.acts[1].observation
+
+
+def test_an_already_true_goal_costs_no_actions():
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", on="floor"),))
+    steps, note = agent.plan(w, [agent.Goal("on", "a", "floor")])
+    assert steps == []
+    assert note == "already true"
+
+
+def test_a_goal_is_checked_against_the_world_not_the_plan():
+    """The loop stops because the world says so. A plan that ran to the end
+    is not evidence the goal is met - only the world is."""
+    from motherbrain import agent, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    engine = agent.Agent(agent.Registry(), world=w)
+    goal = agent.Goal("on", "a", "b")
+    assert not goal.met(engine.world)
+
+    run = engine.achieve([goal])
+    assert run.done
+    # The agent's own world moved, and that world is what was checked.
+    assert goal.met(engine.world)
+    assert engine.world.get("a").on == "b"
+    assert engine.world is not w          # the starting world is untouched
+    assert not goal.met(w)
+
+
+def test_an_agent_with_no_tool_says_so_and_lists_what_it_has():
+    from motherbrain import agent
+
+    run = agent.Agent(agent.Registry()).pursue("compose a sonnet about rain")
+    assert not run.done
+    assert "no tool" in run.answer.lower()
+
+
+def test_arithmetic_goes_to_the_calculator_not_the_model():
+    from motherbrain import agent
+
+    registry = agent.standard()
+    tool = registry.best("what is 19 * 23 + 4?")
+    assert tool.name == "calculate"
+    run = agent.Agent(registry).pursue("what is 19 * 23 + 4?")
+    assert "441" in run.answer
+
+
+# ---- the neurosymbolic router ---------------------------------------------
+
+def test_every_answer_says_what_kind_of_support_it_has():
+    from motherbrain import neurosymbolic as ns
+
+    answer = ns.solve("what is 144 / 12 + 7?")
+    assert answer.warrant == ns.CALCULATED
+    assert answer.exact
+    assert "19" in answer.text
+
+
+def test_an_exact_answer_can_be_confirmed_by_running_it_again():
+    from motherbrain import neurosymbolic as ns
+
+    answer = ns.solve("what is 2 ** 10?")
+    held, why = ns.verify(answer)
+    assert held and why == "recomputed"
+
+
+def test_a_generated_answer_is_never_waved_through():
+    """verify() returning True on unchecked model output would make the
+    whole warrant scheme a decoration."""
+    from motherbrain import neurosymbolic as ns
+
+    answer = ns.Answer(text="the moon is made of cheese",
+                       warrant=ns.GENERATED)
+    held, why = ns.verify(answer)
+    assert not held
+    assert "nothing to check" in why
+    assert not answer.exact
+    assert "would not rely on this" in answer.render()
+
+
+def test_a_plan_is_answered_by_planning_and_can_be_resimulated():
+    from motherbrain import neurosymbolic as ns, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    answer = ns.solve("put a on b", world=w)
+    assert answer.warrant == ns.PLANNED
+    assert answer.exact
+    held, _why = ns.verify(answer)
+    assert held
+
+
+def test_an_impossible_request_is_refused_with_a_reason():
+    from motherbrain import neurosymbolic as ns, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("ball", shape="ball", size="large", on="floor")))
+    answer = ns.solve("put a on ball", world=w)
+    assert "no way to do that" in answer.text
+
+
+def test_a_goal_is_only_read_when_it_is_actually_there():
+    """A guessed goal is worse than none: the plan that follows will be a
+    correct plan for the wrong thing."""
+    from motherbrain import neurosymbolic as ns
+
+    assert ns.read_goal("put a on b") == ns.read_goal("put the a on the b")
+    assert ns.read_goal("") == []
+    assert ns.read_goal("hello there") == []
+
+
+def test_an_agent_does_not_eat_its_own_tools():
+    """A tool that failed on one goal has to still be there for the next
+    one. An agent that empties its registry as it works gets worse the
+    longer it runs, which is the opposite of the point."""
+    from motherbrain import agent
+
+    registry = agent.standard()
+    before = len(registry)
+    engine = agent.Agent(registry)
+
+    assert "42" in engine.pursue("what is 6 * 7?").answer
+    assert "72" in engine.pursue("what is 8 * 9?").answer
+    engine.pursue("something no tool handles at all")
+
+    assert len(registry) == before
+
+
+# ---- the one-word launchers ------------------------------------------------
+
+LAUNCHERS = pathlib.Path(__file__).resolve().parent.parent
+
+
+def test_the_launchers_are_there_and_runnable():
+    """"How do I start it" has to have a one-word answer on every platform,
+    and a script that is not executable is not an answer."""
+    import os
+    import stat
+
+    unix = LAUNCHERS / "START"
+    mac = LAUNCHERS / "START.command"
+    windows = LAUNCHERS / "START.bat"
+
+    for script in (unix, mac, windows):
+        assert script.is_file(), f"{script.name} is missing"
+
+    for script in (unix, mac):
+        mode = script.stat().st_mode
+        assert mode & stat.S_IXUSR, f"{script.name} is not executable"
+
+
+def test_the_shell_launchers_parse():
+    """A syntax error in the launcher is the worst possible bug: it is the
+    first thing anyone runs and it would fail before any of this exists."""
+    import subprocess
+
+    for name in ("START", "START.command"):
+        done = subprocess.run(["sh", "-n", str(LAUNCHERS / name)],
+                              capture_output=True, text=True)
+        assert done.returncode == 0, f"{name}: {done.stderr}"
+
+
+def test_the_windows_launcher_has_windows_line_endings():
+    """A .bat with bare LF can fail in ways that are hard to read, and the
+    USB launchers already use CRLF for the same reason."""
+    data = (LAUNCHERS / "START.bat").read_bytes()
+    assert b"\r\n" in data
+    # No stray lone LFs: every LF must be preceded by a CR.
+    assert data.replace(b"\r\n", b"") .count(b"\n") == 0
+
+
+def test_the_launchers_pass_arguments_through():
+    """./START --open has to reach `mb start`, or every flag needs a second
+    way to be spelled."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert 'start "$@"' in unix
+
+    mac = (LAUNCHERS / "START.command").read_text()
+    assert './START "$@"' in mac
+
+    windows = (LAUNCHERS / "START.bat").read_text()
+    assert "start %*" in windows
+
+
+def test_a_moved_environment_is_rebuilt_not_patched():
+    """Python writes absolute paths into a virtual environment, so a moved
+    one cannot be repaired - only replaced. Pretending otherwise produces
+    "bad interpreter" later, further from the cause."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert "rm -rf" in unix
+    assert "moved" in unix
+
+
+def test_the_launchers_delegate_installing_rather_than_redo_it():
+    """scripts/install.sh already knows about PEP 668, the 5.5GB CUDA wheel
+    nobody without an NVIDIA card can use, and checking free disk before the
+    download. A second copy of that logic in the launcher would be a second
+    place to fix it, and the copy would be the worse one."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert "scripts/install.sh" in unix
+    # And it does not carry its own pip invocation.
+    assert "pip install" not in unix
+
+    windows = (LAUNCHERS / "START.bat").read_text()
+    assert "install.ps1" in windows
+
+
+def test_the_installer_the_launchers_call_is_actually_there():
+    """A launcher that delegates to a missing script is worse than one that
+    does the work badly."""
+    assert (LAUNCHERS / "scripts" / "install.sh").is_file()
+    assert (LAUNCHERS / "scripts" / "install.ps1").is_file()
+
+
+def test_the_launcher_honours_a_chosen_environment_location():
+    """install.sh takes VENV from the environment, so the launcher has to
+    pass it on or the two will disagree about where they put things."""
+    unix = (LAUNCHERS / "START").read_text()
+    assert 'VENV="${VENV:-$HERE/.venv}"' in unix
+    assert 'VENV="$VENV" sh' in unix
+
+
+# ---- learning after deployment, and noticing when it hurt -----------------
+
+def _synthetic_corpus(path, tokens=8000, vocab=300, seed=7):
+    """A tokens.bin to probe against, written the way the corpus writes it."""
+    from motherbrain.data import TOKEN_DTYPE
+
+    rng = np.random.default_rng(seed)
+    data = rng.integers(0, vocab, size=tokens, dtype=TOKEN_DTYPE)
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "tokens.bin").write_bytes(data.tobytes())
+    return data
+
+
+def test_the_probe_reads_tokens_the_width_the_corpus_wrote_them():
+    """This cost a whole false rollback. The corpus writes uint32; the probe
+    read uint16, so it saw every real token followed by a zero - half
+    padding, every loss pinned at chance, and a patch refused for it.
+
+    The fix is not a corrected constant, it is importing the one that
+    already exists, so the two cannot drift apart again."""
+    import inspect
+
+    from motherbrain import data, online
+
+    source = inspect.getsource(online)
+    assert "np.uint16" not in source, \
+        "the probe is hardcoding a token width again"
+    assert "TOKEN_DTYPE" in source
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir()
+        written = _synthetic_corpus(corpus, tokens=5000)
+        probe = online.probe_for(str(run), str(corpus))
+
+        # The probe's idea of how long the corpus is has to match reality, or
+        # its offsets point into the middle of tokens.
+        assert probe.corpus_tokens == len(written)
+        assert np.dtype(data.TOKEN_DTYPE).itemsize == 4
+        assert max(probe.offsets) + probe.seq_len < len(written)
+
+
+def test_a_guard_with_nothing_older_to_protect_says_so():
+    """A probe drawn only from the material being learned measures learning,
+    not retention. Reporting it as a retention check would make the whole
+    guard a rubber stamp."""
+    from motherbrain import online
+
+    blind = online.Check(version=6, parent=5, retention_before=6.0,
+                         retention_after=2.0, learned_before=6.0,
+                         learned_after=1.8, verdict="better",
+                         guarded_retention=False)
+    text = blind.render()
+    assert "No older material was on disk" in text
+    assert "NOT" in text and "forgotten" in text
+
+    real = online.Check(version=7, parent=6, retention_before=2.0,
+                        retention_after=2.0, learned_before=3.0,
+                        learned_after=0.5, verdict="fine")
+    assert "No older material" not in real.render()
+
+
+def test_the_probe_does_not_score_the_router_instead_of_the_knowledge():
+    """model(idx, targets) returns cross-entropy PLUS the mixture-of-experts
+    router penalties. Growing a patch adds fresh experts, so that penalty
+    rises for reasons that have nothing to do with forgetting."""
+    import inspect
+
+    from motherbrain import online
+
+    source = inspect.getsource(online.measure)
+    # The returned loss is deliberately discarded in favour of a clean
+    # cross-entropy worked out from the logits.
+    assert "_loss_with_aux" in source
+    assert "cross_entropy" in source
+
+
+def test_the_probe_is_chosen_once_and_never_moves():
+    """A guard whose probe is rebuilt per patch measures a different thing
+    every time, which makes the comparison meaningless. That is the easiest
+    way to ship a regression guard that does nothing."""
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir()
+        _synthetic_corpus(corpus)
+
+        first = online.probe_for(str(run), str(corpus))
+        assert first is not None and len(first) > 0
+
+        second = online.probe_for(str(run), str(corpus))
+        assert second.offsets == first.offsets
+        assert second.created_at == first.created_at
+
+        # Even after the corpus grows, the existing probe is reused: the
+        # whole point is to measure the same text both times.
+        _synthetic_corpus(corpus, tokens=16000, seed=99)
+        third = online.probe_for(str(run), str(corpus))
+        assert third.offsets == first.offsets
+
+
+def test_there_is_no_probe_without_a_corpus_to_build_it_from():
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir(); corpus.mkdir()
+        assert online.probe_for(str(run), str(corpus)) is None
+
+
+def test_measuring_is_deterministic_and_leaves_the_model_alone():
+    """A measurement that moves on its own is not a measurement. And the
+    model has to come back in the mode it was handed over in - a guard that
+    silently leaves it in eval() would change how it serves callers."""
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run, corpus = pathlib.Path(tmp) / "run", pathlib.Path(tmp) / "corpus"
+        run.mkdir()
+        _synthetic_corpus(corpus, vocab=250)
+
+        model = MotherBrain(tiny(vocab_size=300, max_seq_len=256))
+        probe = online.probe_for(str(run), str(corpus), seq_len=64)
+
+        model.train()
+        first = online.measure(model, probe, str(corpus))
+        assert model.training, "the model was left in eval mode"
+
+        second = online.measure(model, probe, str(corpus))
+        assert first == second, "the same model scored differently twice"
+        assert first > 0
+
+        model.eval()
+        online.measure(model, probe, str(corpus))
+        assert not model.training, "the model was left in train mode"
+
+
+def test_a_patch_that_forgets_too_much_is_refused():
+    """One rule, in one place, so no screen can drift into optimism."""
+    from motherbrain import online
+
+    _words, roll = online.verdict_for(-0.20)
+    assert not roll
+    _words, roll = online.verdict_for(0.0)
+    assert not roll
+    _words, roll = online.verdict_for(online.TOLERANCE - 0.01)
+    assert not roll, "inside tolerance should be kept"
+    _words, roll = online.verdict_for(online.TOLERANCE + 0.01)
+    assert roll, "past tolerance should be rolled back"
+
+
+def test_the_verdict_says_which_direction_it_moved():
+    from motherbrain import online
+
+    better, _ = online.verdict_for(-0.2)
+    assert "better" in better
+    worse, _ = online.verdict_for(1.0)
+    assert "forgot too much" in worse
+    assert "1.0000" in worse
+
+
+def test_a_refused_patch_is_recorded_rather_than_hidden():
+    """A system that silently discarded the attempt would learn the same bad
+    lesson twice. The rejection is part of the lineage."""
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        run = pathlib.Path(tmp)
+        check = online.Check(version=6, parent=5, retention_before=2.0,
+                             retention_after=2.9, learned_before=3.0,
+                             learned_after=0.1, verdict="forgot too much",
+                             rolled_back=True)
+        online.record(str(run), check)
+        online.record(str(run), online.Check(
+            version=7, parent=5, retention_before=2.0, retention_after=2.0,
+            learned_before=3.0, learned_after=0.2, verdict="fine"))
+
+        back = online.checks(str(run))
+        assert len(back) == 2
+        assert back[0].rolled_back and not back[1].rolled_back
+        assert abs(back[0].drift - 0.9) < 1e-9
+
+        text = back[0].render()
+        assert "v5 -> v6" in text
+        assert "Rolled back" in text
+        assert "kept on disk" in text
+
+
+def test_the_report_does_not_claim_a_guard_it_does_not_have():
+    import tempfile
+
+    from motherbrain import online
+
+    with tempfile.TemporaryDirectory() as tmp:
+        text = online.report(tmp)
+        assert "no retention probe yet" in text
+        assert "No guarded patch has run yet." in text
+
+
+def test_the_probe_measures_forgetting_and_says_so():
+    """The probe text was trained on, so a low loss means "still knows
+    this", not "learned to reason". Calling it held-out would be a lie."""
+    import inspect
+
+    from motherbrain import online
+
+    doc = inspect.getdoc(online)
+    assert "forgetting, not generalisation" in doc
+    assert "canary" in doc
+
+
+# ---- a body, and acting on what you see -----------------------------------
+
+def test_the_loop_never_reads_the_truth_it_is_supposed_to_perceive():
+    """A loop that peeks at body.truth is the planner with extra steps. The
+    only legitimate uses are handing an action to the world and checking
+    afterwards whether the goal was met."""
+    import inspect
+
+    from motherbrain import embodied
+
+    import ast
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(embodied.drive)))
+    source = inspect.getsource(embodied.drive).splitlines()
+
+    # Walk the syntax tree rather than the text, so the docstring and the
+    # comments explaining the rule are not mistaken for breaking it.
+    reads = [node for node in ast.walk(tree)
+             if isinstance(node, ast.Attribute) and node.attr == "truth"
+             and isinstance(node.value, ast.Name) and node.value.id == "body"]
+    assert reads, "the test is looking for something that is not there"
+
+    # Two legitimate uses, both outside the perceive-plan-act cycle:
+    #   goal.met(body.truth)      how the loop knows it is finished
+    #   wrong_about(body.truth)   the after-the-fact report of what it misread
+    # Anything else would be the planner reading the answer off the world.
+    allowed = ("goal.met(body.truth)", "wrong_about(body.truth)")
+    for node in reads:
+        line = source[node.lineno - 1]
+        assert any(ok in line for ok in allowed), \
+            f"drive() reads the truth it should be perceiving: {line.strip()}"
+
+
+def test_a_body_with_no_eyes_still_knows_what_it_holds():
+    """Proprioception is a separate sense. Losing sight does not cost it."""
+    from motherbrain import agent, embodied, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    episode = embodied.drive(embodied.Simulated(w), [agent.Goal("on", "a", "b")])
+    assert episode.done
+    assert episode.blind
+    assert "from position only" in episode.steps[1].looked
+
+
+def test_it_acts_once_per_look_rather_than_running_a_whole_plan():
+    """Acting out a plan without looking again is the disembodied thing this
+    module exists to avoid."""
+    from motherbrain import agent, embodied, world as W
+
+    w = W.World(things=(W.Thing("a", size="small", on="floor"),
+                        W.Thing("b", size="large", on="floor")))
+    episode = embodied.drive(embodied.Simulated(w), [agent.Goal("on", "a", "b")])
+    # Two actions were needed, so there are two rounds - each with its own look.
+    assert len(episode.steps) == 2
+    for step in episode.steps:
+        assert step.looked
+        assert len(step.acted.split()) >= 2
+
+
+def test_an_action_the_world_refused_is_not_tried_again():
+    """What happened when you tried is evidence too. A loop that ignores it
+    repeats one impossible move until the budget runs out - which is what
+    this did before the refusal was recorded."""
+    from motherbrain import agent, embodied, world as W
+
+    class Deluded(embodied.Simulated):
+        """Believes the ball is a cube, as the real tower sometimes does."""
+
+        def fixate(self):
+            return []
+
+    w = W.World(things=(W.Thing("a", shape="cube", size="small", held=True),
+                        W.Thing("ball", shape="ball", size="large", on="floor")),
+                held=("a",))
+    body = Deluded(w)
+    # Plan against a believed world where the ball is a cube.
+    believed = W.World(
+        things=(W.Thing("a", shape="cube", size="small", held=True),
+                W.Thing("ball", shape="cube", size="large", on="floor")),
+        held=("a",))
+    episode = embodied.Episode(goal="a on ball")
+
+    plan, _note = agent.plan(believed, [agent.Goal("on", "a", "ball")])
+    assert plan, "the believed world should admit a plan"
+
+    ok, said = body.do(*plan[0])
+    assert not ok and "will not hold anything up" in said
+    episode.refuted.add(plan[0])
+    assert plan[0] in episode.refuted
+
+
+def test_perception_is_only_claimed_where_the_tower_can_name_a_thing():
+    """A plank seen flat-on is a rectangle, which this tower would have to
+    call a square - conflating it with a cube. So it goes unnamed rather
+    than guessed at."""
+    from motherbrain import embodied, world as W
+
+    assert set(embodied.SILHOUETTE) == {"ball", "cube", "pyramid"}
+    assert embodied.UNNAMEABLE == ("plank",)
+
+    w = W.World(things=(W.Thing("shelf", shape="plank", size="large",
+                                on="floor"),))
+    assert embodied.Simulated(w).silhouette("shelf") is None
+
+
+def test_a_lid_hides_things_from_the_camera_too():
+    """`fixate` must not override what the world model already knows about
+    what can be seen."""
+    from motherbrain import embodied, world as W
+
+    w = W.World(things=(W.Thing("box", size="large", on="floor", open=False),
+                        W.Thing("coin", shape="ball", size="small",
+                                inside="box")))
+    looked_at = {t.name for t in embodied.Simulated(w).fixate()}
+    assert "coin" not in looked_at
+    assert "box" in looked_at
+
+
+def test_there_is_no_robot_and_it_says_so():
+    """Four methods is the interface a real body would implement. Nothing
+    implements it, and a module that looked like it drove a servo would be
+    worse than one that admits it does not."""
+    from motherbrain import embodied
+
+    text = embodied.explain()
+    assert "only in simulation" in text
+    assert "nothing implements it" in text
+    assert "22.7%" in text
+
+    for method in ("photograph", "holding", "do", "stop"):
+        assert hasattr(embodied.Hardware, method)
