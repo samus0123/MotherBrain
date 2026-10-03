@@ -108,7 +108,11 @@ class Check:
             lines.append("")
         lines.append(f"  {self.verdict}")
         if self.rolled_back:
-            lines.append(f"  Rolled back: still serving v{self.parent}.")
+            # Past tense: this is a record of what happened then, and it
+            # outlives the decision. "still serving v5" read as present tense
+            # on a screen where v6 was by then the current version.
+            lines.append(f"  Rolled back at the time: v{self.parent} was "
+                         f"served again.")
             lines.append(f"  The patch is kept on disk, with these numbers.")
         return "\n".join(lines)
 
@@ -399,6 +403,15 @@ def report(run_dir, corpus_dir=None, width: int = 68) -> str:
         kept = sum(1 for c in done if not c.rolled_back)
         lines.append(f"{len(done)} guarded patch(es): {kept} kept, "
                      f"{len(done) - kept} rolled back.")
+        try:
+            from motherbrain.patches import PatchStore
+
+            store = PatchStore(run_dir, create=False)
+            lines.append(f"Right now I am serving v{store.current}, and these "
+                         f"are a record of how I got here -")
+            lines.append("not of what is loaded.")
+        except Exception:                      # a report must never fail
+            pass
         lines.append("")
         for check in done[-5:]:
             lines.append(check.render(width))
