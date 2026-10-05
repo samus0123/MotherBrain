@@ -5732,3 +5732,58 @@ def test_there_is_no_robot_and_it_says_so():
 
     for method in ("photograph", "holding", "do", "stop"):
         assert hasattr(embodied.Hardware, method)
+
+
+# ---- a new version keeps what the old one learned -------------------------
+
+def test_a_sense_patch_carries_the_text_lineage_forward():
+    """Growing a sense must not cost the model what it has read.
+
+    A hearing or sight patch saves only the perception tower, so loading it
+    still stacks every earlier text patch underneath. If that payload filter
+    ever widened to the whole state dict, the new version would ship one
+    version's weights in place of the stack and silently lose everything
+    learned from documents - with no error, just a model that has forgotten.
+    """
+    import inspect
+
+    from motherbrain import sight
+
+    for maker in (sight.create_hearing_patch, sight.create_sight_patch):
+        source = inspect.getsource(maker)
+        assert 'startswith("vision.")' in source, (
+            f"{maker.__name__} no longer saves only the tower, so it would "
+            f"replace the text lineage instead of adding to it")
+
+
+def test_recording_a_version_serves_it_immediately():
+    """Learning something and then not using it until a restart is not
+    learning after deployment. The manifest's `current` has to move."""
+    import inspect
+
+    from motherbrain.patches import PatchStore
+
+    source = inspect.getsource(PatchStore.record)
+    assert 'm["current"] = v.version' in source
+    assert 'm["head"]' in source
+
+
+def test_the_lineage_refuses_a_version_that_is_not_larger():
+    """Every version is the previous one plus something. A patch that did
+    not add parameters would be the same model rearranged, and the claim
+    that nothing is ever overwritten would stop being true."""
+    import tempfile
+    import time
+
+    from motherbrain.patches import PatchStore, Version
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = PatchStore(tmp)
+        flat = Version(
+            version=1, patch_id="deadbeef", parent=0, created_at=time.time(),
+            doc_start=0, doc_end=0, n_documents=0, n_chars=0, n_tokens=0,
+            steps=10, rank=0, trainable_params=1, loss_before=1.0,
+            loss_after=0.5, mode="hearing",
+            params_before=1_000, params_after=1_000)
+        with pytest.raises(ValueError, match="must add parameters"):
+            store.record(flat, {})
