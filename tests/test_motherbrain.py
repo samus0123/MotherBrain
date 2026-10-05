@@ -5787,3 +5787,88 @@ def test_the_lineage_refuses_a_version_that_is_not_larger():
             params_before=1_000, params_after=1_000)
         with pytest.raises(ValueError, match="must add parameters"):
             store.record(flat, {})
+
+
+def test_the_quoted_branch_actually_retrieves():
+    """This one only failed when it ran. The router's quoting branch was
+    written against a guessed API and got four things wrong at once:
+    search takes (query, index) in that order, the query is a list of words
+    and not a sentence, corpus_index reads the CORPUS directory rather than
+    the run directory, and a result is a (score, line) pair rather than an
+    object with .text. Arithmetic short-circuits ahead of it, so nothing
+    reached it until a caller asked a question only a quote could answer -
+    and then the screen said "'Index' object is not iterable".
+    """
+    import tempfile
+
+    from motherbrain import neurosymbolic as ns
+    from motherbrain.data import Corpus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        corpus = Corpus(pathlib.Path(tmp) / "corpus")
+        corpus.add_text(
+            "The Antikythera mechanism is an ancient Greek geared device. "
+            "It was recovered from a shipwreck in 1901.", source="test")
+
+        answer = ns.solve("what is the Antikythera mechanism",
+                          corpus_dir=str(corpus.root))
+        assert answer.warrant == ns.QUOTED, \
+            f"expected a quote, got {answer.warrant}: {answer.text!r}"
+        assert "Antikythera" in answer.text
+        held, why = ns.verify(answer)
+        assert held and "quoted" in why
+
+
+def test_the_read_tool_retrieves_too():
+    """agent.standard() carried the identical mistake, written the same way
+    on the same day. Fixing one and not the other would have left the bug
+    alive behind a different door."""
+    import tempfile
+
+    from motherbrain import agent
+    from motherbrain.data import Corpus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        corpus = Corpus(pathlib.Path(tmp) / "corpus")
+        corpus.add_text("A quokka is a small marsupial found in Australia.",
+                        source="test")
+
+        registry = agent.standard(corpus_dir=str(corpus.root))
+        tool = registry.get("read")
+        assert tool is not None, "the read tool was not registered"
+        assert "quokka" in tool.run("what is a quokka").lower()
+
+
+def test_a_gerund_in_the_corpus_can_be_found():
+    """The query side lemmatises with the part of speech a word was tagged
+    as, so "catastrophic forgetting" arrives as ["catastrophic", "forget"].
+    The candidate side only ever applied the NOUN lemma, leaving
+    "forgetting" - so the two never met and every -ing noun in the corpus
+    was unfindable. This is the retrieval the chat uses, so it was the
+    difference between reading something and being able to use it."""
+    from motherbrain import nlp
+
+    line = "The danger here is catastrophic forgetting, which is real."
+    assert nlp.hits(["catastrophic", "forget"], line) == 2
+    assert nlp.relevance(["catastrophic", "forget"], line) > 0.5
+
+    # Both directions: the surface form still matches too.
+    assert nlp.hits(["forgetting"], line) == 1
+    # And a word that is genuinely absent stays absent.
+    assert nlp.hits(["marsupial"], line) == 0
+
+
+def test_a_question_with_no_answer_in_the_corpus_is_not_quoted():
+    """Finding a quote for everything would be worse than finding none:
+    the warrant would stop meaning anything."""
+    import tempfile
+
+    from motherbrain import neurosymbolic as ns
+    from motherbrain.data import Corpus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        corpus = Corpus(pathlib.Path(tmp) / "corpus")
+        corpus.add_text("A quokka is a small marsupial.", source="test")
+        answer = ns.solve("what is the melting point of tungsten",
+                          corpus_dir=str(corpus.root))
+        assert answer.warrant != ns.QUOTED

@@ -368,7 +368,8 @@ class Agent:
 # ---- the standard tools -----------------------------------------------------
 
 def standard(run_dir=None, world: W.World | None = None,
-             model=None, tok=None, device: str = "cpu") -> Registry:
+             model=None, tok=None, device: str = "cpu",
+             corpus_dir=None) -> Registry:
     """The tools MotherBrain has. Exact ones first, the model last.
 
     The order is the whole argument: arithmetic goes to a calculator, facts
@@ -440,13 +441,17 @@ def standard(run_dir=None, world: W.World | None = None,
         handles=lambda goal: 2.0 if aware.introspect(goal) else 0.0,
     ))
 
-    if run_dir is not None:
+    if corpus_dir is not None:
         from . import nlp
 
         def read(goal: str) -> str:
-            index = nlp.corpus_index(run_dir)
-            hits = nlp.search(index, goal, limit=1)
-            return hits[0].text.strip() if hits else ""
+            # search(query, index): content words from analyse(), the
+            # corpus directory - not the run directory, and not a sentence.
+            words = nlp.analyse(goal).keywords
+            if not words:
+                return ""
+            found = nlp.search(words, nlp.corpus_index(corpus_dir), limit=1)
+            return found[0][1].strip() if found else ""
 
         registry.add(Tool(
             name="read",

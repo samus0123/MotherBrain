@@ -352,11 +352,33 @@ def join(items: list[str], conjunction: str = "and") -> str:
 
 # ---- retrieval --------------------------------------------------------------
 
+def _forms(candidate: str) -> set[str]:
+    """Every form a candidate's content words could be looked up by.
+
+    A query is lemmatised with the part of speech it was tagged as, so
+    "catastrophic forgetting" arrives as ["catastrophic", "forget"] - the
+    gerund tagged as a verb. Reducing the candidate as a NOUN only leaves
+    "forgetting", and the two never meet: every -ing noun in the corpus
+    (forgetting, learning, planning, reasoning) was unfindable.
+
+    Holding both forms fixes it from the candidate side, which costs no
+    accuracy: this is set membership, so extra forms cannot dilute a score
+    the way extra query terms would.
+    """
+    out: set[str] = set()
+    for word in tokenise(candidate):
+        if not word[:1].isalnum() or word.lower() in STOP:
+            continue
+        plain = word.lower()
+        out.add(plain)
+        out.add(lemma(plain, "NOUN"))
+        out.add(lemma(plain, "VERB"))
+    return out
+
+
 def hits(query: list[str], candidate: str) -> int:
     """How many of the query's content words the sentence actually contains."""
-    words = {lemma(w.lower(), "NOUN") for w in tokenise(candidate)
-             if w[:1].isalnum() and w.lower() not in STOP}
-    return sum(1 for term in query if term in words)
+    return sum(1 for term in query if term in _forms(candidate))
 
 
 def relevance(query: list[str], candidate: str) -> float:
@@ -369,8 +391,7 @@ def relevance(query: list[str], candidate: str) -> float:
     """
     if not query:
         return 0.0
-    words = {lemma(w.lower(), "NOUN") for w in tokenise(candidate)
-             if w[:1].isalnum() and w.lower() not in STOP}
+    words = _forms(candidate)
     if not words:
         return 0.0
     hits = sum(1 for term in query if term in words)

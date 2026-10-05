@@ -129,7 +129,8 @@ def verify(answer: Answer) -> tuple[bool, str]:
 # ---- the router -------------------------------------------------------------
 
 def solve(question: str, run_dir=None, world=None,
-          model=None, tok=None, device: str = "cpu") -> Answer:
+          model=None, tok=None, device: str = "cpu",
+          corpus_dir=None) -> Answer:
     """Answer a question with the most checkable method that applies.
 
     Exact first, always. The model is asked last and only when nothing else
@@ -172,12 +173,26 @@ def solve(question: str, run_dir=None, world=None,
             return Answer(text=f"There is no way to do that. {note}.",
                           warrant=PLANNED, chain=[note], check=(world, []))
 
-    if run_dir is not None:
+    if corpus_dir is not None:
         from . import nlp
-        hits = nlp.search(nlp.corpus_index(run_dir), question, limit=1)
-        if hits:
-            return Answer(text=hits[0].text.strip(), warrant=QUOTED,
-                          source=getattr(hits[0], "name", "something I read"))
+
+        # Four things to get right here, and the first draft got none of
+        # them: search takes (query, index) in that order, the query is a
+        # list of words rather than a sentence, corpus_index reads the
+        # CORPUS directory and not the run directory, and a result is a
+        # (score, line) pair rather than an object with attributes.
+        # analyse().keywords, not tokenise(): relevance filters stop words
+        # out of the candidate but expects the QUERY to be content words
+        # already, so "what is a retention probe" searched verbatim scores
+        # itself below the floor on its own three filler words. This is the
+        # same query nlp.answer builds - one convention, not a second one.
+        words = nlp.analyse(question).keywords
+        if words:
+            found = nlp.search(words, nlp.corpus_index(corpus_dir), limit=1)
+            if found:
+                score, line = found[0]
+                return Answer(text=line.strip(), warrant=QUOTED,
+                              source=f"something I read (match {score:.2f})")
 
     if model is not None and tok is not None:
         from . import actions
