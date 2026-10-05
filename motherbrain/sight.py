@@ -313,6 +313,62 @@ def measure_senses(model, tok, device, image_size: int, n_eval: int,
     return out
 
 
+#: How much of its own starting margin a sense may lose before a checkpoint
+#: is refused outright. A quarter is generous; below that a sense is not
+#: degraded, it is going out.
+RETENTION_FLOOR = 0.75
+
+
+def retention(senses: dict, before: dict) -> dict:
+    """What share of its ORIGINAL above-chance margin each sense still holds.
+
+    Each sense is measured in its own units, which is the whole point.
+    Accuracy minus chance makes sound and video incomparable: sound carries
+    about 55 points of margin and video under 8, so summing them lets a
+    modest gain in sound pay for the near-total loss of video and still
+    read as progress.
+
+    A ratio fixes that. 1.0 means a sense is exactly where it started, 1.4
+    means it gained 40% on itself, 0.22 means it has thrown away more than
+    three quarters of what it had - and that is 0.22 whether the sense began
+    at 60% or at 8%.
+    """
+    out = {}
+    for name, now in senses.items():
+        was = before.get(name, now)
+        start = was["accuracy"] - was["chance"]
+        gain = now["accuracy"] - now["chance"]
+        # A sense that began at chance has no margin to be a share of, so
+        # judge it on the margin it now has rather than dividing by zero.
+        out[name] = gain / start if start > 0 else 1.0 + max(0.0, gain)
+    return out
+
+
+def quality(senses: dict, before: dict,
+            floor: float = RETENTION_FLOOR) -> tuple:
+    """A sortable verdict on a checkpoint. Bigger is better.
+
+    Two tiers, deliberately, because "best" has to mean something a person
+    would agree with:
+
+    * A checkpoint where every sense still holds `floor` of its own margin
+      is ranked by the total - so genuine all-round progress wins.
+    * One that has let a sense fall below that is ranked only against other
+      such checkpoints, by how well its WEAKEST sense is doing. It can
+      never outrank a checkpoint that kept everything.
+
+    So a tower that sees better by trading away its ability to watch is not
+    the best tower, however good the total looks. And while nothing
+    qualifies, the run still tracks the least damaged thing it has found,
+    which is what an interrupted run should leave behind.
+    """
+    kept = retention(senses, before)
+    worst = min(kept.values())
+    if worst >= floor:
+        return (1, sum(kept.values()), worst)
+    return (0, worst, 0.0)
+
+
 def train_senses(model, tok, device, steps: int = 3000, batch_size: int = 18,
                  lr: float = 4e-4, image_size: int = 64, n_each: int = 1400,
                  n_eval: int = 96, seed: int = 4242, progress_cb=None,
@@ -341,7 +397,7 @@ def train_senses(model, tok, device, steps: int = 3000, batch_size: int = 18,
     generator = torch.Generator().manual_seed(seed)
     model.train()
     losses: list[float] = []
-    best = {"score": -1.0, "state": None, "senses": before}
+    best = {"score": (-1, -1.0, 0.0), "state": None, "senses": before}
 
     for step in range(1, steps + 1):
         pick = torch.randint(len(pool), (batch_size,), generator=generator)
@@ -361,9 +417,11 @@ def train_senses(model, tok, device, steps: int = 3000, batch_size: int = 18,
         if step % eval_every == 0 or step == steps:
             senses = measure_senses(model, tok, device, image_size, n_eval, seed)
             model.train()
-            # Above-chance margin summed across senses: the thing being
-            # trained for, rather than any one sense at the others' expense.
-            score = sum(s["accuracy"] - s["chance"] for s in senses.values())
+            # Each sense judged against where IT started, not against the
+            # others. Summing raw margins let a 6-point gain in sound pay
+            # for video losing three quarters of everything it had, and the
+            # total rose the whole way down.
+            score = quality(senses, before)
             if score > best["score"]:
                 best = {"score": score, "senses": senses,
                         "state": {k: v.detach().cpu().clone()
@@ -381,7 +439,8 @@ def train_senses(model, tok, device, steps: int = 3000, batch_size: int = 18,
                     torch.save(best["state"], staging)
                     staging.replace(target)
             if on_eval:
-                on_eval(step, senses, score, score >= best["score"])
+                on_eval(step, senses, retention(senses, before),
+                        score >= best["score"])
 
     if best["state"] is not None:
         model.vision.load_state_dict(best["state"])
