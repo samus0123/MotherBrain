@@ -49,3 +49,11 @@ runs/*/knowledge.json
 
 # Build metadata, rewritten by every `pip install -e .`
 *.egg-info/
+
+# The in-flight sense-training checkpoint: 23MB, rewritten every 400 steps
+# by a live process, and superseded the moment the version is recorded. A
+# commit of it would capture whichever intermediate the clock landed on.
+# Recover an interrupted run from it with `mb hear --tower <file>`, then
+# the recorded patch is the thing worth keeping.
+**/tower-progress.pt
+**/tower-progress.part

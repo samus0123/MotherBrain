@@ -504,7 +504,7 @@ def cmd_hear(args) -> int:
     def on_eval(step, senses, score, improved):
         parts = "  ".join(f"{k} {s['accuracy']:.1%} (chance {s['chance']:.1%})"
                           for k, s in senses.items())
-        print(f"  at {step}: {parts}{'  <- best so far' if improved else ''}",
+        print(f"  at {step}: {parts}{'  <- best so far, saved' if improved else ''}",
               flush=True)
 
     tower = None
@@ -514,12 +514,17 @@ def cmd_hear(args) -> int:
         tower = torch.load(args.tower, map_location="cpu", weights_only=True)
         print(f"loading an already-trained tower from {args.tower}")
 
+    # On by default: a run this long should never be all-or-nothing. If it
+    # is interrupted, `mb hear --tower <this file>` records a version from
+    # the best checkpoint it reached instead of starting over.
+    checkpoint = args.checkpoint or str(Path(args.run) / "tower-progress.pt")
+
     version, result = create_hearing_patch(
         args.run, device=args.device, steps=args.steps,
         batch_size=args.batch_size, lr=args.lr,
         extra_layers=args.extra_layers, n_each=args.n_each,
         n_eval=args.n_eval, progress_cb=progress, on_eval=on_eval,
-        tower_state=tower)
+        tower_state=tower, checkpoint=checkpoint)
 
     print(f"\nv{version.parent} -> v{version.version}")
     print(f"  deepened   the tower by {args.extra_layers} layer(s)")
@@ -2646,6 +2651,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--n-eval", type=int, default=96,
                    help="held-out examples per sense")
     s.add_argument("--tower", help="a trained tower to load instead of training")
+    s.add_argument("--checkpoint",
+                   help="where to save the best tower as training goes, so an "
+                        "interrupted run is not lost (default "
+                        "<run>/tower-progress.pt). Recover with --tower")
     s.add_argument("--export", help="where to write the merged model")
     s.add_argument("--device", default="auto")
     s.set_defaults(func=cmd_hear)

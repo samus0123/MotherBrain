@@ -3272,7 +3272,7 @@ async def how_i_decide(caller: Caller) -> None:
 
         answer = await asyncio.to_thread(
             ns.solve, question, board.run_dir, None, board.model,
-            board.tok, board.device)
+            board.tok, board.device, board.corpus_dir)
         held, why = await asyncio.to_thread(ns.verify, answer)
 
         await caller.line("")

@@ -5732,3 +5732,166 @@ def test_there_is_no_robot_and_it_says_so():
 
     for method in ("photograph", "holding", "do", "stop"):
         assert hasattr(embodied.Hardware, method)
+
+
+# ---- a new version keeps what the old one learned -------------------------
+
+def test_a_sense_patch_carries_the_text_lineage_forward():
+    """Growing a sense must not cost the model what it has read.
+
+    A hearing or sight patch saves only the perception tower, so loading it
+    still stacks every earlier text patch underneath. If that payload filter
+    ever widened to the whole state dict, the new version would ship one
+    version's weights in place of the stack and silently lose everything
+    learned from documents - with no error, just a model that has forgotten.
+    """
+    import inspect
+
+    from motherbrain import sight
+
+    for maker in (sight.create_hearing_patch, sight.create_sight_patch):
+        source = inspect.getsource(maker)
+        assert 'startswith("vision.")' in source, (
+            f"{maker.__name__} no longer saves only the tower, so it would "
+            f"replace the text lineage instead of adding to it")
+
+
+def test_recording_a_version_serves_it_immediately():
+    """Learning something and then not using it until a restart is not
+    learning after deployment. The manifest's `current` has to move."""
+    import inspect
+
+    from motherbrain.patches import PatchStore
+
+    source = inspect.getsource(PatchStore.record)
+    assert 'm["current"] = v.version' in source
+    assert 'm["head"]' in source
+
+
+def test_the_lineage_refuses_a_version_that_is_not_larger():
+    """Every version is the previous one plus something. A patch that did
+    not add parameters would be the same model rearranged, and the claim
+    that nothing is ever overwritten would stop being true."""
+    import tempfile
+    import time
+
+    from motherbrain.patches import PatchStore, Version
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = PatchStore(tmp)
+        flat = Version(
+            version=1, patch_id="deadbeef", parent=0, created_at=time.time(),
+            doc_start=0, doc_end=0, n_documents=0, n_chars=0, n_tokens=0,
+            steps=10, rank=0, trainable_params=1, loss_before=1.0,
+            loss_after=0.5, mode="hearing",
+            params_before=1_000, params_after=1_000)
+        with pytest.raises(ValueError, match="must add parameters"):
+            store.record(flat, {})
+
+
+def test_the_quoted_branch_actually_retrieves():
+    """This one only failed when it ran. The router's quoting branch was
+    written against a guessed API and got four things wrong at once:
+    search takes (query, index) in that order, the query is a list of words
+    and not a sentence, corpus_index reads the CORPUS directory rather than
+    the run directory, and a result is a (score, line) pair rather than an
+    object with .text. Arithmetic short-circuits ahead of it, so nothing
+    reached it until a caller asked a question only a quote could answer -
+    and then the screen said "'Index' object is not iterable".
+    """
+    import tempfile
+
+    from motherbrain import neurosymbolic as ns
+    from motherbrain.data import Corpus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        corpus = Corpus(pathlib.Path(tmp) / "corpus")
+        corpus.add_text(
+            "The Antikythera mechanism is an ancient Greek geared device. "
+            "It was recovered from a shipwreck in 1901.", source="test")
+
+        answer = ns.solve("what is the Antikythera mechanism",
+                          corpus_dir=str(corpus.root))
+        assert answer.warrant == ns.QUOTED, \
+            f"expected a quote, got {answer.warrant}: {answer.text!r}"
+        assert "Antikythera" in answer.text
+        held, why = ns.verify(answer)
+        assert held and "quoted" in why
+
+
+def test_the_read_tool_retrieves_too():
+    """agent.standard() carried the identical mistake, written the same way
+    on the same day. Fixing one and not the other would have left the bug
+    alive behind a different door."""
+    import tempfile
+
+    from motherbrain import agent
+    from motherbrain.data import Corpus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        corpus = Corpus(pathlib.Path(tmp) / "corpus")
+        corpus.add_text("A quokka is a small marsupial found in Australia.",
+                        source="test")
+
+        registry = agent.standard(corpus_dir=str(corpus.root))
+        tool = registry.get("read")
+        assert tool is not None, "the read tool was not registered"
+        assert "quokka" in tool.run("what is a quokka").lower()
+
+
+def test_a_gerund_in_the_corpus_can_be_found():
+    """The query side lemmatises with the part of speech a word was tagged
+    as, so "catastrophic forgetting" arrives as ["catastrophic", "forget"].
+    The candidate side only ever applied the NOUN lemma, leaving
+    "forgetting" - so the two never met and every -ing noun in the corpus
+    was unfindable. This is the retrieval the chat uses, so it was the
+    difference between reading something and being able to use it."""
+    from motherbrain import nlp
+
+    line = "The danger here is catastrophic forgetting, which is real."
+    assert nlp.hits(["catastrophic", "forget"], line) == 2
+    assert nlp.relevance(["catastrophic", "forget"], line) > 0.5
+
+    # Both directions: the surface form still matches too.
+    assert nlp.hits(["forgetting"], line) == 1
+    # And a word that is genuinely absent stays absent.
+    assert nlp.hits(["marsupial"], line) == 0
+
+
+def test_a_question_with_no_answer_in_the_corpus_is_not_quoted():
+    """Finding a quote for everything would be worse than finding none:
+    the warrant would stop meaning anything."""
+    import tempfile
+
+    from motherbrain import neurosymbolic as ns
+    from motherbrain.data import Corpus
+
+    with tempfile.TemporaryDirectory() as tmp:
+        corpus = Corpus(pathlib.Path(tmp) / "corpus")
+        corpus.add_text("A quokka is a small marsupial.", source="test")
+        answer = ns.solve("what is the melting point of tungsten",
+                          corpus_dir=str(corpus.root))
+        assert answer.warrant != ns.QUOTED
+
+
+def test_sense_training_saves_its_best_as_it_goes():
+    """A long run must not be all-or-nothing. Nothing reaches disk until the
+    version is recorded at the very end, so a timeout, a container reset or
+    a Ctrl-C discarded the whole run - which is exactly what happened to a
+    2000-step run at the 30-minute mark."""
+    import inspect
+
+    from motherbrain import sight
+
+    source = inspect.getsource(sight.train_senses)
+    assert "checkpoint" in inspect.signature(sight.train_senses).parameters
+    assert "staging.replace(target)" in source, \
+        "the checkpoint must be written via a temporary file and replaced, " \
+        "so a kill mid-write leaves the previous best rather than a stub"
+
+    # And the recovery path exists: a saved tower can be recorded as a
+    # version without retraining.
+    assert "tower_state" in inspect.signature(
+        sight.create_hearing_patch).parameters
+    assert "checkpoint" in inspect.signature(
+        sight.create_hearing_patch).parameters
