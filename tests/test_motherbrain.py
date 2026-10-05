@@ -5872,3 +5872,26 @@ def test_a_question_with_no_answer_in_the_corpus_is_not_quoted():
         answer = ns.solve("what is the melting point of tungsten",
                           corpus_dir=str(corpus.root))
         assert answer.warrant != ns.QUOTED
+
+
+def test_sense_training_saves_its_best_as_it_goes():
+    """A long run must not be all-or-nothing. Nothing reaches disk until the
+    version is recorded at the very end, so a timeout, a container reset or
+    a Ctrl-C discarded the whole run - which is exactly what happened to a
+    2000-step run at the 30-minute mark."""
+    import inspect
+
+    from motherbrain import sight
+
+    source = inspect.getsource(sight.train_senses)
+    assert "checkpoint" in inspect.signature(sight.train_senses).parameters
+    assert "staging.replace(target)" in source, \
+        "the checkpoint must be written via a temporary file and replaced, " \
+        "so a kill mid-write leaves the previous best rather than a stub"
+
+    # And the recovery path exists: a saved tower can be recorded as a
+    # version without retraining.
+    assert "tower_state" in inspect.signature(
+        sight.create_hearing_patch).parameters
+    assert "checkpoint" in inspect.signature(
+        sight.create_hearing_patch).parameters

@@ -14,6 +14,8 @@ tower, because nothing else about the model changed.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 
 from motherbrain.imagedata import COLOURS, SHAPES, caption, pairs
@@ -314,7 +316,7 @@ def measure_senses(model, tok, device, image_size: int, n_eval: int,
 def train_senses(model, tok, device, steps: int = 3000, batch_size: int = 18,
                  lr: float = 4e-4, image_size: int = 64, n_each: int = 1400,
                  n_eval: int = 96, seed: int = 4242, progress_cb=None,
-                 eval_every: int = 400, on_eval=None) -> dict:
+                 eval_every: int = 400, on_eval=None, checkpoint=None) -> dict:
     """Teach one tower all three senses at once.
 
     Interleaved rather than one sense after another: trained in sequence, the
@@ -366,6 +368,18 @@ def train_senses(model, tok, device, steps: int = 3000, batch_size: int = 18,
                 best = {"score": score, "senses": senses,
                         "state": {k: v.detach().cpu().clone()
                                   for k, v in model.vision.state_dict().items()}}
+                if checkpoint is not None:
+                    # A long run is otherwise all-or-nothing: nothing reaches
+                    # disk until the version is recorded at the very end, so
+                    # an hour of training is lost to a timeout, a reset or a
+                    # Ctrl-C. Written via a temporary file and replaced, so a
+                    # process killed mid-write leaves the previous best
+                    # intact rather than a truncated one.
+                    target = Path(checkpoint)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    staging = target.with_suffix(".part")
+                    torch.save(best["state"], staging)
+                    staging.replace(target)
             if on_eval:
                 on_eval(step, senses, score, score >= best["score"])
 
@@ -387,7 +401,8 @@ def create_hearing_patch(run_dir, device: str = "auto", steps: int = 4000,
                          extra_layers: int = 2, n_each: int = 1400,
                          n_eval: int = 96, note: str = "hearing",
                          progress_cb=None, on_eval=None,
-                         tower_state: dict | None = None):
+                         tower_state: dict | None = None,
+                         checkpoint=None):
     """Teach the tower sound and video as well, and record it as the next version.
 
     The tower is deepened rather than retrained in place. A version that
@@ -430,7 +445,7 @@ def create_hearing_patch(run_dir, device: str = "auto", steps: int = 4000,
                               batch_size=batch_size, lr=lr,
                               image_size=image_size, n_each=n_each,
                               n_eval=n_eval, progress_cb=progress_cb,
-                              on_eval=on_eval)
+                              on_eval=on_eval, checkpoint=checkpoint)
 
     payload = {name: tensor.detach().cpu().clone()
                for name, tensor in model.state_dict().items()
