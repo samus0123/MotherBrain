@@ -5895,3 +5895,93 @@ def test_sense_training_saves_its_best_as_it_goes():
         sight.create_hearing_patch).parameters
     assert "checkpoint" in inspect.signature(
         sight.create_hearing_patch).parameters
+
+
+# ---- what "best" means when senses are not comparable --------------------
+
+def _senses(sight, sound, video):
+    return {"sight": {"accuracy": sight, "chance": 0.031},
+            "sound": {"accuracy": sound, "chance": 0.028},
+            "video": {"accuracy": video, "chance": 0.005}}
+
+
+#: What v6 actually had, and what each eval of the +2000 step run measured.
+V6_SENSES = _senses(0.227, 0.633, 0.078)
+RUN = {400: _senses(0.219, 0.479, 0.052),
+       800: _senses(0.198, 0.573, 0.021),
+       1200: _senses(0.260, 0.583, 0.021),
+       1600: _senses(0.312, 0.573, 0.021),
+       2000: _senses(0.312, 0.604, 0.083)}
+
+
+def test_each_sense_is_measured_in_its_own_units():
+    """Accuracy minus chance makes senses incomparable: sound carries about
+    55 points of margin and video under 8. A ratio to a sense's own
+    starting margin does not care how big that margin was."""
+    from motherbrain.sight import retention
+
+    kept = retention(RUN[1600], V6_SENSES)
+    assert abs(kept["video"] - 0.22) < 0.01
+    assert abs(kept["sight"] - 1.43) < 0.01    # gained 43% on itself
+    assert abs(kept["sound"] - 0.90) < 0.01
+
+    # Halving a big margin and halving a small one score the same.
+    big = retention(_senses(0.227, 0.3305, 0.078), V6_SENSES)["sound"]
+    small = retention(_senses(0.227, 0.633, 0.0415), V6_SENSES)["video"]
+    assert abs(big - 0.5) < 0.02 and abs(small - 0.5) < 0.02
+
+
+def test_a_collapsed_sense_cannot_be_paid_for_with_another():
+    """The bug this replaces. At step 1600 the old rule saved "best so far"
+    while video held 2 of 96 clips - not reliably distinguishable from
+    guessing - because sight and sound together outvoted it."""
+    from motherbrain.sight import quality
+
+    old_rule = {step: sum(s["accuracy"] - s["chance"] for s in senses.values())
+                for step, senses in RUN.items()}
+    assert old_rule[1600] > old_rule[400], \
+        "the old rule really did rank the collapse above the early checkpoint"
+
+    collapsed = quality(RUN[1600], V6_SENSES)
+    intact = quality(RUN[2000], V6_SENSES)
+    assert collapsed[0] == 0, "a collapsed sense must not qualify"
+    assert intact[0] == 1
+    assert intact > collapsed
+
+    # And it cannot be bought off with an enormous gain elsewhere either.
+    brilliant_but_blind = quality(_senses(0.95, 0.95, 0.021), V6_SENSES)
+    assert brilliant_but_blind[0] == 0
+    assert intact > brilliant_but_blind
+
+
+def test_the_whole_run_is_scored_the_way_a_person_would():
+    """Replayed over the real evals: the two defensible checkpoints are
+    saved and the three that threw video away are refused."""
+    from motherbrain.sight import quality
+
+    best, saved = (-1, -1.0, 0.0), []
+    for step in sorted(RUN):
+        score = quality(RUN[step], V6_SENSES)
+        if score > best:
+            best, _ = score, saved.append(step)
+
+    assert saved == [400, 2000], f"saved {saved}"
+
+
+def test_while_nothing_qualifies_the_least_damaged_is_kept():
+    """An interrupted run has to leave something behind, and it should be
+    the tower that harmed the weakest sense least - not the one that looked
+    best on a total."""
+    from motherbrain.sight import quality
+
+    assert quality(RUN[400], V6_SENSES) > quality(RUN[800], V6_SENSES)
+    assert quality(RUN[400], V6_SENSES)[0] == 0
+
+
+def test_a_sense_that_started_at_chance_is_not_divided_by_zero():
+    from motherbrain.sight import retention
+
+    flat = _senses(0.031, 0.633, 0.078)        # sight exactly at chance
+    kept = retention(_senses(0.20, 0.633, 0.078), flat)
+    assert kept["sight"] > 1.0                 # any margin at all is a gain
+    assert kept["sound"] == pytest.approx(1.0)

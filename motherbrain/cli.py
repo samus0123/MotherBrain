@@ -501,10 +501,17 @@ def cmd_hear(args) -> int:
             print(f"  step {info['step']}/{info['total']}  "
                   f"loss {info['loss']:.4f}", flush=True)
 
-    def on_eval(step, senses, score, improved):
-        parts = "  ".join(f"{k} {s['accuracy']:.1%} (chance {s['chance']:.1%})"
-                          for k, s in senses.items())
-        print(f"  at {step}: {parts}{'  <- best so far, saved' if improved else ''}",
+    def on_eval(step, senses, kept, improved):
+        parts = "  ".join(f"{k} {s['accuracy']:.1%}" for k, s in senses.items())
+        # The share of its own starting margin each sense still holds. A
+        # checkpoint is refused on its weakest sense, so that number has to
+        # be on screen or a refusal looks arbitrary.
+        held = "  ".join(f"{k} {v:.2f}" for k, v in kept.items())
+        weakest = min(kept, key=kept.get)
+        print(f"  at {step}: {parts}", flush=True)
+        print(f"            keeps of its own margin: {held}"
+              f"   weakest {weakest} {kept[weakest]:.2f}"
+              f"{'   <- best so far, saved' if improved else '   (refused)'}",
               flush=True)
 
     tower = None
