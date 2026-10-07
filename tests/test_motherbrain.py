@@ -6028,14 +6028,17 @@ def test_the_windows_client_can_actually_type():
                                   args=(line, session), daemon=True)
         worker.start()
 
-        board.settimeout(5.0)
+        # Patient rather than one-shot: under a loaded machine the keyboard
+        # thread can take a moment to start, and breaking on the first quiet
+        # read made this flaky in the full suite while passing alone.
+        board.settimeout(0.5)
         got = b""
-        deadline = time.time() + 5.0
+        deadline = time.time() + 15.0
         while b"HELLO" not in got and time.time() < deadline:
             try:
                 got += board.recv(4096)
-            except socket.timeout:
-                break
+            except (socket.timeout, TimeoutError):
+                continue
     finally:
         if saved is None:
             sys.modules.pop("msvcrt", None)

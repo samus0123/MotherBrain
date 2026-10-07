@@ -47,25 +47,37 @@ if not defined PS (
   pause
   exit /b 1
 )
+set "LOG=%~dp0START-log.txt"
 %PS% -ExecutionPolicy Bypass -NoProfile -File "%~dp0scripts\install.ps1"
-if errorlevel 1 (
-  echo.
-  echo The install failed. The output above says why.
-  pause
-  exit /b 1
-)
+if errorlevel 1 goto :broken
 echo.
 
 :run
-if not exist "%MB%" (
-  echo The install finished but %MB% is missing.
-  pause
-  exit /b 1
-)
+if not exist "%MB%" goto :broken
 
 rem --- start it ------------------------------------------------------------
 "%MB%" start %*
-
-rem A double-clicked window vanishes on exit and takes the error with it.
-if errorlevel 1 pause
+if errorlevel 1 goto :broken
 endlocal
+exit /b 0
+
+:broken
+rem "It did not work" is not something anyone can act on, and asking for the
+rem error a second time wastes a day each round. So a failure writes down
+rem everything that could have caused it, into one file next to this script.
+echo.
+echo ------------------------------------------------------------------
+echo Something went wrong. Writing a diagnosis ...
+if not defined LOG set "LOG=%~dp0START-log.txt"
+if not defined PS set "PS=powershell"
+%PS% -ExecutionPolicy Bypass -NoProfile -File "%~dp0scripts\doctor.ps1" > "%LOG%" 2>&1
+echo.
+echo Wrote: %LOG%
+echo.
+echo Send that file and the problem can be fixed properly. It lists your
+echo Windows and Python versions, which files are present, whether the
+echo dependencies installed, and what the model says when it loads.
+echo ------------------------------------------------------------------
+pause
+endlocal
+exit /b 1

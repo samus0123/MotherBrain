@@ -19,12 +19,25 @@ foreach ($f in @("motherbrain\cli.py", "models\motherbrain-base.pt",
     if (Test-Path $f) { Write-Host "  ok      $f" } else { Write-Host "  MISSING $f" }
 }
 
+Write-Host "`n--- windows ---"
+try {
+    $os = Get-CimInstance Win32_OperatingSystem
+    Write-Host "  $($os.Caption) build $($os.BuildNumber) $($os.OSArchitecture)"
+} catch { Write-Host "  could not read the OS version" }
+Write-Host "  powershell  $($PSVersionTable.PSVersion)"
+
 Write-Host "`n--- python ---"
 foreach ($c in @("py", "python", "python3")) {
     $exe = Get-Command $c -ErrorAction SilentlyContinue
     if ($exe) {
         $v = & $c -c "import sys;print('%d.%d' % sys.version_info[:2])" 2>$null
-        Write-Host "  $c -> $($exe.Source) $v"
+        # A Store placeholder answers Get-Command and runs nothing, so say
+        # which one this is rather than listing a path and leaving it there.
+        $store = if ($exe.Source -like "*WindowsApps*") { "  <- Microsoft Store placeholder, NOT Python" } else { "" }
+        $works = $null
+        try { $works = & cmd /c "$c -c ""import sys; print(sys.version.split()[0])"" 2>nul" } catch { }
+        if ($works) { Write-Host "  $c -> $($exe.Source)  runs $works" }
+        else { Write-Host "  $c -> $($exe.Source)  DOES NOT RUN$store" }
     }
 }
 

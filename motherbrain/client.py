@@ -231,6 +231,7 @@ def _pump_windows(sock: socket.socket, session: Session) -> None:
     nothing and dies with the process. Everything typed goes straight down
     the socket, so the client is usable rather than merely watchable.
     """
+    import select
     import threading
 
     try:
@@ -261,14 +262,21 @@ def _pump_windows(sock: socket.socket, session: Session) -> None:
     if msvcrt is not None:
         threading.Thread(target=keyboard, daemon=True).start()
 
-    # A timeout, so hanging up from the keyboard thread is noticed rather
-    # than waiting for the board to say something first.
-    sock.settimeout(0.3)
+    # select() rather than a socket timeout, because the keyboard thread
+    # sends on this same socket: a timeout set for reading also applies to
+    # sendall, and a transient send timeout under load would hang up a
+    # perfectly good call. select only polls, so sends stay blocking.
+    # Polling at all is just so a hang-up from the keyboard is noticed
+    # without waiting for the board to speak first.
     while not stop.is_set():
         try:
-            chunk = sock.recv(4096)
-        except TimeoutError:
+            ready, _w, _x = select.select([sock], [], [], 0.3)
+        except OSError:
+            return
+        if not ready:
             continue
+        try:
+            chunk = sock.recv(4096)
         except OSError:
             return
         if not chunk:
