@@ -192,21 +192,15 @@ def _pump(sock: socket.socket, session: Session) -> None:
     try:
         picker.register(sys.stdin, selectors.EVENT_READ, "keyboard")
     except (ValueError, OSError):
-        # No selectable stdin - a pipe on Windows. Fall back to blocking
-        # reads on the socket only, which is enough to watch a board.
+        # select() on Windows accepts sockets and nothing else, so stdin
+        # cannot be waited on here. This used to fall through to a loop
+        # that read the socket and never looked at the keyboard: the board
+        # drew its login screen and then swallowed every key, which reads
+        # as a hang rather than as "typing is not implemented".
         picker = None
 
     if picker is None:
-        while True:
-            chunk = sock.recv(4096)
-            if not chunk:
-                return
-            text, reply = session.feed(chunk)
-            if reply:
-                sock.sendall(reply)
-            if text:
-                sys.stdout.write(text)
-                sys.stdout.flush()
+        return _pump_windows(sock, session)
 
     while True:
         for key, _mask in picker.select():
@@ -227,6 +221,64 @@ def _pump(sock: socket.socket, session: Session) -> None:
                 if b"\x1d" in data:                   # Ctrl-] hangs up
                     return
                 sock.sendall(data.replace(bytes([IAC]), bytes([IAC, IAC])))
+
+
+def _pump_windows(sock: socket.socket, session: Session) -> None:
+    """Both directions on Windows, where stdin cannot be selected on.
+
+    The keyboard gets its own thread because the Windows console API only
+    offers a blocking read, and a daemon thread blocked on a keypress costs
+    nothing and dies with the process. Everything typed goes straight down
+    the socket, so the client is usable rather than merely watchable.
+    """
+    import threading
+
+    try:
+        import msvcrt
+    except ImportError:                 # not Windows after all: watch only
+        msvcrt = None
+
+    stop = threading.Event()
+
+    def keyboard() -> None:
+        while not stop.is_set():
+            try:
+                char = msvcrt.getwch()
+            except Exception:           # console closed under us
+                return
+            if char == "\x1d":          # Ctrl-] hangs up, as on Unix
+                stop.set()
+                return
+            if char == "\r":            # Enter arrives bare; the board
+                char = "\r\n"            # expects the pair
+            try:
+                data = char.encode("utf-8", "replace")
+                sock.sendall(data.replace(bytes([IAC]), bytes([IAC, IAC])))
+            except OSError:
+                stop.set()
+                return
+
+    if msvcrt is not None:
+        threading.Thread(target=keyboard, daemon=True).start()
+
+    # A timeout, so hanging up from the keyboard thread is noticed rather
+    # than waiting for the board to say something first.
+    sock.settimeout(0.3)
+    while not stop.is_set():
+        try:
+            chunk = sock.recv(4096)
+        except TimeoutError:
+            continue
+        except OSError:
+            return
+        if not chunk:
+            return
+        text, reply = session.feed(chunk)
+        if reply:
+            sock.sendall(reply)
+        if text:
+            sys.stdout.write(text)
+            sys.stdout.flush()
 
 
 def _terminal_size() -> tuple[int, int]:
