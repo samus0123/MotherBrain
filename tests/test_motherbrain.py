@@ -5985,3 +5985,124 @@ def test_a_sense_that_started_at_chance_is_not_divided_by_zero():
     kept = retention(_senses(0.20, 0.633, 0.078), flat)
     assert kept["sight"] > 1.0                 # any margin at all is a gain
     assert kept["sound"] == pytest.approx(1.0)
+
+
+# ---- the client on Windows -------------------------------------------------
+
+def test_the_windows_client_can_actually_type():
+    """select() on Windows accepts sockets and nothing else, so stdin cannot
+    be waited on. The old fallback read the socket and never looked at the
+    keyboard: the board drew its login screen and swallowed every key, which
+    reads as a hang rather than as "typing is not implemented".
+
+    Runs the Windows path here by standing in for the console API, so the
+    half that cannot be exercised on Linux is still covered.
+    """
+    import re
+    import socket
+    import sys
+    import threading
+    import time
+    import types
+
+    from motherbrain import client
+
+    # A socket pair stands in for the board: one end is the "server".
+    board, line = socket.socketpair()
+    typed = list("HELLO\r")
+
+    fake = types.ModuleType("msvcrt")
+
+    def getwch():
+        while True:
+            if typed:
+                return typed.pop(0)
+            time.sleep(0.02)
+
+    fake.getwch = getwch
+    saved = sys.modules.get("msvcrt")
+    sys.modules["msvcrt"] = fake
+    try:
+        session = client.Session(columns=80, rows=24)
+        worker = threading.Thread(target=client._pump_windows,
+                                  args=(line, session), daemon=True)
+        worker.start()
+
+        # Patient rather than one-shot: under a loaded machine the keyboard
+        # thread can take a moment to start, and breaking on the first quiet
+        # read made this flaky in the full suite while passing alone.
+        board.settimeout(0.5)
+        got = b""
+        deadline = time.time() + 15.0
+        while b"HELLO" not in got and time.time() < deadline:
+            try:
+                got += board.recv(4096)
+            except (socket.timeout, TimeoutError):
+                continue
+    finally:
+        if saved is None:
+            sys.modules.pop("msvcrt", None)
+        else:
+            sys.modules["msvcrt"] = saved
+        board.close()
+        line.close()
+
+    assert b"HELLO" in got, f"nothing typed reached the board: {got!r}"
+    # Enter has to arrive as the pair the board expects, not a bare CR.
+    assert b"\r\n" in got
+
+
+def test_the_windows_client_hangs_up_on_ctrl_bracket():
+    """Ctrl-] is the one key that must not be sent to the board."""
+    import socket
+    import sys
+    import threading
+    import time
+    import types
+
+    from motherbrain import client
+
+    board, line = socket.socketpair()
+    typed = ["\x1d"]
+
+    fake = types.ModuleType("msvcrt")
+
+    def getwch():
+        while True:
+            if typed:
+                return typed.pop(0)
+            time.sleep(0.02)
+
+    fake.getwch = getwch
+    saved = sys.modules.get("msvcrt")
+    sys.modules["msvcrt"] = fake
+    try:
+        session = client.Session(columns=80, rows=24)
+        worker = threading.Thread(target=client._pump_windows,
+                                  args=(line, session), daemon=True)
+        worker.start()
+        worker.join(4.0)
+        assert not worker.is_alive(), "Ctrl-] did not end the call"
+        board.settimeout(0.5)
+        try:
+            assert b"\x1d" not in board.recv(64)
+        except socket.timeout:
+            pass                          # nothing sent at all is also right
+    finally:
+        if saved is None:
+            sys.modules.pop("msvcrt", None)
+        else:
+            sys.modules["msvcrt"] = saved
+        board.close()
+        line.close()
+
+
+def test_the_unix_client_still_selects_on_stdin():
+    """The fix must not quietly demote everyone else to the polling path."""
+    import inspect
+
+    from motherbrain import client
+
+    source = inspect.getsource(client._pump)
+    assert "picker.select()" in source
+    assert "_pump_windows" in source
